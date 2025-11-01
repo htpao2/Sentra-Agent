@@ -70,6 +70,9 @@ const CONFIG = {
   messageMergeDelay: parseInt(process.env.MESSAGE_MERGE_DELAY || '5000'),
   enableMessageMerge: process.env.ENABLE_MESSAGE_MERGE !== 'false',
   
+  // 消息队列时效配置
+  messageMaxAge: parseInt(process.env.MESSAGE_MAX_AGE || '300000'), // 默认5分钟（300000ms）
+  
   // 全局历史记录配置
   globalHistoryLimit: parseInt(process.env.GLOBAL_HISTORY_LIMIT || '100'),
   enableGlobalHistory: process.env.ENABLE_GLOBAL_HISTORY !== 'false',
@@ -112,6 +115,7 @@ console.log('回复并发数:', CONFIG.replyConcurrency);
 console.log('回复冷却时间:', CONFIG.replyCooldown + 'ms');
 console.log('失败跳过:', CONFIG.skipOnGenerationFail ? '是' : '否');
 console.log('消息合并:', CONFIG.enableMessageMerge ? `开启(${CONFIG.messageMergeDelay}ms)` : '关闭');
+console.log('消息时效:', `${CONFIG.messageMaxAge / 1000}秒`);
 console.log('全局历史:', CONFIG.enableGlobalHistory ? `开启(${CONFIG.globalHistoryLimit}条)` : '关闭');
 console.log('工具历史:', CONFIG.enableToolSummary ? `开启(${CONFIG.toolSummaryLimit}条)` : '关闭');
 console.log('测试用户ID:', CONFIG.testUserId || '所有用户');
@@ -474,12 +478,16 @@ function addMessageToQueue(conversationId, msg) {
   }
   
   const queue = messageQueues.get(conversationId);
+  
+  // 确保消息有有效的时间戳（用于过期过滤）
+  const messageTime = msg.time ? (typeof msg.time === 'number' ? msg.time : Date.now()) : Date.now();
+  
   queue.messages.push({
     text: msg.text,
     summary: msg.summary,
     sender_id: msg.sender_id,
     sender_name: msg.sender_name,
-    time: msg.time,
+    time: messageTime, // 使用规范化的时间戳
     time_str: msg.time_str
   });
   
@@ -492,9 +500,9 @@ function addMessageToQueue(conversationId, msg) {
 }
 
 /**
- * 获取并清空消息队列
+ * 获取并清空消息队列（仅返回未过期的消息）
  * @param {string} conversationId - 会话ID
- * @returns {Array} 队列中的消息
+ * @returns {Array} 队列中的有效消息
  */
 function getAndClearQueue(conversationId) {
   if (!messageQueues.has(conversationId)) {
@@ -502,11 +510,25 @@ function getAndClearQueue(conversationId) {
   }
   
   const queue = messageQueues.get(conversationId);
-  const messages = [...queue.messages];
-  queue.messages = [];
-  queue.lastProcessTime = Date.now();
+  const now = Date.now();
   
-  return messages;
+  // 过滤掉过期的消息（超过配置的时效）
+  const validMessages = queue.messages.filter(msg => {
+    const messageAge = now - (msg.time || now);
+    return messageAge <= CONFIG.messageMaxAge;
+  });
+  
+  // 统计过滤情况
+  const expiredCount = queue.messages.length - validMessages.length;
+  if (expiredCount > 0) {
+    console.log(`[队列过滤] ${conversationId} 过滤掉 ${expiredCount} 条过期消息（>${CONFIG.messageMaxAge / 1000}秒）`);
+  }
+  
+  queue.messages = [];
+  queue.lastProcessTime = now;
+  
+  console.log(`[队列清空] ${conversationId} 返回 ${validMessages.length} 条有效消息`);
+  return validMessages;
 }
 
 /**
@@ -873,33 +895,14 @@ function buildMessageParts(segment) {
 
 /**
  * 获取可引用的消息 ID（用于回复功能）
- * @param {Object} msg - 消息对象
+ * 直接引用当前需要回复的消息，而不是历史记录中的旧消息
+ * @param {Object} msg - 当前消息对象（应该是最新的需要回复的消息）
  * @returns {number|null} 消息 ID
  */
 function getReplyableMessageId(msg) {
-  const conversationKey = msg.type === 'private' 
-    ? msg.sender_id 
-    : `group_${msg.group_id}_${msg.sender_id}`;
-  
-  const history = conversationHistory.get(conversationKey) || { 
-    userMessages: [], 
-    botMessages: [] 
-  };
-  
-  // 优先引用用户的最新消息（配置概率）
-  if (history.userMessages.length > 0 && Math.random() < CONFIG.preferUserMessageProbability) {
-    const lastUserMsg = history.userMessages[history.userMessages.length - 1];
-    return lastUserMsg.message_id;
-  }
-  
-  // 30%概率引用机器人自己的消息
-  if (history.botMessages.length > 0) {
-    const lastBotMsg = history.botMessages[history.botMessages.length - 1];
-    return lastBotMsg.message_id;
-  }
-  
-  // 兜底：引用当前用户消息
-  return msg.message_id;
+  // 直接返回当前消息的ID，这样就能正确引用最近的消息
+  // 而不是从历史记录中查找可能已经过时的消息
+  return msg.message_id || null;
 }
 
 /**
@@ -1221,8 +1224,14 @@ async function processReply(conversationId, mergedMessages, lastMsg) {
   // 将回复任务添加到并发控制队列
   await replyQueueManager.addTask(async () => {
     try {
-      // 获取并清空队列
+      // 获取并清空队列（仅保留未过期的消息）
       const allMessages = getAndClearQueue(conversationId);
+      
+      // 如果所有消息都已过期，跳过本次回复
+      if (allMessages.length === 0) {
+        console.warn('[队列处理] 所有消息已过期，跳过本次回复');
+        return;
+      }
       
       // 构建输入内容 - 考虑合并的消息
       let userInput;
