@@ -6,6 +6,8 @@ import path from "path";
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
 import dotenv from 'dotenv';
+import os from 'os';
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,6 +91,19 @@ const CONFIG = {
   // 系统提示词配置
   systemPromptFile: process.env.SYSTEM_PROMPT_FILE || './1.txt',
   
+  // 路径解析配置（WSL / Docker / 自定义映射）
+  pathResolve: {
+    enableDebug: process.env.PATH_RESOLVE_DEBUG === 'true',
+    // 形如： 'C:\\Users\\me->/mnt/c/Users/me;D:\\Data->/host_mnt/d/Data'
+    pathMappings: (process.env.PATH_MAPPINGS || '')
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean),
+    wslDefaultDistro: process.env.WSL_DEFAULT_DISTRO || '',
+    dockerHostMntPrefix: process.env.DOCKER_HOST_MNT_PREFIX || '/host_mnt',
+    wslWindowsMntPrefix: process.env.WSL_WINDOWS_MNT_PREFIX || '/mnt'
+  },
+  
   // 阶段提示词配置
   overlays: {
     plan: process.env.OVERLAY_PLAN || '规划需成本优先；若无法直接完成，应先做诊断/信息收集。',
@@ -116,6 +131,7 @@ console.log('回复冷却时间:', CONFIG.replyCooldown + 'ms');
 console.log('失败跳过:', CONFIG.skipOnGenerationFail ? '是' : '否');
 console.log('消息合并:', CONFIG.enableMessageMerge ? `开启(${CONFIG.messageMergeDelay}ms)` : '关闭');
 console.log('消息时效:', `${CONFIG.messageMaxAge / 1000}秒`);
+console.log('路径解析调试:', CONFIG.pathResolve.enableDebug ? '开启' : '关闭');
 console.log('全局历史:', CONFIG.enableGlobalHistory ? `开启(${CONFIG.globalHistoryLimit}条)` : '关闭');
 console.log('工具历史:', CONFIG.enableToolSummary ? `开启(${CONFIG.toolSummaryLimit}条)` : '关闭');
 console.log('测试用户ID:', CONFIG.testUserId || '所有用户');
@@ -670,6 +686,135 @@ function normalizeFilePath(filePath) {
   return filePath;
 }
 
+// =============== 跨平台路径解析（WSL / Docker / 自定义映射） ===============
+
+function isWSL() {
+  if (process.platform !== 'linux') return false;
+  if (process.env.WSL_DISTRO_NAME) return true;
+  try {
+    const v = fs.readFileSync('/proc/version', 'utf8').toLowerCase();
+    return v.includes('microsoft');
+  } catch { return false; }
+}
+
+function isDocker() {
+  try {
+    if (fs.existsSync('/.dockerenv')) return true;
+    const cgroup = fs.readFileSync('/proc/1/cgroup', 'utf8');
+    return cgroup.includes('docker') || cgroup.includes('kubepods');
+  } catch { return false; }
+}
+
+function parseMappingPair(pair) {
+  // 格式: from->to
+  const idx = pair.indexOf('->');
+  if (idx === -1) return null;
+  const from = pair.slice(0, idx);
+  const to = pair.slice(idx + 2);
+  return { from, to };
+}
+
+function applyCustomMappings(p) {
+  for (const item of CONFIG.pathResolve.pathMappings) {
+    const m = parseMappingPair(item);
+    if (!m) continue;
+    // 不区分大小写匹配 Windows 盘符前缀
+    if (p.toLowerCase().startsWith(m.from.toLowerCase())) {
+      const rest = p.slice(m.from.length).replace(/[\\]/g, '/');
+      const candidate = (m.to.endsWith('/') ? m.to.slice(0, -1) : m.to) + rest;
+      if (CONFIG.pathResolve.enableDebug) console.log(`[路径映射] ${p} -> ${candidate}`);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function tryCandidates(candidates) {
+  for (const c of candidates) {
+    if (!c) continue;
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * 将任意输入路径解析为当前运行环境可访问的本地路径
+ * 返回可访问路径字符串；若无法解析则返回 null
+ */
+function resolveAccessiblePath(rawPath) {
+  if (!rawPath || /^https?:\/\//i.test(rawPath)) return null;
+  let p = normalizeFilePath(rawPath.trim());
+
+  // 首先直接尝试原路径
+  if (fs.existsSync(p)) return p;
+
+  const candidates = [];
+  const onWin = process.platform === 'win32';
+  const onLinux = process.platform === 'linux';
+  const wsl = isWSL();
+  const docker = isDocker();
+
+  // Windows 风格路径 -> Linux (WSL/Docker)
+  const winDriveMatch = p.match(/^([a-zA-Z]):[\\/](.*)$/);
+  if (onLinux && winDriveMatch) {
+    const drive = winDriveMatch[1].toLowerCase();
+    const rest = winDriveMatch[2].replace(/[\\]/g, '/');
+    // WSL 挂载: /mnt/c/...
+    candidates.push(`${CONFIG.pathResolve.wslWindowsMntPrefix}/${drive}/${rest}`);
+    // Docker Desktop 挂载: /host_mnt/c/...
+    candidates.push(`${CONFIG.pathResolve.dockerHostMntPrefix}/${drive}/${rest}`);
+  }
+
+  // WSL UNC -> Linux 本地路径  (\\wsl$\Distro\home\user\x.png)
+  const uncWsl = p.match(/^\\\\wsl\$\\([^\\]+)\\(.*)$/i);
+  if (onLinux && uncWsl) {
+    const linuxPart = '/' + uncWsl[2].replace(/[\\]/g, '/');
+    candidates.push(linuxPart);
+  }
+
+  // Linux 风格路径 -> Windows (UNC WSL 或 盘符)
+  if (onWin && p.startsWith('/')) {
+    // /mnt/c/... -> C:\...
+    const mnt = p.match(/^\/mnt\/([a-z])\/(.*)$/i);
+    if (mnt) {
+      const drive = mnt[1].toUpperCase();
+      const rest = mnt[2].replace(/[\/]/g, '\\');
+      candidates.push(`${drive}:\\${rest}`);
+    }
+    // /home/... -> \\wsl$\\<distro>\\home\\...
+    const distro = CONFIG.pathResolve.wslDefaultDistro || '';
+    if (distro) {
+      const rest = p.replace(/^\/+/, '').replace(/[\/]/g, '\\');
+      candidates.push(`\\\\wsl$\\${distro}\\${rest}`);
+    } else {
+      // 尝试读取默认发行版名称
+      try {
+        const out = execSync('wsl.exe -l -q', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().split('\n')
+          .map(s => s.trim()).filter(Boolean);
+        if (out.length > 0) {
+          const rest = p.replace(/^\/+/, '').replace(/[\/]/g, '\\');
+          candidates.push(`\\\\wsl$\\${out[0]}\\${rest}`);
+        }
+      } catch {}
+    }
+  }
+
+  // 自定义映射
+  const mapped = applyCustomMappings(p);
+  if (mapped) candidates.unshift(mapped);
+
+  // 依次尝试候选
+  const resolved = tryCandidates(candidates);
+  if (CONFIG.pathResolve.enableDebug) {
+    console.log(`[路径解析] 输入: ${rawPath}`);
+    console.log(`[路径解析] 候选:`, candidates);
+    console.log(`[路径解析] 结果:`, resolved || '未找到');
+  }
+  return resolved;
+}
+
 /**
  * 检查是否为本地文件路径（排除网络链接）
  * @param {string} filePath - 文件路径
@@ -681,9 +826,9 @@ function isLocalFilePath(filePath) {
     return false;
   }
   
-  // 处理 file:// 协议并检查文件是否存在
-  const normalizedPath = normalizeFilePath(filePath);
-  return fs.existsSync(normalizedPath);
+  // 解析到当前环境可访问的本地路径
+  const resolved = resolveAccessiblePath(filePath);
+  return !!resolved;
 }
 
 /**
@@ -705,7 +850,7 @@ function parseMarkdownFiles(text) {
     const rawFilePath = match[2];
     
     if (isLocalFilePath(rawFilePath)) {
-      const normalizedPath = normalizeFilePath(rawFilePath);
+      const normalizedPath = resolveAccessiblePath(rawFilePath);
       
       // 去重检查
       if (!seenPaths.has(normalizedPath)) {
@@ -731,7 +876,7 @@ function parseMarkdownFiles(text) {
     const rawFilePath = match[2];
     
     if (isLocalFilePath(rawFilePath)) {
-      const normalizedPath = normalizeFilePath(rawFilePath);
+      const normalizedPath = resolveAccessiblePath(rawFilePath);
       
       // 去重检查
       if (!seenPaths.has(normalizedPath)) {
