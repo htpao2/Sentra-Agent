@@ -179,7 +179,7 @@ const system = await SentraPromptsSDK(text);
  * key: conversationId (U:userId 或 G:groupId)
  * value: { 
  *   conversations: [{ role: 'user'|'assistant', content: string }],
- *   pendingMessages: [string],  // 从上次回复后累积的待回复消息
+ *   pendingMessages: [{ summary: string, msgObj: Object }],  // 从上次回复后累积的待回复消息（存储完整对象）
  *   currentAssistantMessage: string,  // 当前正在构建的助手消息
  *   lastReplyTime: timestamp,
  *   replyDesire: 0-1
@@ -191,8 +191,9 @@ const conversationHistories = new Map();
  * 添加待回复的消息到累积队列
  * @param {string} conversationId - 会话ID
  * @param {string} summary - 消息summary（已包含时间等信息）
+ * @param {Object} msgObj - 完整的消息对象（包含sender_id等信息）
  */
-function addPendingMessage(conversationId, summary) {
+function addPendingMessage(conversationId, summary, msgObj) {
   if (!conversationHistories.has(conversationId)) {
     conversationHistories.set(conversationId, {
       conversations: [],
@@ -204,9 +205,9 @@ function addPendingMessage(conversationId, summary) {
   }
   
   const history = conversationHistories.get(conversationId);
-  history.pendingMessages.push(summary);
+  history.pendingMessages.push({ summary, msgObj });
   
-  console.log(`[待回复消息] ${conversationId} 累积消息，当前 ${history.pendingMessages.length} 条待回复`);
+  console.log(`[待回复消息] ${conversationId} 累积消息（sender: ${msgObj.sender_id}），当前 ${history.pendingMessages.length} 条待回复`);
 }
 
 /**
@@ -224,8 +225,34 @@ function getPendingMessagesContent(conversationId) {
     return '';
   }
   
-  // 将所有待回复消息组合成一个content
-  return history.pendingMessages.join('\n\n');
+  // 将所有待回复消息的summary组合成一个content
+  return history.pendingMessages.map(pm => pm.summary).join('\n\n');
+}
+
+/**
+ * 查找指定sender的最后一条消息（用于引用回复）
+ * @param {string} conversationId - 会话ID
+ * @param {string} senderId - 发送者ID
+ * @returns {Object|null} 消息对象或null
+ */
+function findLastMessageBySender(conversationId, senderId) {
+  if (!conversationHistories.has(conversationId)) {
+    return null;
+  }
+  
+  const history = conversationHistories.get(conversationId);
+  
+  // 从后往前查找该sender的消息
+  for (let i = history.pendingMessages.length - 1; i >= 0; i--) {
+    const pm = history.pendingMessages[i];
+    if (pm.msgObj.sender_id === senderId) {
+      console.log(`[引用查找] ${conversationId} 找到sender ${senderId} 的最后一条消息: ${pm.msgObj.message_id}`);
+      return pm.msgObj;
+    }
+  }
+  
+  console.warn(`[引用查找] ${conversationId} 未找到sender ${senderId} 的消息`);
+  return null;
 }
 
 /**
@@ -273,7 +300,7 @@ function finishConversationPair(conversationId) {
   const history = conversationHistories.get(conversationId);
   
   // 组合所有待回复消息作为user content
-  const userContent = history.pendingMessages.join('\n\n');
+  const userContent = history.pendingMessages.map(pm => pm.summary).join('\n\n');
   
   // 确保有用户消息和助手消息
   if (userContent && history.currentAssistantMessage) {
@@ -1238,14 +1265,19 @@ function buildMessageParts(segment) {
 
 /**
  * 获取可引用的消息 ID（用于回复功能）
- * 直接引用当前需要回复的消息，而不是历史记录中的旧消息
- * @param {Object} msg - 当前消息对象（应该是最新的需要回复的消息）
+ * 确保引用的是正确发送者的消息
+ * @param {Object} msg - 消息对象（必须是要引用的正确发送者的消息）
  * @returns {number|null} 消息 ID
  */
 function getReplyableMessageId(msg) {
-  // 直接返回当前消息的ID，这样就能正确引用最近的消息
-  // 而不是从历史记录中查找可能已经过时的消息
-  return msg.message_id || null;
+  if (!msg || !msg.message_id) {
+    console.warn('[引用消息] 消息对象无效或缺少message_id');
+    return null;
+  }
+  
+  // 返回消息ID，用于引用回复
+  console.log(`[引用消息] 使用消息 ${msg.message_id} (sender: ${msg.sender_id})`);
+  return msg.message_id;
 }
 
 // 旧的历史记录函数已移除，使用新的 addToConversationHistory() 替代
@@ -1466,8 +1498,8 @@ ws.on('message', async (data) => {
       const conversationId = getConversationId(msg);
       const isGroupChat = msg.type === 'group';
       
-      // 累积待回复消息（使用summary，已包含时间信息）
-      addPendingMessage(conversationId, msg.summary);
+      // 累积待回复消息（使用summary，已包含时间信息，同时保存完整消息对象）
+      addPendingMessage(conversationId, msg.summary, msg);
       
       // 也记录到全局历史（用于system prompt）
       addToGlobalHistory(conversationId, msg, false);
@@ -1615,7 +1647,9 @@ async function processReply(conversationId, mergedMessages, lastMsg, isGroupChat
                 console.log('\n=== AI 回复（普通） ===');
                 console.log(response);
                 
-                await smartSend(lastMsg, response);
+                // 查找当前senderId的最后一条消息用于引用回复
+                const targetMsg = findLastMessageBySender(conversationId, senderId) || lastMsg;
+                await smartSend(targetMsg, response);
                 
                 // 设置助手消息内容（普通对话直接使用response）
                 appendToAssistantMessage(conversationId, response);
@@ -1665,8 +1699,9 @@ async function processReply(conversationId, mergedMessages, lastMsg, isGroupChat
               console.log('\n=== AI 回复（工具步骤） ===');
               console.log(response);
               
-              // 使用智能发送（严格按照 AI 回复顺序）
-              await smartSend(lastMsg, response);
+              // 查找当前senderId的最后一条消息用于引用回复
+              const targetMsg = findLastMessageBySender(conversationId, senderId) || lastMsg;
+              await smartSend(targetMsg, response);
               
               // 追加工具步骤结果到助手消息（逐步拼接）
               appendToAssistantMessage(conversationId, response);
