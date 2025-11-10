@@ -75,7 +75,14 @@ export const config = {
     planMaxRetries: int(process.env.FC_PLAN_MAX_RETRIES, 3),
     argMaxRetries: int(process.env.FC_ARG_MAX_RETRIES, 3),
     evalMaxRetries: int(process.env.FC_EVAL_MAX_RETRIES, 3),
-    summaryMaxRetries: int(process.env.FC_SUMMARY_MAX_RETRIES, 3),
+    summaryMaxRetries: int(process.env.FC_SUMMARY_MAX_RETRIES, 1),  // 默认 1 次，避免浪费
+    // Stage-specific models (optional; fall back to FC_MODEL)
+    judgeModel: process.env.JUDGE_FC_MODEL || '',
+    planModel: process.env.PLAN_FC_MODEL || '',
+    argModel: process.env.ARG_FC_MODEL || '',
+    evalModel: process.env.EVAL_FC_MODEL || '',
+    summaryModel: process.env.SUMMARY_FC_MODEL || '',
+    reflectionModel: process.env.REFLECTION_FC_MODEL || '',
     // Stage-specific sampling controls (optional; fall back to temperature/top_p defaults)
     planTemperature: Number(process.env.FC_PLAN_TEMPERATURE || 'NaN'),
     planTopP: Number(process.env.FC_PLAN_TOP_P || 'NaN'),
@@ -83,6 +90,9 @@ export const config = {
     evalTopP: Number(process.env.FC_EVAL_TOP_P || 'NaN'),
     summaryTemperature: Number(process.env.FC_SUMMARY_TEMPERATURE || 'NaN'),
     summaryTopP: Number(process.env.FC_SUMMARY_TOP_P || 'NaN'),
+    reflectionMaxRetries: int(process.env.FC_REFLECTION_MAX_RETRIES, 2),
+    reflectionTemperature: Number(process.env.FC_REFLECTION_TEMPERATURE || 'NaN'),
+    reflectionTopP: Number(process.env.FC_REFLECTION_TOP_P || 'NaN'),
   },
   // 向量嵌入模型配置（默认复用 OPENAI_*，也可单独配置）
   embedding: {
@@ -159,6 +169,11 @@ export const config = {
     // Multi-plan generation controls
     multiEnable: bool(process.env.PLAN_MULTI_ENABLE, false),
     multiCandidates: int(process.env.PLAN_MULTI_CANDIDATES, 1),
+    // Multi-plan early-stop (50% completion threshold + dynamic wait window)
+    // waitMs = clamp(mean(firstHalfDurations) * factor * extra, minTimeoutMs, maxTimeoutMs)
+    candidateMinTimeoutMs: int(process.env.PLAN_CANDIDATE_MIN_TIMEOUT_MS, 3000),
+    candidateMaxTimeoutMs: int(process.env.PLAN_CANDIDATE_MAX_TIMEOUT_MS, 25000),
+    candidateTimeFactor: Number(process.env.PLAN_CANDIDATE_TIME_FACTOR || 1.25),
     // Plan audit controls
     auditEnable: bool(process.env.PLAN_AUDIT_ENABLE, true),
     auditVoters: int(process.env.PLAN_AUDIT_VOTERS, 1),
@@ -217,6 +232,9 @@ export const config = {
     summaryUsePreThought: bool(process.env.SUMMARY_USE_PRETHOUGHT, false),
     // Whether to run preThought in planning stages (native & FC)
     planUsePreThought: bool(process.env.PLAN_USE_PRETHOUGHT, false),
+    // Reflection (task completeness check before summary)
+    enableReflection: bool(process.env.ENABLE_REFLECTION, true),
+    reflectionMaxSupplements: int(process.env.REFLECTION_MAX_SUPPLEMENTS, 3),
   },
   logging: {
     level: process.env.LOG_LEVEL || 'info',
@@ -232,4 +250,47 @@ export const config = {
   },
 };
 
-export default config;
+/**
+ * 获取指定阶段的模型配置
+ * @param {string} stage - 阶段名称: 'judge' | 'plan' | 'arg' | 'eval' | 'summary' | 'reflection'
+ * @returns {string} 模型名称
+ * 
+ * 逻辑：
+ * 1. 如果 TOOL_STRATEGY=fc，优先使用 {STAGE}_FC_MODEL
+ * 2. 如果未设置，回退到 FC_MODEL
+ * 3. 如果 FC_MODEL 也未设置，回退到对应阶段的 native model（如 JUDGE_MODEL）
+ */
+export function getStageModel(stage) {
+  const strategy = config.llm?.toolStrategy || 'auto';
+  const fcLlm = config.fcLlm;
+  
+  if (strategy === 'fc' || strategy === 'auto') {
+    // FC 模式：优先使用阶段专用的 FC 模型
+    const stageModelMap = {
+      judge: fcLlm.judgeModel,
+      plan: fcLlm.planModel,
+      arg: fcLlm.argModel,
+      eval: fcLlm.evalModel,
+      summary: fcLlm.summaryModel,
+      reflection: fcLlm.reflectionModel,
+    };
+    
+    const stageModel = stageModelMap[stage];
+    if (stageModel) return stageModel;
+    
+    // 回退到 FC_MODEL
+    if (fcLlm.model) return fcLlm.model;
+  }
+  
+  // Native 模式或兜底：使用对应阶段的 native model
+  const nativeModelMap = {
+    judge: config.judge?.model,
+    plan: config.llm?.model,
+    arg: config.llm?.model,
+    eval: config.llm?.model,
+    summary: config.summarizer?.model,
+    reflection: config.llm?.model,
+  };
+  
+  return nativeModelMap[stage] || config.llm?.model || 'gpt-4o-mini';
+}

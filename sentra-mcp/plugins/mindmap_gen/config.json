@@ -68,7 +68,7 @@
     ],
     "additionalProperties": true
   },
-  "timeoutMs": 90000,
+  "timeoutMs": 150000,
   "meta": {
     "realWorldAction": "绘制思维导图",
     "responseStyle": "markdown结合自然语言",

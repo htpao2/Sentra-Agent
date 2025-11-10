@@ -165,7 +165,7 @@ console.log(jsonStr);
 - **MCP 导入失败**：确认 `functions/mcptools.js` 中 MCP SDK 的导入路径；确保 MCP 项目可用并具备必要初始化。
 - **自定义 .env 路径**：所有解析 API 的第二个参数均可传 `envPath`，如 `await parse('...', 'E:/path/.env')`。
 
-## 目录结构（简要）
+## 目录结构
 ```
 .
 ├─ sdk.js                 // SDK 入口（默认导出 + 工具函数）
@@ -181,6 +181,3 @@ console.log(jsonStr);
 ├─ .env.example           // 占位符映射示例
 └─ package.json
 ```
-
-## 许可证
-MIT

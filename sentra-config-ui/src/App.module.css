@@ -1,0 +1,401 @@
+/* Windows 95 风格全局样式 */
+
+.desktop {
+  width: 100vw;
+  height: 100vh;
+  background: #008080;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  font-family: 'MS Sans Serif', 'Microsoft Sans Serif', sans-serif;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+
+/* 桌面图标区域 */
+.desktopIcons {
+  flex: 1;
+  padding: 48px 16px 16px; /* 顶部留白，避免被顶部 AppBar 遮挡 */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 75px);
+  grid-auto-rows: 70px;
+  gap: 8px;
+  align-content: start;
+  align-items: start;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.desktopIcons::-webkit-scrollbar {
+  width: 16px;
+}
+
+.desktopIcons::-webkit-scrollbar-track {
+  background: #c0c0c0;
+}
+
+.desktopIcons::-webkit-scrollbar-thumb {
+  background: #c0c0c0;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+}
+
+.desktopIcons::-webkit-scrollbar-thumb:active {
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+}
+
+/* 桌面图标 */
+.desktopIcon {
+  width: 75px;
+  height: 70px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  cursor: pointer;
+  padding: 2px;
+  border: 1px solid transparent;
+  position: relative;
+  user-select: none;
+}
+
+.desktopIcon.selected {
+  background: #000080;
+  border: 1px dotted #ffffff;
+}
+
+.desktopIcon.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+/* Material Icon 样式 */
+.iconImage {
+  font-size: 32px;
+  margin-bottom: 0;
+  color: #fff;
+  filter: drop-shadow(1px 1px 0 #000);
+  pointer-events: none;
+  flex-shrink: 0;
+  height: 36px;
+  line-height: 36px;
+}
+
+/* 图标标签 */
+.iconLabel {
+  color: white;
+  font-size: 11px;
+  text-align: center;
+  text-shadow: 
+    -1px -1px 0 #000,
+    1px -1px 0 #000,
+    -1px 1px 0 #000,
+    1px 1px 0 #000;
+  max-width: 70px;
+  line-height: 1.2;
+  font-weight: normal;
+  pointer-events: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+/* 编辑窗口 */
+.editorWindow {
+  position: fixed;
+  top: 80px; /* 顶部留白，避免贴边 */
+  left: 120px; /* 左侧留白 */
+  transform: none;
+  width: 650px;
+  max-height: 80vh;
+  z-index: 120; /* 抬高以覆盖图标 */
+  box-shadow: none; /* 去除外围黑边 */
+  resize: both;
+  overflow: hidden;
+  min-width: 520px;
+  min-height: 260px;
+}
+
+.editorContent {
+  max-height: 55vh;
+  overflow-y: auto;
+  background: #c0c0c0;
+  padding: 8px;
+}
+
+.editorContent::-webkit-scrollbar {
+  width: 16px;
+}
+
+.editorContent::-webkit-scrollbar-track {
+  background: #c0c0c0;
+}
+
+.editorContent::-webkit-scrollbar-thumb {
+  background: #c0c0c0;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+}
+
+.editorContent::-webkit-scrollbar-thumb:active {
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+}
+
+/* 配置块 */
+.configBlock {
+  margin-bottom: 12px;
+  padding: 8px;
+  background: #c0c0c0;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+}
+
+/* 代码预览 */
+.codePreview {
+  font-family: 'Courier New', 'Courier', monospace;
+  font-size: 12px;
+  padding: 4px;
+  background: #000000;
+  color: #00ff00;
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  margin-bottom: 8px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  overflow-x: hidden;
+}
+
+.codeComment {
+  color: #00ff00;
+}
+
+.codeVarName {
+  color: #00ffff;
+  font-weight: bold;
+}
+
+.codeVarValue {
+  color: #ffff00;
+}
+
+.codeEquals {
+  color: #ffffff;
+}
+
+/* 输入标签 */
+.inputLabel {
+  font-weight: bold;
+  margin: 8px 0 2px 0;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #000;
+}
+
+/* 任务栏 */
+.taskbar {
+  height: 28px;
+  background: #c0c0c0;
+  border-top: 2px solid #ffffff;
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+  gap: 2px;
+}
+
+.taskbarLeft {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.taskbarRight {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.statusItem {
+  height: 22px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #c0c0c0;
+  border-top: 1px solid #808080;
+  border-left: 1px solid #808080;
+  border-right: 1px solid #ffffff;
+  border-bottom: 1px solid #ffffff;
+  font-size: 11px;
+  font-weight: normal;
+  color: #000;
+}
+
+.clock {
+  min-width: 70px;
+  justify-content: center;
+  font-weight: bold;
+}
+
+/* 开始菜单 */
+.startMenu {
+  position: fixed;
+  bottom: 30px;
+  left: 2px;
+  width: 200px;
+  z-index: 200;
+  box-shadow: 2px 2px 0 #000000;
+}
+
+/* 空状态 */
+.emptyState {
+  text-align: center;
+  padding: 40px 20px;
+  background: #c0c0c0;
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+}
+
+.emptyIcon {
+  margin-bottom: 12px;
+  color: #808080;
+}
+
+.emptyText {
+  font-weight: bold;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: #000;
+}
+
+.emptyHint {
+  font-size: 11px;
+  color: #000;
+}
+
+/* 加载状态 */
+.loadingScreen {
+  width: 100vw;
+  height: 100vh;
+  background: #008080;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loadingBox {
+  background: #c0c0c0;
+  padding: 24px;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  text-align: center;
+  box-shadow: 2px 2px 0 #000000;
+}
+
+.loadingText {
+  margin-top: 12px;
+  font-size: 11px;
+  color: #000;
+  font-weight: bold;
+}
+
+.loadingHint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #000;
+}
+
+/* 文本域（注释） */
+.textArea {
+  width: 100%;
+  min-height: 44px;
+  padding: 6px;
+  font-size: 12px;
+  line-height: 1.3;
+  font-family: 'Courier New', 'Courier', monospace;
+  background: #ffffff;
+  color: #000;
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  resize: vertical;
+}
+
+/* 开始菜单的背景修正 */
+.startMenu :global(ul),
+.startMenu :global(li) {
+  background: #c0c0c0 !important;
+  color: #000 !important;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .desktopIcons {
+    grid-template-columns: repeat(auto-fill, 90px);
+    padding: 16px;
+    gap: 16px 12px;
+  }
+
+  .desktopIcon {
+    width: 85px;
+    height: 85px;
+  }
+
+  .iconImage {
+    font-size: 42px;
+  }
+
+  .editorWindow {
+    width: 95vw;
+    max-height: 90vh;
+  }
+}
+
+/* Toolbar 样式 */
+.toolbar {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: #c0c0c0;
+  border-bottom: 2px solid #808080;
+  align-items: center;
+}
+
+.toolbarInfo {
+  margin-left: auto;
+  font-size: 11px;
+  color: #000;
+  padding: 0 4px;
+  font-weight: normal;
+}

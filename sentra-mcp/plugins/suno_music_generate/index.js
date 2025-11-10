@@ -1,5 +1,6 @@
 import logger from '../../src/logger/index.js';
 import wsCall from '../../src/utils/ws_rpc.js';
+import { getIdsWithCache } from '../../src/utils/message_cache_helper.js';
 
 /**
  * 流式请求 OpenAI 格式的 API
@@ -193,16 +194,15 @@ export default async function handler(args = {}, options = {}) {
     return { success: false, code: 'INVALID_LYRICS', error: 'lyrics 为必填参数，需要提供歌词内容' };
   }
   
-  const user_id = args.user_id;
-  const group_id = args.group_id;
+  // 从参数或缓存中获取 ID（优先参数，其次缓存）
+  const { user_id, group_id, source } = await getIdsWithCache(args, options, 'suno_music_generate');
   
-  if (!user_id && !group_id) {
-    return { success: false, code: 'TARGET_REQUIRED', error: '必须提供 user_id（私聊）或 group_id（群聊）' };
-  }
-  
-  if (user_id && group_id) {
-    return { success: false, code: 'TARGET_EXCLUSIVE', error: 'user_id 与 group_id 只能二选一' };
-  }
+  logger.info?.('suno_music_generate:ids_resolved', { 
+    label: 'PLUGIN', 
+    user_id, 
+    group_id, 
+    source 
+  });
   
   // 配置读取
   const apiBaseUrl = String(penv.SUNO_API_BASE_URL || process.env.SUNO_API_BASE_URL || 'https://api.openai.com/v1');

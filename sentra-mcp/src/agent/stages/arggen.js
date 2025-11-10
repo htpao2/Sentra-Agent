@@ -3,7 +3,7 @@
  */
 
 import logger from '../../logger/index.js';
-import { config } from '../../config/index.js';
+import { config, getStageModel } from '../../config/index.js';
 import { chatCompletion } from '../../openai/client.js';
 import { validateAndRepairArgs } from '../../utils/schema.js';
 import { clip } from '../../utils/text.js';
@@ -12,7 +12,7 @@ import { buildToolDialogueMessages, buildDependentContextText } from '../plan/hi
 import { searchToolMemories } from '../../memory/index.js';
 import { loadPrompt, renderTemplate, composeSystem } from '../prompts/loader.js';
 import { compactMessages } from '../utils/messages.js';
-import { parseFunctionCalls, buildFunctionCallInstruction, buildFCPolicy } from '../../utils/fc.js';
+import { parseFunctionCalls, buildFunctionCallInstruction, buildFCPolicy, formatSentraUserQuestion } from '../../utils/fc.js';
 
 /**
  * 生成工具调用参数
@@ -37,7 +37,8 @@ export async function generateToolArgs(params) {
     manifestItem,
     conv,
     totalSteps,
-    context
+    context,
+    disableReuse  // 重试模式下禁用复用
   } = params;
 
   const { aiName, reason, draftArgs } = step;
@@ -57,12 +58,37 @@ export async function generateToolArgs(params) {
     : (Array.isArray(manifestItem?.inputSchema?.required) ? manifestItem.inputSchema.required : []);
   const requiredDetail = summarizeRequiredFieldsDetail(currentToolFull.inputSchema || {});
 
-  const dialogueMsgs = await buildToolDialogueMessages(runId, stepIndex);
-  const depAppendText = await buildDependentContextText(runId, step.dependsOn);
+  // 判断是否使用 FC 模式
+  const useFC = String(config.llm?.toolStrategy || 'auto') === 'fc';
+
+  // 构建上下文（FC 模式使用 XML 格式）
+  // 🔥 重试模式：includeCurrentStep=true 包含当前步骤的失败历史，让 LLM 看到之前的尝试
+  const isRetryMode = disableReuse === true;
+  const dialogueMsgs = await buildToolDialogueMessages(runId, stepIndex, useFC, isRetryMode);
+  const depAppendText = await buildDependentContextText(runId, step.dependsOn, useFC);
+
+  if (isRetryMode && config.flags.enableVerboseSteps) {
+    logger.info('重试模式：使用完整工具执行历史（包含失败尝试）', {
+      label: 'ARGGEN',
+      aiName,
+      stepIndex,
+      dialogueMsgsCount: dialogueMsgs.length,
+      note: 'LLM 将看到当前步骤的所有历史记录，包括失败的参数和结果'
+    });
+  }
 
   // 尝试复用历史高相似度参数（跳过 LLM 参数生成）
+  // 重试模式下禁用复用，避免复用失败的参数导致重试失败
   let reused = false;
-  if (config.memory?.enable && config.memory?.enableReuse) {
+  if (disableReuse) {
+    if (config.flags.enableVerboseSteps) {
+      logger.info('重试模式：禁用参数复用，强制重新生成参数', {
+        label: 'ARGGEN',
+        aiName,
+        stepIndex
+      });
+    }
+  } else if (config.memory?.enable && config.memory?.enableReuse) {
     const result = await tryReuseHistoryArgs({
       objective,
       reason,
@@ -85,31 +111,52 @@ export async function generateToolArgs(params) {
 
   // 未复用则调用 LLM 生成参数
   if (!reused) {
-    const ap = await loadPrompt('arggen');
+    // FC 模式使用专用模板（XML 结构化格式）
+    const ap = await loadPrompt(useFC ? 'arggen_fc' : 'arggen');
     const overlays = (context?.promptOverlays || context?.overlays || {});
     const overlayGlobal = overlays.global?.system || overlays.global || '';
     const overlayArgs = overlays.arggen?.system || overlays.arggen || overlays.args || '';
-    const systemContent = composeSystem(ap.system, [overlayGlobal, overlayArgs].filter(Boolean).join('\n\n'));
+    
+    // FC 模式：构建 system（协议在前，用户内容在后）
+    let systemContent;
+    if (useFC) {
+      const policy = await buildFCPolicy();
+      const userSystem = [overlayGlobal, overlayArgs, ap.system].filter(Boolean).join('\n\n');
+      systemContent = userSystem 
+        ? `${policy}\n\n---\n【Protocol Requirements】Above is system protocol, must be strictly followed. Below are specific task settings and requirements:\n---\n\n${userSystem}`
+        : policy;
+    } else {
+      systemContent = composeSystem(ap.system, [overlayGlobal, overlayArgs].filter(Boolean).join('\n\n'));
+    }
 
+    // FC 模式：不提前包装 objective（新模板已在整体结构外层使用 <sentra-user-question>）
+    const objectiveText = objective;
+    
+    // FC 模式：也保留原始对话，确保能看到用户上下文（如 QQ 群消息），与 Plan 阶段保持一致
+    // 历史工具调用通过 buildToolDialogueMessages 提供（XML 格式）
+    const convWrapped = conv;
+    
     const taskInstruction = renderTemplate(ap.user_task, {
-      objective,
+      objective: objectiveText,
       stepIndex: stepIndex + 1,
       totalSteps,
       aiName,
       reason: reason || '',
       description: currentToolFull?.description || '',
+      draftArgs: draftArgs ? JSON.stringify(draftArgs, null, 2) : '(无)',
       requiredList: Array.isArray(requiredList) && requiredList.length ? requiredList.join(', ') : '(无)',
       requiredDetail: requiredDetail || '(无)'
     });
 
+    // FC 模式：baseMessages 不包含最终 user 消息（会在后面统一构建）
+    // 非 FC 模式：baseMessages 包含完整 user 消息（用于原生 tools 调用）
     const baseMessages = compactMessages([
       { role: 'system', content: systemContent },
-      ...conv,
+      ...convWrapped,
       ...dialogueMsgs,
-      { role: 'user', content: [taskInstruction, depAppendText || ''].filter(Boolean).join('\n\n') }
+      ...(useFC ? [] : [{ role: 'user', content: [taskInstruction, depAppendText || ''].filter(Boolean).join('\n\n') }])
     ]);
 
-    const useFC = String(config.llm?.toolStrategy || 'auto') === 'fc';
     const useAuto = String(config.llm?.toolStrategy || 'auto') === 'auto';
 
     if (useFC) {
@@ -129,14 +176,38 @@ export async function generateToolArgs(params) {
           const invalid_line = Array.isArray(lastInvalid) && lastInvalid.length ? `- 类型不匹配字段：${lastInvalid.join(', ')}` : '';
           reinforce = renderTemplate(tplRe, { required_line, missing_line, invalid_line, attempt: String(attempt), max_retries: String(maxRetries) });
         }
-        const policy = await buildFCPolicy({ locale: 'zh-CN' });
-        const messagesFC = [...baseMessages, { role: 'user', content: [reinforce, policy, instruction].filter(Boolean).join('\n\n') }];
+        // FC 模式：构建最终 user 消息，包含任务上下文 + 依赖结果 + 重试失败上下文 + 调用指令 + 重试强化
+        const finalUserContent = [
+          taskInstruction,
+          depAppendText || '',
+          reinforce,
+          instruction
+        ].filter(Boolean).join('\n\n');
+        
+        const messagesFC = [...baseMessages, { role: 'user', content: finalUserContent }];
+        
+        // 调试日志：打印请求的 messages 数组
+        if (config.flags.enableVerboseSteps) {
+          logger.info('ArgGen FC 请求 messages', {
+            label: 'ARGS_DEBUG',
+            aiName,
+            attempt,
+            messagesCount: messagesFC.length,
+            messages: messagesFC.map((m, idx) => ({
+              index: idx,
+              role: m.role,
+              contentPreview: clip(m.content, 200)
+            }))
+          });
+        }
+        
+        const argModel = getStageModel('arg');
         const resp = await chatCompletion({
           messages: messagesFC,
           temperature: fc.temperature ?? config.llm.temperature,
           apiKey: fc.apiKey,
           baseURL: fc.baseURL,
-          model: fc.model,
+          model: argModel,
           ...(omit ? { omitMaxTokens: true } : { max_tokens: fc.maxTokens })
         });
         const content = resp?.choices?.[0]?.message?.content || '';
@@ -184,6 +255,20 @@ export async function generateToolArgs(params) {
       }
     } else {
       // 原生 tools 调用
+      // 调试日志：打印请求的 messages 数组
+      if (config.flags.enableVerboseSteps) {
+        logger.info('ArgGen Native 请求 messages', {
+          label: 'ARGS_DEBUG',
+          aiName,
+          messagesCount: baseMessages.length,
+          messages: baseMessages.map((m, idx) => ({
+            index: idx,
+            role: m.role,
+            contentPreview: clip(m.content, 200)
+          }))
+        });
+      }
+      
       const resp = await chatCompletion({
         messages: baseMessages,
         tools: perStepTools,
@@ -214,14 +299,34 @@ export async function generateToolArgs(params) {
             const invalid_line = Array.isArray(lastInvalid2) && lastInvalid2.length ? `- 类型不匹配字段：${lastInvalid2.join(', ')}` : '';
             reinforce = renderTemplate(tplRe, { required_line, missing_line, invalid_line, attempt: String(attempt), max_retries: String(maxRetries) });
           }
-          const policy = await buildFCPolicy({ locale: 'zh-CN' });
-          const messagesFC = [...baseMessages, { role: 'user', content: [reinforce, policy, instruction].filter(Boolean).join('\n\n') }];
+          // Auto 回退：baseMessages 已包含完整 user，使用 compactMessages 合并避免两条 user
+          const messagesFC = compactMessages([
+            ...baseMessages, 
+            { role: 'user', content: [reinforce, instruction].filter(Boolean).join('\n\n') }
+          ]);
+          
+          // 调试日志：打印 auto 回退请求的 messages 数组
+          if (config.flags.enableVerboseSteps) {
+            logger.info('ArgGen Auto回退 请求 messages', {
+              label: 'ARGS_DEBUG',
+              aiName,
+              attempt,
+              messagesCount: messagesFC.length,
+              messages: messagesFC.map((m, idx) => ({
+                index: idx,
+                role: m.role,
+                contentPreview: clip(m.content, 200)
+              }))
+            });
+          }
+          
+          const argModel = getStageModel('arg');
           const resp2 = await chatCompletion({
             messages: messagesFC,
             temperature: fc.temperature ?? config.llm.temperature,
             apiKey: fc.apiKey,
             baseURL: fc.baseURL,
-            model: fc.model,
+            model: argModel,
             ...(omit ? { omitMaxTokens: true } : { max_tokens: fc.maxTokens })
           });
           const content2 = resp2?.choices?.[0]?.message?.content || '';
@@ -350,6 +455,7 @@ export async function fixToolArgs(params) {
     currentToolFull,
     schema,
     ajvErrors,
+    draftArgs,
     totalSteps,
     context
   } = params;
@@ -360,35 +466,53 @@ export async function fixToolArgs(params) {
     const requiredList = Array.isArray((schema || {}).required) ? schema.required : [];
     const requiredDetail = summarizeRequiredFieldsDetail(schema || {});
 
-    const ap = await loadPrompt('arggen');
+    // 判断是否使用 FC 模式（需要在构建上下文前判断）
+    const useFC = String(config.llm?.toolStrategy || 'auto') === 'fc';
+    const useAuto = String(config.llm?.toolStrategy || 'auto') === 'auto';
+    
+    // FC 模式使用专用模板（XML 结构化格式）
+    const ap = await loadPrompt(useFC ? 'arggen_fc' : 'arggen');
     const overlays = (context?.promptOverlays || context?.overlays || {});
     const overlayGlobal = overlays.global?.system || overlays.global || '';
     const overlayFix = overlays.arggen_fix?.system || overlays.arggen_fix || overlays.argfix || overlays.arggen || '';
-    const sysFix = composeSystem(ap.system_fix, [overlayGlobal, overlayFix].filter(Boolean).join('\n\n'));
-
+    
+    // FC 模式：构建 system（协议在前，用户内容在后）
+    let sysFix;
+    if (useFC) {
+      const policy = await buildFCPolicy();
+      const userSystem = [overlayGlobal, overlayFix, ap.system_fix].filter(Boolean).join('\n\n');
+      sysFix = userSystem 
+        ? `${policy}\n\n---\n【Protocol Requirements】Above is system protocol, must be strictly followed. Below are specific task settings and requirements:\n---\n\n${userSystem}`
+        : policy;
+    } else {
+      sysFix = composeSystem(ap.system_fix, [overlayGlobal, overlayFix].filter(Boolean).join('\n\n'));
+    }
+    
+    // FC 模式：不提前包装 objective（新模板已在整体结构外层使用 <sentra-user-question>）
+    const objectiveTextFix = objective;
+    
     const taskInstructionFix = renderTemplate(ap.user_task_fix, {
-      objective,
+      objective: objectiveTextFix,
       stepIndex: stepIndex + 1,
       totalSteps,
       aiName,
       reason: reason || '',
       description: currentToolFull?.description || '',
+      draftArgs: draftArgs ? JSON.stringify(draftArgs, null, 2) : '(无)',
       errors: JSON.stringify(ajvErrors || [], null, 2),
       requiredList: Array.isArray(requiredList) && requiredList.length ? requiredList.join(', ') : '(无)',
       requiredDetail: requiredDetail || '(无)'
     });
 
-    const dialogueMsgs = await buildToolDialogueMessages(runId, stepIndex);
-    const depAppendText = await buildDependentContextText(runId, step.dependsOn);
+    // 构建上下文（FC 模式使用 XML 格式）
+    const dialogueMsgs = await buildToolDialogueMessages(runId, stepIndex, useFC);
+    const depAppendText = await buildDependentContextText(runId, step.dependsOn, useFC);
 
     const messagesFix = compactMessages([
       { role: 'system', content: sysFix },
       ...dialogueMsgs,
       { role: 'user', content: [taskInstructionFix, depAppendText || ''].filter(Boolean).join('\n\n') }
     ]);
-
-    const useFC = String(config.llm?.toolStrategy || 'auto') === 'fc';
-    const useAuto = String(config.llm?.toolStrategy || 'auto') === 'auto';
 
     let fixedArgs = params.toolArgs;
     if (useFC) {
@@ -408,14 +532,15 @@ export async function fixToolArgs(params) {
           const invalid_line = Array.isArray(invalidFromAjv) && invalidFromAjv.length ? `- 类型不匹配字段：${invalidFromAjv.join(', ')}` : '';
           reinforce = renderTemplate(tplRe, { required_line, missing_line, invalid_line, attempt: String(attempt), max_retries: String(maxRetries) });
         }
-        const policy = await buildFCPolicy({ locale: 'zh-CN' });
+        const policy = await buildFCPolicy();
         const messagesFixFC = [...messagesFix, { role: 'user', content: [reinforce, policy, instruction].filter(Boolean).join('\n\n') }];
+        const argModel = getStageModel('arg');
         const respFix = await chatCompletion({
           messages: messagesFixFC,
           temperature: fc.temperature ?? config.llm.temperature,
           apiKey: fc.apiKey,
           baseURL: fc.baseURL,
-          model: fc.model,
+          model: argModel,
           ...(omit ? { omitMaxTokens: true } : { max_tokens: fc.maxTokens })
         });
         const contentFix = respFix?.choices?.[0]?.message?.content || '';
@@ -471,14 +596,31 @@ export async function fixToolArgs(params) {
             const invalid_line = Array.isArray(invalidFromAjv2) && invalidFromAjv2.length ? `- 类型不匹配字段：${invalidFromAjv2.join(', ')}` : '';
             reinforce = renderTemplate(tplRe, { required_line, missing_line, invalid_line, attempt: String(attempt), max_retries: String(maxRetries) });
           }
-          const policy = await buildFCPolicy({ locale: 'zh-CN' });
-          const messagesFixFC = [...messagesFix, { role: 'user', content: [reinforce, policy, instruction].filter(Boolean).join('\n\n') }];
+          // FC 模式：policy 已在 system 中，这里只需要 reinforce 和 instruction
+          const messagesFixFC = [...messagesFix, { role: 'user', content: [reinforce, instruction].filter(Boolean).join('\n\n') }];
+
+          // 调试日志：打印修复请求的 messages 数组
+          if (config.flags.enableVerboseSteps) {
+            logger.info('ArgGen FC 修复请求 messages', {
+              label: 'ARGS_FIX_DEBUG',
+              aiName,
+              attempt,
+              messagesCount: messagesFixFC.length,
+              messages: messagesFixFC.map((m, idx) => ({
+                index: idx,
+                role: m.role,
+                contentPreview: clip(m.content, 200)
+              }))
+            });
+          }
+
+          const argModel = getStageModel('arg');
           const respFix2 = await chatCompletion({
             messages: messagesFixFC,
             temperature: fc.temperature ?? config.llm.temperature,
             apiKey: fc.apiKey,
             baseURL: fc.baseURL,
-            model: fc.model,
+            model: argModel,
             ...(omit ? { omitMaxTokens: true } : { max_tokens: fc.maxTokens })
           });
           const contentFix2 = respFix2?.choices?.[0]?.message?.content || '';

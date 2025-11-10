@@ -5,7 +5,8 @@
     "type": "object",
     "properties": {
       "message_id": {
-        "type": "integer"
+        "type": "integer",
+        "description": "消息ID（必填，数字类型）。从上下文或历史消息中获取真实的消息ID，不要使用占位符或标识符。注意：QQ消息ID可能超过JavaScript安全整数范围。"
       },
       "requestId": {
         "type": "string"

@@ -10,7 +10,12 @@
           "type": "string"
         },
         "minItems": 1,
-        "description": "Array of complete image URLs (http/https) or complete absolute local file paths (e.g., C:/full/path/to/image.jpg). Partial paths, relative paths, or filename-only references are not permitted."
+        "description": "图片路径数组。支持：1) **本地绝对路径**（必须包含完整盘符或根目录）；2) http/https URL。禁止使用相对路径或仅文件名。支持格式：JPG/PNG/GIF/WebP 等。",
+        "examples": [
+          ["E:/images/photo.jpg", "C:/Users/Admin/Pictures/screenshot.png"],
+          ["/home/user/images/diagram.png", "/var/www/uploads/banner.webp"],
+          ["https://example.com/image.jpg"]
+        ]
       },
       "prompt": {
         "type": "string",

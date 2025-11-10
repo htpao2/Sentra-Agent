@@ -3,9 +3,23 @@
 import { loadPrompt, renderTemplate } from '../agent/prompts/loader.js';
 
 /**
- * Extract <function_call> ... </function_call> blocks from text and parse to calls
+ * Extract <sentra-tools> ... </sentra-tools> blocks from text and parse to calls
  * Returns array of { name: string, arguments: any }
- * - Accepts shapes: { name, arguments } | { function: { name, arguments } } | { function_call: { name, arguments } }
+ * Supports both XML format (preferred) and legacy ReAct format
+ * 
+ * XML format (Sentra XML Protocol):
+ * <sentra-tools>
+ *   <invoke name="tool_name">
+ *     <parameter name="param1">value1</parameter>
+ *     <parameter name="param2">{"key": "value"}</parameter>
+ *   </invoke>
+ * </sentra-tools>
+ * 
+ * Legacy ReAct format (backward compatibility):
+ * <sentra-tools>
+ * Action: tool_name
+ * Action Input: {...JSON...}
+ * </sentra-tools>
  */
 export function parseFunctionCalls(text = '', opts = {}) {
   if (!text || typeof text !== 'string') return [];
@@ -15,8 +29,15 @@ export function parseFunctionCalls(text = '', opts = {}) {
   let m;
   while ((m = reSentra.exec(text)) !== null) {
     const raw = (m[1] || '').trim();
-    const call = parseSentraBlock(raw);
-    if (call) out.push(call);
+    // Try XML format first (preferred)
+    const xmlCall = parseSentraXML(raw);
+    if (xmlCall) {
+      out.push(xmlCall);
+      continue;
+    }
+    // Fallback to legacy ReAct format for backward compatibility
+    const reactCall = parseSentraReAct(raw);
+    if (reactCall) out.push(reactCall);
   }
   return out;
 }
@@ -51,7 +72,7 @@ export async function buildPlanFunctionCallInstruction({ allowedAiNames = [], lo
       steps: [
         {
           aiName: 'string (必须在允许列表中)',
-          reason: 'string',
+          reason: ['string', 'string', '...'] + ' (数组，每项为一个具体操作或理由)',
           nextStep: 'string',
           draftArgs: { '...': '...' },
           dependsOn: ['number 索引数组，可省略']
@@ -74,7 +95,7 @@ export async function buildPlanFunctionCallInstruction({ allowedAiNames = [], lo
 /**
  * Build policy text describing usage & constraints for function_call markers.
  */
-export async function buildFCPolicy({ locale = 'zh-CN' } = {}) {
+export async function buildFCPolicy({ locale = 'en' } = {}) {
   const pf = await loadPrompt('fc_policy_sentra');
   const tpl = String(locale).toLowerCase().startsWith('zh') ? pf.zh : pf.en;
   return renderTemplate(tpl, { tag: '<sentra-tools>' });
@@ -96,8 +117,68 @@ function safeParseJson(s) {
   return null;
 }
 
-// Parse a <sentra-tools> ReAct block into { name, arguments }
-function parseSentraBlock(raw) {
+/**
+ * Parse Sentra XML Protocol format:
+ * <invoke name="tool_name">
+ *   <parameter name="param1">value1</parameter>
+ *   <parameter name="param2">{"key": "value"}</parameter>
+ * </invoke>
+ * 
+ * Key features:
+ * - String/scalar parameters: specified directly (no escaping needed)
+ * - Lists/objects: use JSON format
+ * - Spaces in string values are preserved
+ * - Parsed with regex (not strict XML validation)
+ */
+function parseSentraXML(raw) {
+  if (!raw) return null;
+  const withoutFences = stripCodeFences(raw);
+  
+  // Match <invoke name="..."> ... </invoke>
+  const reInvoke = /<\s*invoke\s+name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\s*\/\s*invoke\s*>/i;
+  const mInvoke = withoutFences.match(reInvoke);
+  if (!mInvoke) return null;
+  
+  const name = String(mInvoke[1] || '').trim();
+  const paramsBlock = mInvoke[2] || '';
+  
+  // Extract all <parameter name="...">...</parameter> pairs
+  const reParam = /<\s*parameter\s+name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\s*\/\s*parameter\s*>/gi;
+  const args = {};
+  let paramMatch;
+  
+  while ((paramMatch = reParam.exec(paramsBlock)) !== null) {
+    const paramName = String(paramMatch[1] || '').trim();
+    const paramValue = paramMatch[2] || '';
+    
+    if (!paramName) continue;
+    
+    // Try to parse as JSON first (for objects/arrays)
+    const trimmed = paramValue.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || 
+        (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      const parsed = safeParseJson(trimmed);
+      if (parsed !== null) {
+        args[paramName] = parsed;
+        continue;
+      }
+    }
+    
+    // Otherwise treat as string/scalar (preserve spaces, try type inference)
+    const value = inferScalarType(paramValue);
+    args[paramName] = value;
+  }
+  
+  if (Object.keys(args).length === 0) return null;
+  return { name, arguments: args };
+}
+
+/**
+ * Parse legacy ReAct format (backward compatibility):
+ * Action: tool_name
+ * Action Input: {...JSON...}
+ */
+function parseSentraReAct(raw) {
   if (!raw) return null;
   const withoutFences = stripCodeFences(raw);
   // Allow Chinese colon, varying spaces/cases
@@ -116,6 +197,34 @@ function parseSentraBlock(raw) {
   return { name, arguments: args };
 }
 
+/**
+ * Infer scalar type from string value
+ * - Numbers: convert to number
+ * - Booleans: convert to boolean
+ * - null: convert to null
+ * - Others: keep as string (preserve spaces)
+ */
+function inferScalarType(value) {
+  if (typeof value !== 'string') return value;
+  
+  const trimmed = value.trim();
+  
+  // Boolean
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  
+  // null
+  if (trimmed === 'null') return null;
+  
+  // Number
+  if (trimmed !== '' && !isNaN(Number(trimmed))) {
+    return Number(trimmed);
+  }
+  
+  // String (preserve original spacing)
+  return value;
+}
+
 function stripCodeFences(s) {
   const t = String(s || '').trim();
   if (t.startsWith('```')) {
@@ -131,4 +240,122 @@ function stripCodeFences(s) {
   return t;
 }
 
-export default { parseFunctionCalls, buildFunctionCallInstruction, buildPlanFunctionCallInstruction, buildFCPolicy };
+/**
+ * Format a tool call to Sentra XML format
+ * @param {string} name - Tool name
+ * @param {Object} args - Tool arguments
+ * @returns {string} XML formatted tool call
+ */
+export function formatSentraToolCall(name, args = {}) {
+  const params = Object.entries(args || {}).map(([key, value]) => {
+    let content;
+    if (typeof value === 'object' && value !== null) {
+      content = JSON.stringify(value);
+    } else if (typeof value === 'string') {
+      content = value;
+    } else {
+      content = String(value);
+    }
+    return `    <parameter name="${key}">${content}</parameter>`;
+  }).join('\n');
+  
+  return `<sentra-tools>
+  <invoke name="${name}">
+${params}
+  </invoke>
+</sentra-tools>`;
+}
+
+/**
+ * Format a tool result to Sentra XML format
+ * @param {Object} params
+ * @param {number} params.stepIndex - Step index
+ * @param {string} params.aiName - Tool name
+ * @param {string|Array} params.reason - Reason for using the tool
+ * @param {Object} params.args - Tool arguments
+ * @param {Object} params.result - Tool execution result
+ * @returns {string} XML formatted result
+ */
+export function formatSentraResult({ stepIndex, aiName, reason, args, result }) {
+  const reasonText = Array.isArray(reason) ? reason.join('; ') : String(reason || '');
+  const argsJson = JSON.stringify(args || {});
+  const resultData = result?.data !== undefined ? result.data : result;
+  const resultJson = JSON.stringify(resultData);
+  const success = result?.success !== false;
+  
+  return `<sentra-result step="${stepIndex}" tool="${aiName}" success="${success}">
+  <reason>${reasonText}</reason>
+  <arguments>${argsJson}</arguments>
+  <data>${resultJson}</data>
+</sentra-result>`;
+}
+
+/**
+ * Format user question to Sentra XML format
+ * @param {string} question - User question text
+ * @returns {string} XML formatted question
+ */
+export function formatSentraUserQuestion(question) {
+  return `<sentra-user-question>${question}</sentra-user-question>`;
+}
+
+/**
+ * Parse <sentra-result> XML format
+ * Returns { stepIndex, aiName, reason, args, result, success }
+ */
+export function parseSentraResult(text) {
+  if (!text || typeof text !== 'string') return null;
+  const withoutFences = stripCodeFences(text);
+  
+  // Match <sentra-result step="..." tool="..." success="..."> ... </sentra-result>
+  const reResult = /<\s*sentra-result\s+step\s*=\s*["']([^"']+)["']\s+tool\s*=\s*["']([^"']+)["'](?:\s+success\s*=\s*["']([^"']+)["'])?[^>]*>([\s\S]*?)<\s*\/\s*sentra-result\s*>/i;
+  const mResult = withoutFences.match(reResult);
+  if (!mResult) return null;
+  
+  const stepIndex = parseInt(mResult[1], 10);
+  const aiName = String(mResult[2] || '').trim();
+  const success = String(mResult[3] || 'true').toLowerCase() === 'true';
+  const contentBlock = mResult[4] || '';
+  
+  // Extract <reason>, <arguments>, <data>
+  const reReason = /<\s*reason\s*>([\s\S]*?)<\s*\/\s*reason\s*>/i;
+  const reArgs = /<\s*arguments\s*>([\s\S]*?)<\s*\/\s*arguments\s*>/i;
+  const reData = /<\s*data\s*>([\s\S]*?)<\s*\/\s*data\s*>/i;
+  
+  const mReason = contentBlock.match(reReason);
+  const mArgs = contentBlock.match(reArgs);
+  const mData = contentBlock.match(reData);
+  
+  const reason = mReason ? String(mReason[1] || '').trim() : '';
+  const args = mArgs ? safeParseJson(mArgs[1]) : {};
+  const data = mData ? safeParseJson(mData[1]) : null;
+  
+  return { stepIndex, aiName, reason, args, result: { success, data }, success };
+}
+
+/**
+ * Parse <sentra-user-question> XML format
+ * Returns the question text
+ */
+export function parseSentraUserQuestion(text) {
+  if (!text || typeof text !== 'string') return null;
+  const withoutFences = stripCodeFences(text);
+  
+  const reQuestion = /<\s*sentra-user-question\s*>([\s\S]*?)<\s*\/\s*sentra-user-question\s*>/i;
+  const mQuestion = withoutFences.match(reQuestion);
+  if (!mQuestion) return null;
+  
+  return String(mQuestion[1] || '').trim();
+}
+
+export default { 
+  parseFunctionCalls, 
+  buildFunctionCallInstruction, 
+  buildPlanFunctionCallInstruction, 
+  buildFCPolicy,
+  formatSentraToolCall,
+  formatSentraResult,
+  formatSentraUserQuestion,
+  parseSentraResult,
+  parseSentraUserQuestion
+};

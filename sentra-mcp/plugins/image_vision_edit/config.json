@@ -10,7 +10,12 @@
           "type": "string"
         },
         "minItems": 1,
-        "description": "图片链接（http/https）或本地绝对路径，支持多个"
+        "description": "图片路径数组。支持：1) **本地绝对路径**（必须包含完整盘符或根目录）；2) http/https URL。禁止使用相对路径或仅文件名。支持格式：JPG/PNG/GIF/WebP 等。",
+        "examples": [
+          ["E:/images/original.jpg", "C:/Users/Admin/Pictures/photo.png"],
+          ["/home/user/images/source.png", "/var/www/uploads/image.webp"],
+          ["https://example.com/image.jpg"]
+        ]
       },
       "prompt": {
         "type": "string",

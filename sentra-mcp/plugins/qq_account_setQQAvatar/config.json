@@ -6,7 +6,13 @@
     "properties": {
       "file": {
         "type": "string",
-        "description": "头像图片文件路径（建议绝对路径）"
+        "description": "头像图片文件路径。**必须使用绝对路径**（包含完整盘符或根目录），不能使用相对路径。支持格式：jpg/png/gif/webp 等。",
+        "examples": [
+          "E:/images/avatar.jpg",
+          "C:/Users/Admin/Pictures/profile.png",
+          "/home/user/images/avatar.jpg",
+          "/tmp/uploaded_avatar.png"
+        ]
       },
       "schedule": {
         "oneOf": [

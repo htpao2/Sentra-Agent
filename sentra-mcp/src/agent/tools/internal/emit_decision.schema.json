@@ -4,20 +4,26 @@
   "properties": {
     "need_tools": { 
       "type": "boolean",
-      "description": "是否需要调用工具"
+      "description": "Whether external tools are needed to complete the task. IMPORTANT: Set to TRUE if the objective contains: (1) Local file paths (images, documents, etc.) - tools CAN read them; (2) Real-time information queries (latest news, current events, recent updates); (3) External resource access (web search, API calls, database queries); (4) Content generation (image creation, file operations); (5) Interactive operations (sending messages, executing commands). Set to FALSE only for simple conversations, general knowledge questions (not time-sensitive), or basic explanations."
     },
     "summary": { 
       "type": "string",
-      "description": "1-2句话简要总结用户需求和关键信息"
+      "description": "Brief 1-2 sentence summary of the user's request and key information. Identify the main intent and any critical details (file paths, search queries, specific requirements)."
     },
     "operations": { 
       "type": "array",
-      "description": "需要执行的操作列表（如果需要工具），每个操作应简短、动作化",
+      "description": "List of operations needed to complete the task, used for tool matching and reranking. Each operation should be a 2-6 word verb phrase (e.g., 'read image file', 'search web', 'generate report', 'send message'). Use English or match the user's language. If need_tools=false, output empty array [].",
       "items": {
         "type": "string"
-      }
+      },
+      "examples": [
+        ["read image file", "analyze content"],
+        ["search web", "summarize results"],
+        ["read file", "extract data", "generate report"],
+        []
+      ]
     }
   },
-  "required": ["need_tools"],
+  "required": ["need_tools", "operations"],
   "additionalProperties": true
 }

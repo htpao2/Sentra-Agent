@@ -27,21 +27,17 @@ function buildRerankUrl(baseURL) {
 }
 
 /**
- * 从 judge 结果中提取用于重排序的子查询
- * 支持两种格式：
- * 1. 新格式：judge.operations 数组（优先使用）
- * 2. 旧格式：judge.reason 字符串（使用分号分割）
- * @param {string|Array} reasonOrOps - judge.reason 字符串或 judge.operations 数组
+ * 从 judge.operations 数组中提取用于重排序的子查询
+ * @param {Array} operations - judge.operations 数组
  * @param {string} fallbackQuery - 兜底查询
  * @param {number} maxSubqueries - 最大子查询数量
  * @returns {Array<string>} 子查询数组
  */
-function extractSubQueriesFromReason(reasonOrOps, fallbackQuery, maxSubqueries = 5) {
+function extractSubQueriesFromOperations(operations, fallbackQuery, maxSubqueries = 5) {
   const fq = String(fallbackQuery || '').trim();
   
-  // 新格式：如果传入的是数组，直接使用
-  if (Array.isArray(reasonOrOps)) {
-    let parts = reasonOrOps.map(s => String(s || '').trim()).filter(Boolean);
+  if (Array.isArray(operations)) {
+    let parts = operations.map(s => String(s || '').trim()).filter(Boolean);
     if (Number.isFinite(maxSubqueries) && maxSubqueries > 0) {
       parts = parts.slice(0, maxSubqueries);
     }
@@ -49,14 +45,8 @@ function extractSubQueriesFromReason(reasonOrOps, fallbackQuery, maxSubqueries =
     return parts;
   }
   
-  // 旧格式：字符串使用分号分割
-  const src = String(reasonOrOps || '').trim();
-  let parts = src.split(';').map(s => s.trim()).filter(Boolean);
-  if (Number.isFinite(maxSubqueries) && maxSubqueries > 0) {
-    parts = parts.slice(0, maxSubqueries);
-  }
-  if (!parts.length && fq) return [fq];
-  return parts;
+  // 非数组，返回兜底查询
+  return fq ? [fq] : [];
 }
 
 export async function rerankDocumentsSiliconFlow({ query, documents, baseURL, apiKey, model, topN, timeoutMs }) {
@@ -105,23 +95,21 @@ export async function rerankDocumentsSiliconFlow({ query, documents, baseURL, ap
  * 重排序工具清单
  * @param {Object} params
  * @param {Array} params.manifest - 工具清单
- * @param {string|Array} params.judgeReason - judge.reason字符串或judge.operations数组
- * @param {Array} params.judgeOperations - judge.operations数组（优先使用）
- * @param {string} params.objective - 目标描述
+ * @param {Array} params.judgeOperations - judge.operations 数组
+ * @param {string} params.objective - 目标描述（兜底）
  * @param {number} params.candidateK - 候选数量
  * @param {number} params.topN - 返回Top N
  * @returns {Promise<{manifest: Array, indices: Array, scores: Array}>}
  */
-export async function rerankManifest({ manifest, judgeReason, judgeOperations, objective, candidateK, topN }) {
+export async function rerankManifest({ manifest, judgeOperations, objective, candidateK, topN }) {
   if (!Array.isArray(manifest)) return { manifest: [], indices: [], scores: [] };
   const L = manifest.length;
   if (L === 0) return { manifest: [], indices: [], scores: [] };
 
-  // 优先使用 operations 数组，其次使用 judgeReason 字符串
-  const jr = judgeOperations || judgeReason;
-  const query = (Array.isArray(jr) && jr.length > 0) 
-    ? jr[0]  // 如果是数组，用第一个作为主查询
-    : String(judgeReason || '').trim() || String(objective || '').trim();
+  // 使用 operations 数组的第一个作为主查询，兜底使用 objective
+  const query = (Array.isArray(judgeOperations) && judgeOperations.length > 0) 
+    ? judgeOperations[0]
+    : String(objective || '').trim();
   if (!query) return { manifest, indices: manifest.map((_, i) => i), scores: [] };
 
   // 构建工具文档
@@ -157,7 +145,7 @@ export async function rerankManifest({ manifest, judgeReason, judgeOperations, o
       try {
         // 允许 RERANK_MAX_SUBQUERIES<=0 表示不限制：不要用 `|| 5` 覆盖 0
         const maxSubsCfg = Number(config.rerank?.maxSubqueries);
-        const subQueries = extractSubQueriesFromReason(jr, query, maxSubsCfg);
+        const subQueries = extractSubQueriesFromOperations(judgeOperations, query, maxSubsCfg);
         if (config.flags.enableVerboseSteps) {
           // 打印全部子查询，避免误解为只支持前5个
           logger.info('重排序子查询', { label: 'RERANK', count: subQueries.length, items: subQueries });

@@ -19,12 +19,8 @@
 > - **[白名单配置 (WHITELIST.md)](./docs/WHITELIST.md)** - 消息过滤与白名单设置
 >
 > 参考文档：
-> - NapCat 接口文档 (Apifox): https://napcat.apifox.cn/
-> - OneBot 11 协议（常见实现兼容）：https://github.com/botuniverse/onebot-11
-
-##  Logger
-
-基于 `chalk` 的彩色日志，`.env` 支持 `LOG_LEVEL=debug|info|warn|error|silent`。
+> - NapCat 接口文档: https://napcat.apifox.cn/
+> - OneBot 11 协议：https://github.com/botuniverse/onebot-11
 
 ##  Quick Start
 
@@ -61,18 +57,8 @@ WHITELIST_USERS=2166683295
 **生产环境（纯净模式）**:
 
 ```bash
-# 正向 WS 模式
-npm start
-
-# 反向 WS 模式
-npm run start:reverse
-```
-
-**开发环境（测试模式）**:
-
-```bash
-# 包含所有测试命令
-npm test
+# 反向 WS 模式 开始
+npm run start
 ```
 
 ### 4. 测试功能（仅测试模式）
@@ -87,13 +73,7 @@ npm test
 #groupinfo - 获取群信息
 ```
 
-**注意**: 
-- 生产环境 (`npm start`) 不包含任何硬编码响应，适合集成自定义插件
-- 测试环境 (`npm test`) 包含测试命令，用于功能测试
-
-详细使用说明: [快速开始](./QUICK_START.md) | [完整文档](./USAGE.md)
-
-##  Directory Structure
+##  目录
 
 - `src/types/onebot.ts` OneBot 11 类型定义
 - `src/utils/message.ts` 消息段构建与转换
@@ -101,22 +81,6 @@ npm test
 - `src/adapter/NapcatAdapter.ts` 适配器封装（高阶方法 + 通用调用）
 - `src/logger.ts` 基于 chalk 的彩色日志
 - `examples/basic.ts` 示例脚本
-
-##  Example Usage
-
-在 `.env` 配好 `NAPCAT_WS_URL` 和必要的 token 后：
-
-```bash
-npm run example
-```
-
-示例会：
-- 连接 NapCat WS
-- 监听 `message` 事件
-- 如果设置了 `TEST_GROUP_ID`/`TEST_USER_ID`，发送一条群/私聊消息；设置 `TEST_REPLY_MSG_ID` 可演示引用回复
- 
-
-如需强类型与更完善的封装，可以在 `NapcatAdapter` 中逐步添加方法。也欢迎将你需要的动作列出来，我可以按文档一次性补全。
 
 ##  Reverse WebSocket（反向 WS）
 
@@ -127,49 +91,16 @@ npm run example
 ```
 REVERSE_PORT=6701
 REVERSE_PATH=/onebot
-NAPCAT_ACCESS_TOKEN=your_token_if_any
+NAPCAT_ACCESS_TOKEN=napcat
 ```
 
-2) 运行示例：
-
-```bash
-npm run example:reverse
-```
-
-3) 在 NapCat WebUI → WebSocket 客户端（或相关入口）配置目标地址：
+2) 在 NapCat WebUI → WebSocket 客户端（或相关入口）配置目标地址：
 
 ```
 ws://<你的服务器IP或127.0.0.1>:6701/onebot?access_token=your_token_if_any
 ```
 
 连接成功后，即可通过 `NapcatReverseAdapter` 的封装进行收发消息。
-
-##  命令路由插件（Command Router）
-
-提供简单前缀命令路由能力：
-
-1) 可在 `.env` 设置命令前缀：
-
-```
-COMMAND_PREFIX=!
-```
-
-2) 运行命令示例：
-
-```bash
-npm run example:commands
-```
-
-3) 在代码中：
-
-```ts
-import { createCommandRouter } from './src';
-const router = createCommandRouter({ prefix: process.env.COMMAND_PREFIX || '!' });
-router.command('ping', async (ctx) => { await ctx.reply('pong'); });
-adapter.use(router);
-```
-
-默认支持使用 `@机器人` 作为前缀（可关闭），示例内置 `!ping`、`!echo`、`!help`。
 
 ##  功能调用指南（API）
 
@@ -246,8 +177,6 @@ await adapter.setGroupKick(group_id, user_id, true);    // 踢人并拒绝加群
 await adapter.setGroupCard(group_id, user_id, '新名片');
 await adapter.setGroupName(group_id, '新群名');
 await adapter.setGroupLeave(group_id, false);           // 退群
-
-// 请求处理
 await adapter.setGroupAddRequest(flag, 'accept');
 await adapter.setFriendAddRequest(flag, 'accept');
 ```
@@ -311,7 +240,7 @@ DEDUP_EVENTS=true
 DEDUP_TTL_MS=120000
 ```
 
-### 日志与调试（紧凑彩色输出）
+### 日志与调试
 
 ```ts
 import { formatMessageCompact } from '../src';
@@ -323,13 +252,6 @@ adapter.on('message', (ev) => {
 });
 ```
 
-Windows 若颜色不生效，运行前设置：
-
-```powershell
-$env:FORCE_COLOR="1"
-npm run example # 或 example:reverse
-```
-
 ### 正向 / 反向模式说明
 
 - 正向（`NapcatAdapter`）：我们作为客户端连接 NapCat 暴露的 WS。
@@ -337,7 +259,7 @@ npm run example # 或 example:reverse
   - `.env`：`REVERSE_PORT`、`REVERSE_PATH`、（可选）`NAPCAT_ACCESS_TOKEN`
   - NapCat 客户端 URL：`ws://127.0.0.1:REVERSE_PORT/REVERSE_PATH?access_token=...`
 
-##  SDK 使用（fetch 风格）
+##  SDK 使用
 
 框架提供了一个“调用即返回响应”的简洁 SDK 接口，默认读取 `.env` 并连接正向 WS。
 
@@ -427,12 +349,6 @@ adapter.on('message', async (ev) => {
 });
 ```
 
-### 运行白名单示例
-
-```bash
-npm run example:whitelist
-```
-
 ### 工作原理
 
 - **群聊过滤**：如果设置了 `WHITELIST_GROUPS`，只有来自这些群的消息会被处理
@@ -440,7 +356,3 @@ npm run example:whitelist
 - **空白名单**：如果白名单为空（未设置或空字符串），则允许所有消息通过
 - **日志记录**：设置 `LOG_FILTERED=true` 可以在日志中看到被过滤的消息（用于调试）
 - **其他事件**：白名单只过滤 `message` 事件，`notice`、`request`、`meta_event` 等事件不受影响
-
-## 许可
-
-MIT

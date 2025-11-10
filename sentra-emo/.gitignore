@@ -112,3 +112,27 @@ desktop.ini
 test/1.txt.backup
 *.private
 *_private.*
+
+# Sentra Emo Specific
+# 数据文件
+data/*.duckdb
+data/*.duckdb.wal
+data/*.csv
+data/*.csv.bak
+data/users/
+data/*.parquet
+data/*.png
+data/*.jpg
+
+# 字体文件（大文件，需单独下载）
+fonts/*.ttf
+fonts/*.otf
+fonts/*.ttc
+fonts/*.woff
+fonts/*.woff2
+# 保留README
+!fonts/README.md
+
+# 模型文件（需单独下载）
+models/*/
+!models/README.md

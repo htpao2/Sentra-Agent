@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "is_complete": {
+      "type": "boolean",
+      "description": "当前任务是否已经完整达成目标。如果任务目标已充分完成，所有必要的操作都已执行，则为 true；如果存在明显遗漏、未完成的关键步骤或可以进一步优化的操作，则为 false。"
+    },
+    "completeness_analysis": {
+      "type": "string",
+      "description": "完整性分析说明。简要说明为什么认为任务已完整或仍有遗漏，分析已完成的操作与目标的匹配程度。"
+    },
+    "missing_aspects": {
+      "type": "array",
+      "description": "遗漏的方面或未完成的关键操作。如果 is_complete 为 false，列出所有识别出的遗漏点；如果 is_complete 为 true，则为空数组 []。每项应该是简洁的描述（2-10字）。",
+      "items": {
+        "type": "string"
+      }
+    },
+    "suggested_supplements": {
+      "type": "array",
+      "description": "建议的补充操作列表。如果 is_complete 为 false 且识别出具体的补充操作，列出所有建议；如果 is_complete 为 true，则为空数组 []。每个补充操作应包含操作描述、原因和建议使用的工具。",
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "description": "补充操作的简要描述（如'验证生成结果'、'保存到文件'、'发送通知'等），2-20字"
+          },
+          "reason": {
+            "type": "string",
+            "description": "为什么需要这个补充操作，以及它如何帮助完善任务"
+          },
+          "suggested_tools": {
+            "type": "array",
+            "description": "建议使用的工具名称列表（从可用工具中选择）。如果不确定具体工具，可以为空数组 []，由后续规划阶段决定。",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["operation", "reason"]
+      }
+    }
+  },
+  "required": ["is_complete", "completeness_analysis", "missing_aspects", "suggested_supplements"],
+  "additionalProperties": false
+}

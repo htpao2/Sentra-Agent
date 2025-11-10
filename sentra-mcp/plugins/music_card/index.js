@@ -1,5 +1,6 @@
 import logger from '../../src/logger/index.js';
 import wsCall from '../../src/utils/ws_rpc.js';
+import { getIdsWithCache } from '../../src/utils/message_cache_helper.js';
 
 function toInt(v) {
   const n = Number(v);
@@ -83,10 +84,15 @@ export default async function handler(args = {}, options = {}) {
   const provider = String(args.provider || '163').trim();
   if (provider !== '163') return { success: false, code: 'UNSUPPORTED', error: '仅支持 provider=163（网易云）' };
 
-  const user_id = args.user_id;
-  const group_id = args.group_id;
-  if (!user_id && !group_id) return { success: false, code: 'TARGET_REQUIRED', error: '必须提供 user_id（私聊）或 group_id（群聊）' };
-  if (user_id && group_id) return { success: false, code: 'TARGET_EXCLUSIVE', error: 'user_id 与 group_id 只能二选一' };
+  // 从参数或缓存中获取 ID（优先参数，其次缓存）
+  const { user_id, group_id, source } = await getIdsWithCache(args, options, 'music_card');
+  
+  logger.info?.('music_card:ids_resolved', { 
+    label: 'PLUGIN', 
+    user_id, 
+    group_id, 
+    source 
+  });
 
   const defaultLimit = toInt(penv.MUSIC163_SEARCH_LIMIT || process.env.MUSIC163_SEARCH_LIMIT) ?? 6;
   const limit = Math.max(1, Math.min(10, toInt(args.limit) ?? defaultLimit));

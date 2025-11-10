@@ -6,7 +6,14 @@
     "properties": {
       "file": {
         "type": "string",
-        "description": "音视频文件路径（必填）：本地绝对路径 或 http/https URL。格式：mp3/mp4/wav/amr/m4a/webm/flac/ogg 等"
+        "description": "音视频文件路径（必填）。支持：1) **本地绝对路径**（必须包含完整盘符或根目录，不能使用相对路径）；2) http/https URL。支持格式：mp3/mp4/wav/amr/m4a/webm/flac/ogg 等。",
+        "examples": [
+          "E:/media/audio.mp3",
+          "C:/Users/Admin/Videos/video.mp4",
+          "/home/user/music/song.wav",
+          "/var/media/recording.m4a",
+          "https://example.com/audio.mp3"
+        ]
       },
       "language": {
         "type": "string",

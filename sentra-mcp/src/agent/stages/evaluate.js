@@ -3,7 +3,7 @@
  */
 
 import logger from '../../logger/index.js';
-import { config } from '../../config/index.js';
+import { config, getStageModel } from '../../config/index.js';
 import { chatCompletion } from '../../openai/client.js';
 import { HistoryStore } from '../../history/store.js';
 import { loadPrompt, renderTemplate, composeSystem } from '../prompts/loader.js';
@@ -39,7 +39,7 @@ export async function evaluateRun(objective, plan, exec, runId, context = {}) {
   const sys = composeSystem(fj.system, [overlayGlobal, overlayEval].filter(Boolean).join('\n\n'));
   const history = await HistoryStore.list(runId, 0, -1);
   const stepNames = (exec?.used || []).map((u) => u.aiName).join(', ');
-  const tail = history.slice(-Math.max(5, Math.min(12, history.length)));
+  const tail = history;
   const manifestText = manifestToBulletedText(Array.isArray(plan?.manifest) ? plan.manifest : []);
 
   // 复用“前置思考”流程（仅在开启时调用）
@@ -70,7 +70,7 @@ export async function evaluateRun(objective, plan, exec, runId, context = {}) {
   ]);
 
   // FC 指令与策略（sentra 格式）
-  const policy = await buildFCPolicy({ locale: 'zh-CN' });
+  const policy = await buildFCPolicy();
   const fcInstr = await buildFunctionCallInstruction({ name: 'final_judge', parameters: judgeToolDef.function?.parameters || { type: 'object', properties: {} }, locale: 'zh-CN' });
   const fc = config.fcLlm || {};
   const omit = !(Number.isFinite(fc.maxTokens) && fc.maxTokens > 0);
@@ -84,13 +84,7 @@ export async function evaluateRun(objective, plan, exec, runId, context = {}) {
   const useFC = strategy === 'fc';
   const useAuto = strategy === 'auto';
 
-  // 工具中心评估：若存在至少一次工具调用且全部成功，则直接判定成功（避免 LLM 误判超范围目标）
-  if (Number(exec?.attempted || 0) > 0 && Number(exec?.succeeded || 0) === Number(exec?.attempted || 0)) {
-    result = { success: true, summary: '工具中心评估：已调用的工具均成功执行并返回结果，视为成功。超出当前工具能力的更高层目标不纳入失败判定。' };
-    emitRunEvent(runId, { type: 'evaluation', result });
-    await HistoryStore.append(runId, { type: 'evaluation', result });
-    return result;
-  }
+  // 移除快捷判断逻辑，所有评估都走 LLM 判断（确保任务目标是否达成由 LLM 判断，而非仅看工具是否成功）
 
   // 1) Native tools first (if strategy is native or auto)
   if (!useFC) {
@@ -106,11 +100,24 @@ export async function evaluateRun(objective, plan, exec, runId, context = {}) {
       try {
         const args = JSON.parse(call.function.arguments);
         const success = typeof args.success === 'boolean' ? args.success : (String(args.success).toLowerCase() === 'true');
+        const incomplete = typeof args.incomplete === 'boolean' ? args.incomplete : (String(args.incomplete || '').toLowerCase() === 'true');
         const failedSteps = Array.isArray(args.failedSteps) ? args.failedSteps.map((it) => ({
           index: Number(it?.index), aiName: typeof it?.aiName === 'string' ? it.aiName : undefined, reason: String(it?.reason || '')
         })).filter((it) => Number.isFinite(it.index) && it.reason) : [];
         const summary = typeof args.summary === 'string' ? args.summary : '';
-        result = { success: !!success, failedSteps, summary };
+        result = { success: !!success, incomplete: !!incomplete, failedSteps, summary };
+        
+        // 验证：当 success=false 时，failedSteps 不能为空
+        if (result.success === false && (!Array.isArray(result.failedSteps) || result.failedSteps.length === 0)) {
+          logger.warn('Evaluation 验证失败：success=false 但 failedSteps 为空，这不符合要求！', {
+            label: 'EVAL',
+            runId,
+            success: result.success,
+            failedStepsCount: result.failedSteps?.length || 0,
+            summary: result.summary?.slice(0, 200)
+          });
+        }
+        
         emitRunEvent(runId, { type: 'evaluation', result });
         await HistoryStore.append(runId, { type: 'evaluation', result });
         return result;
@@ -135,13 +142,14 @@ export async function evaluateRun(objective, plan, exec, runId, context = {}) {
       } catch {}
     }
     const messages = compactMessages([...baseMsgs, { role: 'user', content: [reinforce, policy, fcInstr].filter(Boolean).join('\n\n') }]);
+    const evalModel = getStageModel('eval');
     const res = await chatCompletion({
       messages,
       temperature,
       top_p,
       apiKey: fc.apiKey,
       baseURL: fc.baseURL,
-      model: fc.model,
+      model: evalModel,
       ...(omit ? { omitMaxTokens: true } : { max_tokens: fc.maxTokens })
     });
     const content = res?.choices?.[0]?.message?.content || '';
@@ -159,14 +167,30 @@ export async function evaluateRun(objective, plan, exec, runId, context = {}) {
     try {
       const args = call?.arguments || {};
       const success = typeof args.success === 'boolean' ? args.success : (String(args.success).toLowerCase() === 'true');
+      const incomplete = typeof args.incomplete === 'boolean' ? args.incomplete : (String(args.incomplete || '').toLowerCase() === 'true');
       const failedSteps = Array.isArray(args.failedSteps) ? args.failedSteps.map((it) => ({
         index: Number(it?.index),
         aiName: typeof it?.aiName === 'string' ? it.aiName : undefined,
         reason: String(it?.reason || '')
       })).filter((it) => Number.isFinite(it.index) && it.reason) : [];
       const summary = typeof args.summary === 'string' ? args.summary : '';
-      result = { success: !!success, failedSteps, summary };
-      // 若解析到则完成
+      result = { success: !!success, incomplete: !!incomplete, failedSteps, summary };
+      
+      // 验证：当 success=false 时，failedSteps 不能为空
+      if (result.success === false && (!Array.isArray(result.failedSteps) || result.failedSteps.length === 0)) {
+        logger.warn('Evaluation 验证失败：success=false 但 failedSteps 为空，尝试重试', {
+          label: 'EVAL',
+          runId,
+          attempt,
+          success: result.success,
+          failedStepsCount: result.failedSteps?.length || 0,
+          summary: result.summary?.slice(0, 200)
+        });
+        // 不 break，继续重试下一轮
+        continue;
+      }
+      
+      // 若解析到且验证通过则完成
       break;
     } catch {}
   }
@@ -177,7 +201,7 @@ export async function evaluateRun(objective, plan, exec, runId, context = {}) {
     logger.warn?.('FC 评估：未能解析到有效结果，已达最大重试次数', {
       label: 'EVAL', retries: maxRetries, contentRaw: rawSlice
     });
-    result = { success: true };
+    result = { success: true, incomplete: false };
   }
 
   emitRunEvent(runId, { type: 'evaluation', result });

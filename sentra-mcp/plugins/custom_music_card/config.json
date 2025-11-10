@@ -22,11 +22,11 @@
       },
       "user_id": {
         "type": "string",
-        "description": "私聊对象的 user_id（与 group_id 二选一，字符串）"
+        "description": "私聊对象的 user_id（可选，同时提供时优先使用 group_id）"
       },
       "group_id": {
         "type": "string",
-        "description": "群聊对象的 group_id（与 user_id 二选一，字符串）"
+        "description": "群聊对象的 group_id（可选，同时提供时优先使用此参数）"
       },
       "schedule": {
         "oneOf": [
@@ -47,10 +47,6 @@
         "description": "可选：当用户需要延迟处理/延迟反馈时使用；仅控制反馈时间，不延迟执行。若到点未完成，将先反馈进行中状态。"
       }
     },
-    "oneOf": [
-      { "required": ["user_id"], "not": { "required": ["group_id"] } },
-      { "required": ["group_id"], "not": { "required": ["user_id"] } }
-    ],
     "required": ["media_url", "title"],
     "additionalProperties": true
   },

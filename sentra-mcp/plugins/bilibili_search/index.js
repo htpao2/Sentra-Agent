@@ -5,7 +5,9 @@ import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import logger from '../../src/logger/index.js';
 import { abs as toAbs } from '../../src/utils/path.js';
+import os from 'node:os';
 import wsCall from '../../src/utils/ws_rpc.js';
+import { getIdsWithCache } from '../../src/utils/message_cache_helper.js';
 
 function toMarkdownPath(abs) {
   const label = path.basename(abs);
@@ -206,17 +208,20 @@ export default async function handler(args = {}, options = {}) {
     ? args.send_as_music_card 
     : String(penv.BILI_SEND_AS_MUSIC_CARD || process.env.BILI_SEND_AS_MUSIC_CARD || 'false').toLowerCase() === 'true';
   
-  const user_id = args.user_id;
-  const group_id = args.group_id;
+  // 从参数或缓存中获取 ID（优先参数，其次缓存）
+  const { user_id, group_id, source } = await getIdsWithCache(args, options, 'bilibili_search');
+  
+  logger.info?.('bilibili_search:ids_resolved', { 
+    label: 'PLUGIN', 
+    user_id, 
+    group_id, 
+    source,
+    sendAsMusicCard 
+  });
   
   // 如果开启音乐卡片发送，必须提供目标
-  if (sendAsMusicCard) {
-    if (!user_id && !group_id) {
-      return { success: false, code: 'TARGET_REQUIRED', error: '发送音乐卡片时必须提供 user_id（私聊）或 group_id（群聊）' };
-    }
-    if (user_id && group_id) {
-      return { success: false, code: 'TARGET_EXCLUSIVE', error: 'user_id 与 group_id 只能二选一' };
-    }
+  if (sendAsMusicCard && !user_id && !group_id) {
+    return { success: false, code: 'TARGET_REQUIRED', error: '发送音乐卡片时必须提供 user_id（私聊）或 group_id（群聊）' };
   }
   
   // WebSocket 配置（音乐卡片模式）

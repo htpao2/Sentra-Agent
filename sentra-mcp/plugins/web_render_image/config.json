@@ -1,20 +1,22 @@
 {
   "name": "web_render_image",
-  "description": "将 HTML 代码/URL/本地文件渲染为图片，支持完整页面或指定元素截图。可注入自定义样式/脚本，适用于生成模板图片、预览页面、截取组件等场景。",
+  "description": "将 HTML 代码或本地 HTML 文件渲染为图片，支持完整页面或指定元素截图。可注入自定义样式/脚本，适用于生成模板图片、预览页面、截取组件等场景。",
   "inputSchema": {
     "type": "object",
     "properties": {
       "html": {
         "type": "string",
-        "description": "HTML 源码（可以是完整页面或片段）"
-      },
-      "url": {
-        "type": "string",
-        "description": "网页地址（http/https）"
+        "description": "HTML 源码（可以是完整页面或片段）。"
       },
       "file": {
         "type": "string",
-        "description": "本地 HTML 文件路径"
+        "description": "本地 HTML 文件的绝对路径。**必须使用绝对路径**，不能使用相对路径。支持 Windows 盘符路径和 file:// 协议。",
+        "examples": [
+          "E:/projects/webpage.html",
+          "C:/Users/Admin/Desktop/template.html",
+          "/home/user/sites/index.html",
+          "/var/www/html/page.html"
+        ]
       },
       "selector": {
         "type": "string",
@@ -34,7 +36,8 @@
       },
       "wait_for": {
         "type": "string",
-        "description": "可选：等待策略 - auto(智能等待) | load(页面加载完成) | networkidle(网络空闲)"
+        "enum": ["auto", "load", "networkidle", "domcontentloaded"],
+        "description": "可选：等待策略 - auto(智能等待，推荐，等待图片/字体加载) | load(等待页面完全加载，默认) | networkidle(网络空闲) | domcontentloaded(仅等待DOM，不等资源，最快但可能不完整)"
       },
       "schedule": {
         "oneOf": [
@@ -69,8 +72,8 @@
   },
   "timeoutMs": 60000,
   "meta": {
-    "realWorldAction": "渲染网页为图片",
-    "responseStyle": "纯文本（Markdown 图片链接）",
-    "responseExample": "![render](E:/sentra-agent/sentra-mcp/artifacts/render_1234567890.png)"
+    "realWorldAction": "渲染 HTML（字符串或本地文件）为图片",
+    "responseStyle": "纯文本（Markdown 图片链接，必须使用绝对路径）",
+    "responseExample": "✅ 页面已渲染：![render](E:/sentra-agent/sentra-mcp/artifacts/render_1234567890.png)\n\n注意：必须使用绝对路径（包含盘符 E:/），不要使用相对路径。"
   }
 }

@@ -1,5 +1,6 @@
 import logger from '../../src/logger/index.js';
 import wsCall from '../../src/utils/ws_rpc.js';
+import { getIdsWithCache } from '../../src/utils/message_cache_helper.js';
 
 /**
  * 构建自定义音乐卡片 segments
@@ -110,24 +111,15 @@ export default async function handler(args = {}, options = {}) {
     };
   }
   
-  const user_id = args.user_id;
-  const group_id = args.group_id;
+  // 从参数或缓存中获取 ID（优先参数，其次缓存）
+  const { user_id, group_id, source } = await getIdsWithCache(args, options, 'custom_music_card');
   
-  if (!user_id && !group_id) {
-    return { 
-      success: false, 
-      code: 'TARGET_REQUIRED', 
-      error: '必须提供 user_id（私聊）或 group_id（群聊）' 
-    };
-  }
-  
-  if (user_id && group_id) {
-    return { 
-      success: false, 
-      code: 'TARGET_EXCLUSIVE', 
-      error: 'user_id 与 group_id 只能二选一' 
-    };
-  }
+  logger.info?.('custom_music_card:ids_resolved', { 
+    label: 'PLUGIN', 
+    user_id, 
+    group_id, 
+    source 
+  });
 
   const jump_url = String(args.jump_url || '').trim() || media_url; // 默认跳转到media_url
   const cover_url = String(args.cover_url || '').trim() 

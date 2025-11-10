@@ -28,7 +28,13 @@ function resolveConfig(args, pluginEnv = {}, defaultTimeoutMs = 30000) {
   const envMaxLen = Number(pluginEnv.WEB_PARSER_MAX_CONTENT_LENGTH || pluginEnv.WEB_PARSER_MAX_BYTES);
   const enableJS = args?.use_js !== undefined ? Boolean(args.use_js) : resolveBool(pluginEnv.WEB_PARSER_ENABLE_JAVASCRIPT, true);
   const waitSelector = args?.waitSelector || pluginEnv.WEB_PARSER_WAIT_FOR_SELECTOR || '';
-  const ua = pluginEnv.WEB_PARSER_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 SentraWebParser/1.0.0';
+  const ua = args?.ua || args?.userAgent || pluginEnv.WEB_PARSER_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 SentraWebParser/1.0.0';
+  const uaPlatform = args?.uaPlatform || pluginEnv.WEB_PARSER_UA_PLATFORM || undefined;
+  let uaMetadata;
+  try {
+    const rawUaMeta = args?.uaMetadata || pluginEnv.WEB_PARSER_UA_METADATA;
+    if (rawUaMeta) uaMetadata = JSON.parse(String(rawUaMeta));
+  } catch {}
   const useProxy = resolveBool(pluginEnv.WEB_PARSER_USE_PROXY, false);
   const proxyServer = pluginEnv.WEB_PARSER_PROXY_SERVER || '';
   const viewportWidth = toInt(pluginEnv.WEB_PARSER_VIEWPORT_WIDTH, 1366);
@@ -64,7 +70,7 @@ function resolveConfig(args, pluginEnv = {}, defaultTimeoutMs = 30000) {
     ? maxBytesFromArgs
     : (Number.isFinite(envMaxLen) && envMaxLen > 0 ? envMaxLen : 200000);
 
-  return { timeout, maxBytes, enableJS, waitSelector, ua, useProxy, proxyServer, viewportWidth, viewportHeight, maxRetries, retryDelay,
+  return { timeout, maxBytes, enableJS, waitSelector, ua, uaPlatform, uaMetadata, useProxy, proxyServer, viewportWidth, viewportHeight, maxRetries, retryDelay,
     waitStrategy, maxTotalWaitMs, netIdleIdleMs, domStableSampleMs, domStableSamples, scrollSteps, scrollStepPx, scrollDelayMs,
     loadingPatterns: loadingPatternsNorm, minGoodLen, blockTypes, readyExpression, blockUrlPatterns };
 }
@@ -205,7 +211,7 @@ function hasLoadingPhrases(text, patterns = []) {
 }
 
 async function tryPuppeteer(url, cfg) {
-  const { timeout, ua, waitSelector, viewportWidth, viewportHeight, useProxy, proxyServer, maxRetries, retryDelay,
+  const { timeout, ua, uaPlatform, uaMetadata, waitSelector, viewportWidth, viewportHeight, useProxy, proxyServer, maxRetries, retryDelay,
     waitStrategy, maxTotalWaitMs, netIdleIdleMs, domStableSampleMs, domStableSamples, scrollSteps, scrollStepPx, scrollDelayMs,
     loadingPatterns, minGoodLen, blockTypes, readyExpression, blockUrlPatterns } = cfg;
   let puppeteer;
@@ -233,6 +239,7 @@ async function tryPuppeteer(url, cfg) {
     `--window-size=${viewportWidth},${viewportHeight}`,
   ];
   if (useProxy && proxyServer) launchArgs.push(`--proxy-server=${proxyServer}`);
+  if (ua) launchArgs.push(`--user-agent=${ua}`);
 
   let lastErr;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -251,9 +258,17 @@ async function tryPuppeteer(url, cfg) {
       browser = await puppeteer.launch(launchOpts);
       const page = await browser.newPage();
       await page.setViewport({ width: viewportWidth, height: viewportHeight });
-      await page.setUserAgent(ua);
+      try {
+        await page.setUserAgent({ userAgent: ua, userAgentMetadata: uaMetadata, platform: uaPlatform });
+      } catch {
+        await page.setUserAgent(ua);
+      }
       await page.setDefaultNavigationTimeout(timeout);
       await page.setDefaultTimeout(timeout);
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+      });
 
       await page.setRequestInterception(true);
       page.on('request', (req) => {
@@ -304,7 +319,10 @@ async function tryPuppeteer(url, cfg) {
       logger.warn?.('web_parser:puppeteer attempt failed', { attempt, error: String(e?.message || e) });
       if (attempt < maxRetries) await sleep(retryDelay * attempt);
     } finally {
-      try { await browser?.close(); } catch {}
+      try {
+        const closeP = browser?.close();
+        await Promise.race([closeP, sleep(2000)]);
+      } catch {}
     }
   }
   throw lastErr || new Error('puppeteer failed');
@@ -315,8 +333,19 @@ export default async function webParserHandler(args, options = {}) {
   if (!url) return { success: false, code: 'INVALID_URL', error: 'URL格式无效' };
 
   const penv = options.pluginEnv || {};
-  const timeoutDefault = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 30000;
-  const cfg = resolveConfig(args, penv, timeoutDefault);
+  // Derive an overall plugin budget from executor or plugin env, then allocate sub-budgets
+  const pluginBudgetMs = Math.max(5000, Number(options.timeoutMs) || Number(penv.PLUGIN_TIMEOUT_MS) || 30000);
+  const navTimeoutDefault = Math.max(2500, Math.floor(pluginBudgetMs * 0.45));
+  const cfg = resolveConfig({
+    ...args,
+    maxTotalWaitMs: Math.max(1000, Math.floor(pluginBudgetMs * 0.35))
+  }, penv, navTimeoutDefault);
+  // If total budget is small (e.g., 25s executor timeout), avoid multiple long retries
+  if (pluginBudgetMs <= 25000) {
+    cfg.maxRetries = Math.min(cfg.maxRetries, 1);
+    cfg.retryDelay = Math.min(cfg.retryDelay, 1000);
+  }
+  logger.debug?.('web_parser:budget', { pluginBudgetMs, navTimeout: cfg.timeout, maxTotalWaitMs: cfg.maxTotalWaitMs, maxRetries: cfg.maxRetries });
 
   // Try puppeteer first if enabled; if result质量不佳则尝试axios并择优
   let result = null;

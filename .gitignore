@@ -112,3 +112,11 @@ desktop.ini
 test/1.txt.backup
 *.private
 *_private.*
+
+# User Data (Privacy Protection)
+userData/
+!userData/README.md
+
+# Agent Presets (Ignore custom presets, keep default only)
+agent-presets/*.txt
+!agent-presets/default.txt

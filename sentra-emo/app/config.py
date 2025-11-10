@@ -5,12 +5,12 @@ from dotenv import load_dotenv
 
 # Load .env from project root if present
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
 
 
 def get_host_port() -> tuple[str, int]:
     host = os.getenv("APP_HOST", "0.0.0.0")
-    port = int(os.getenv("APP_PORT", "8000"))
+    port = int(os.getenv("APP_PORT", "7200"))
     return host, port
 
 
@@ -258,3 +258,137 @@ def get_emotion_labels_file() -> Path:
             p = PROJECT_ROOT / v
         return p
     return PROJECT_ROOT / "app" / "vad_maps" / "default.json"
+
+
+# ----- User tracking config -----
+def get_user_store_dir() -> Path:
+    v = os.getenv("USER_STORE_DIR", "data").strip()
+    p = Path(v)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / v
+    return p
+
+
+def get_user_fast_half_life_sec() -> float:
+    """Fast EMA half-life (seconds). Backward compatible with USER_EMA_HALF_LIFE_SEC."""
+    try:
+        v = os.getenv("USER_STATE_FAST_HALFLIFE_SEC", "").strip()
+        if v:
+            return float(v)
+        return float(os.getenv("USER_EMA_HALF_LIFE_SEC", "900"))
+    except Exception:
+        return 900.0
+
+
+def get_user_slow_half_life_sec() -> float:
+    """Slow EMA half-life (seconds). Backward compatible with USER_BASELINE_HALF_LIFE_SEC."""
+    try:
+        v = os.getenv("USER_STATE_SLOW_HALFLIFE_SEC", "").strip()
+        if v:
+            return float(v)
+        return float(os.getenv("USER_BASELINE_HALF_LIFE_SEC", "7200"))
+    except Exception:
+        return 7200.0
+
+
+def get_user_adapt_gain() -> float:
+    """Adaptive gain for fast EMA responsiveness based on deviation/volatility."""
+    try:
+        return float(os.getenv("USER_STATE_ADAPT_GAIN", "2.0"))
+    except Exception:
+        return 2.0
+
+
+def get_user_top_emotions() -> int:
+    try:
+        return int(os.getenv("USER_TOP_EMOTIONS", "6"))
+    except Exception:
+        return 6
+
+def get_mbti_classifier() -> str:
+    v = os.getenv("MBTI_CLASSIFIER", "heuristic").strip().lower()
+    if v in {"heuristic", "external"}:
+        return v
+    return "heuristic"
+
+
+def get_mbti_external_url() -> str | None:
+    v = os.getenv("MBTI_EXTERNAL_URL", "").strip()
+    return v or None
+
+
+def get_mbti_ie_a_low() -> float:
+    try:
+        return float(os.getenv("MBTI_IE_A_LOW", "0.48"))
+    except Exception:
+        return 0.48
+
+
+def get_mbti_ie_a_high() -> float:
+    try:
+        return float(os.getenv("MBTI_IE_A_HIGH", "0.58"))
+    except Exception:
+        return 0.58
+
+
+def get_mbti_tf_pos_low() -> float:
+    try:
+        return float(os.getenv("MBTI_TF_POS_LOW", "0.45"))
+    except Exception:
+        return 0.45
+
+
+def get_mbti_tf_pos_high() -> float:
+    try:
+        return float(os.getenv("MBTI_TF_POS_HIGH", "0.60"))
+    except Exception:
+        return 0.60
+
+
+def get_mbti_sn_vstd_low() -> float:
+    try:
+        return float(os.getenv("MBTI_SN_VSTD_LOW", "0.07"))
+    except Exception:
+        return 0.07
+
+
+def get_mbti_sn_vstd_high() -> float:
+    try:
+        return float(os.getenv("MBTI_SN_VSTD_HIGH", "0.14"))
+    except Exception:
+        return 0.14
+
+
+def get_mbti_jp_astd_low() -> float:
+    try:
+        return float(os.getenv("MBTI_JP_ASTD_LOW", "0.07"))
+    except Exception:
+        return 0.07
+
+
+def get_mbti_jp_astd_high() -> float:
+    try:
+        return float(os.getenv("MBTI_JP_ASTD_HIGH", "0.14"))
+    except Exception:
+        return 0.14
+
+
+def get_mbti_pos_v_cut() -> float:
+    try:
+        return float(os.getenv("MBTI_POS_V_CUT", "0.56"))
+    except Exception:
+        return 0.56
+
+
+def get_mbti_neg_v_cut() -> float:
+    try:
+        return float(os.getenv("MBTI_NEG_V_CUT", "0.44"))
+    except Exception:
+        return 0.44
+
+
+def get_analytics_max_events() -> int:
+    try:
+        return int(os.getenv("MBTI_ANALYTICS_MAX_EVENTS", "10000"))
+    except Exception:
+        return 10000

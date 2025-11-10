@@ -1,0 +1,36 @@
+declare const styles: {
+  readonly desktop: string;
+  readonly desktopIcons: string;
+  readonly categoryTitle: string;
+  readonly desktopIcon: string;
+  readonly selected: string;
+  readonly iconImage: string;
+  readonly iconLabel: string;
+  readonly editorWindow: string;
+  readonly editorContent: string;
+  readonly configBlock: string;
+  readonly codePreview: string;
+  readonly codeComment: string;
+  readonly codeVarName: string;
+  readonly codeVarValue: string;
+  readonly codeEquals: string;
+  readonly inputLabel: string;
+  readonly taskbar: string;
+  readonly taskbarLeft: string;
+  readonly taskbarRight: string;
+  readonly statusItem: string;
+  readonly clock: string;
+  readonly startMenu: string;
+  readonly emptyState: string;
+  readonly emptyIcon: string;
+  readonly emptyText: string;
+  readonly emptyHint: string;
+  readonly loadingScreen: string;
+  readonly loadingBox: string;
+  readonly loadingText: string;
+  readonly loadingHint: string;
+  readonly toolbar: string;
+  readonly toolbarInfo: string;
+};
+
+export default styles;

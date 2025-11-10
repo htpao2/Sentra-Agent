@@ -1,4 +1,4 @@
 {
-  "zh": "上轮未解析到有效 final_judge，请仅输出一个 <sentra-tools> 块重新返回：\n- 请给出 success、可选 failedSteps 与 summary\n- 第 {{attempt}} 次尝试（最多 {{max_retries}} 次）",
+  "zh": "上轮未解析到有效 final_judge 或不符合要求，请仅输出一个 <sentra-tools> 块重新返回：\n- 必须给出 success, incomplete, summary\n- CRITICAL: If success=false, must fill failedSteps array with details. Cannot be empty.\n- 从执行历史中找到 res.success=false 的步骤，列出 index, aiName, reason\n- 第 {{attempt}} 次尝试（最多 {{max_retries}} 次）",
   "en": "Previous output did not contain a valid final_judge call. Please output ONE <sentra-tools> block again:\n- Provide success, optional failedSteps and summary\n- Attempt {{attempt}} (max {{max_retries}})"
 }

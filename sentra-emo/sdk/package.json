@@ -1,0 +1,31 @@
+{
+  "name": "sentra-emo",
+  "version": "0.1.0",
+  "description": "Node.js SDK for Sentra Emo FastAPI service (sentiment/emotion/VAD/PAD/stress)",
+  "type": "module",
+  "main": "index.js",
+  "module": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "test:e2e": "node e2e.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "sentiment",
+    "emotion",
+    "VAD",
+    "PAD",
+    "stress",
+    "sentra",
+    "sdk"
+  ],
+  "license": "MIT"
+}

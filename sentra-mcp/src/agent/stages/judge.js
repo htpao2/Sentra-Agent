@@ -18,10 +18,10 @@ import logger from '../../logger/index.js';
 /**
  * 前置判定：判断是否需要调用工具
  * @param {string} objective - 目标描述
- * @param {Array} manifest - 已经重排序后的工具清单（按相关性排序）
+ * @param {Array} manifest - 工具清单
  * @param {Array} conversation - 对话历史
  * @param {Object} context - 上下文信息
- * @returns {Promise<{need: boolean, reason: string, operations: string[]}>}
+ * @returns {Promise<{need: boolean, summary: string, operations: string[]}>}
  */
 export async function judgeToolNecessity(objective, manifest, conversation, context = {}) {
   try {
@@ -121,23 +121,15 @@ export async function judgeToolNecessity(objective, manifest, conversation, cont
     const summary = String(parsed.summary || '').trim();
     const operations = Array.isArray(parsed.operations) ? parsed.operations.filter(Boolean) : [];
     
-    // 将结构化的 operations 数组转换为分号分隔的字符串（为了与后续代码兼容）
-    let reason = summary;
-    if (operations.length > 0) {
-      const operationsStr = operations.join('; ');
-      reason = summary ? `${summary}; ${operationsStr}` : operationsStr;
-    }
-    
     logger.info?.('Judge结果', { 
       need, 
       summary, 
-      operations: operations.length,
-      reason: reason.substring(0, 100),
+      operations: operations.length > 0 ? operations : '(无)',
       label: 'JUDGE' 
     });
 
-    return { need, reason, operations };
+    return { need, summary, operations };
   } catch (e) {
-    return { need: true, reason: 'Judge阶段异常，默认需要工具' };
+    return { need: true, summary: 'Judge阶段异常，默认需要工具', operations: [] };
   }
 }

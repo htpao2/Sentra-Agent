@@ -3,12 +3,16 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { createLogger } from './utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const logger = createLogger('Agent');
+
 /**
- * Agent 类 - 支持配置化的 AI 对话代理
+ * Agent 类 - 轻量级 AI 对话代理
+ * 支持环境变量配置、重试机制、Function Calling
  */
 class Agent {
   constructor(config = {}) {
@@ -23,10 +27,10 @@ class Agent {
     // 配置优先级：传入参数 > 环境变量 > 默认值
     this.config = {
       apiKey: config.apiKey || process.env.API_KEY || process.env.OPENAI_API_KEY,
-      apiBaseUrl: config.apiBaseUrl || process.env.API_BASE_URL || 'https://api.openai.com/v1',
+      apiBaseUrl: config.apiBaseUrl || process.env.API_BASE_URL || 'https://yuanplus.cloud/v1',
       defaultModel: config.defaultModel || process.env.MODEL_NAME || 'gpt-3.5-turbo',
       temperature: parseFloat(config.temperature || process.env.TEMPERATURE || '0.7'),
-      maxTokens: parseInt(config.maxTokens || process.env.MAX_TOKENS || '20000'),
+      maxTokens: parseInt(config.maxTokens || process.env.MAX_TOKENS || '4096'),
       maxRetries: parseInt(config.maxRetries || process.env.MAX_RETRIES || '3'),
       timeout: parseInt(config.timeout || process.env.TIMEOUT || '60000'),
       stream: config.stream !== undefined ? config.stream : false
@@ -34,6 +38,18 @@ class Agent {
     
     if (!this.config.apiKey) {
       throw new Error('API_KEY is required. Please set API_KEY environment variable or pass it in config.');
+    }
+    
+    // 启动时输出配置信息（不输出敏感信息）
+    if (process.env.NODE_ENV !== 'production') {
+      logger.config('Agent 初始化', {
+        'API Base': this.config.apiBaseUrl,
+        'Model': this.config.defaultModel,
+        'Temperature': this.config.temperature,
+        'Max Tokens': this.config.maxTokens === -1 ? '不限制' : this.config.maxTokens,
+        'Max Retries': this.config.maxRetries,
+        'Timeout': `${this.config.timeout}ms`
+      });
     }
   }
   
@@ -56,9 +72,9 @@ class Agent {
       messages: messages
     };
     
-    // maxTokens为-1时不限制，不添加max_tokens字段
+    // maxTokens 为 -1 时不限制，不添加 max_tokens 字段（由模型自行决定）
     const maxTokens = options.maxTokens !== undefined ? options.maxTokens : this.config.maxTokens;
-    if (maxTokens !== -1) {
+    if (maxTokens !== -1 && maxTokens > 0) {
       requestConfig.max_tokens = maxTokens;
     }
     
@@ -117,7 +133,7 @@ class Agent {
               // 返回解析后的JSON对象
               return JSON.parse(toolCall.function.arguments);
             } catch (parseError) {
-              console.warn('[Agent] 解析tool_calls参数失败:', parseError.message);
+              logger.warn('解析 tool_calls 参数失败', parseError.message);
               // 如果解析失败，返回原始字符串
               return toolCall.function.arguments;
             }
@@ -132,7 +148,7 @@ class Agent {
         // 如果是超时或网络错误，且还有重试次数，则等待后重试
         if (attempt < this.config.maxRetries - 1) {
           const delay = Math.min(1000 * Math.pow(2, attempt), 10000); // 指数退避
-          console.warn(`请求失败，${delay}ms 后重试 (${attempt + 1}/${this.config.maxRetries}):`, error.message);
+          logger.warn(`请求失败，${delay}ms 后重试 (${attempt + 1}/${this.config.maxRetries})`, error.message);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
@@ -140,7 +156,7 @@ class Agent {
     }
     
     // 所有重试都失败
-    console.error(`[Agent] AI生成失败 (${this.config.maxRetries}次尝试): ${lastError.message}`);
+    logger.error(`AI 生成失败 (${this.config.maxRetries}次尝试)`, lastError);
     
     // 如果配置了跳过失败，返回null而不是抛出错误
     if (process.env.SKIP_ON_GENERATION_FAIL === 'true') {
@@ -165,9 +181,9 @@ class Agent {
       messages: messages
     };
     
-    // maxTokens为-1时不限制，不添加max_tokens字段
+    // maxTokens 为 -1 时不限制，不添加 max_tokens 字段（由模型自行决定）
     const maxTokens = options.maxTokens !== undefined ? options.maxTokens : this.config.maxTokens;
-    if (maxTokens !== -1) {
+    if (maxTokens !== -1 && maxTokens > 0) {
       requestConfig.max_tokens = maxTokens;
     }
     
@@ -224,8 +240,6 @@ class Agent {
   }
 }
 
-// 导出默认实例（兼容旧代码）
-const defaultAgent = new Agent();
-
-export default defaultAgent;
+// 只导出 Agent 类，由调用方创建实例
 export { Agent };
+export default Agent;

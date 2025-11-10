@@ -1,5 +1,5 @@
 import logger from '../../logger/index.js';
-import { config } from '../../config/index.js';
+import { config, getStageModel } from '../../config/index.js';
 import { chatCompletion } from '../../openai/client.js';
 import { buildPlanningManifest, manifestToBulletedText } from './manifest.js';
 import { getPreThought } from '../stages/prethought.js';
@@ -7,11 +7,24 @@ import { upsertPlanMemory, searchPlanMemories } from '../../memory/index.js';
 import { loadPrompt, renderTemplate, composeSystem } from '../prompts/loader.js';
 import { compactMessages } from '../utils/messages.js';
 import { clip } from '../../utils/text.js';
-import { buildPlanFunctionCallInstruction, parseFunctionCalls, buildFCPolicy, buildFunctionCallInstruction } from '../../utils/fc.js';
+import { buildPlanFunctionCallInstruction, parseFunctionCalls, buildFCPolicy, buildFunctionCallInstruction, formatSentraResult } from '../../utils/fc.js';
 import { HistoryStore } from '../../history/store.js';
 import { rerankManifest } from './router.js';
 
 function now() { return Date.now(); }
+
+/**
+ * 规范化 reason：仅支持数组格式
+ * - 数组：过滤并清理每项
+ * - 其他：返回空数组（不兼容旧字符串格式）
+ */
+function normalizeReason(reason) {
+  if (Array.isArray(reason)) {
+    return reason.filter(r => typeof r === 'string' && r.trim()).map(r => r.trim());
+  }
+  // 不再兼容字符串格式，直接返回空数组
+  return [];
+}
 
 // no bootstrap fallback; rely on retries
 
@@ -49,13 +62,14 @@ async function generateSinglePlan({
           { role: 'user', content: [policyText, planInstrText].join('\n\n') },
         ]);
 
+    const planModel = getStageModel('plan');
     const resp = await chatCompletion({
       messages: attemptMessages,
       temperature: planningTemp,
       top_p,
       apiKey: fc.apiKey,
       baseURL: fc.baseURL,
-      model: fc.model,
+      model: planModel,
       ...(Number.isFinite(fc.maxTokens) && fc.maxTokens > 0 ? { max_tokens: fc.maxTokens } : { omitMaxTokens: true })
     });
     const content = resp?.choices?.[0]?.message?.content || '';
@@ -68,7 +82,7 @@ async function generateSinglePlan({
       const arr = Array.isArray(parsed?.plan?.steps) ? parsed.plan.steps : [];
       candidate = arr.map((s) => ({
         aiName: s?.aiName,
-        reason: s?.reason || '',
+        reason: normalizeReason(s?.reason),
         nextStep: s?.nextStep || '',
         draftArgs: s?.draftArgs || {},
         dependsOn: Array.isArray(s?.dependsOn) ? s.dependsOn : undefined
@@ -127,18 +141,19 @@ async function selectBestPlan({ objective, manifest, candidates, context }) {
       required: ['best'],
       additionalProperties: true
     };
-    const policyText = await buildFCPolicy({ locale: 'zh-CN' });
+    const policyText = await buildFCPolicy();
     const instr = await buildFunctionCallInstruction({ name: 'select_plan', parameters: selectPlanSchema, locale: 'zh-CN' });
     const messages = compactMessages([...base, { role: 'user', content: [policyText, instr].join('\n\n') }]);
 
     const fc = config.fcLlm || {};
     const omit = !(Number.isFinite(fc.maxTokens) && fc.maxTokens > 0);
+    const planModel = getStageModel('plan');
     const resp = await chatCompletion({
       messages,
       temperature: Number.isFinite(fc.planTemperature) ? fc.planTemperature : Math.max(0.1, ((Number.isFinite(fc.temperature) ? fc.temperature : (config.llm.temperature ?? 0.2)) - 0.1)),
       apiKey: fc.apiKey,
       baseURL: fc.baseURL,
-      model: fc.model,
+      model: planModel,
       ...(omit ? { omitMaxTokens: true } : { max_tokens: fc.maxTokens })
     });
     const content = resp?.choices?.[0]?.message?.content || '';
@@ -163,16 +178,22 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
   let manifest = buildPlanningManifest(mcpcore);
   const usePT = !!config.flags?.planUsePreThought;
   const preThought = usePT ? (await getPreThought(objective, manifest, conversation)) : '';
-  // 中文：在 FC 规划前执行工具重排序（优先使用 judgeReason；为空则使用 objective）
+  // 中文：在 FC 规划前执行工具重排序（使用 judge.operations 数组）
   try {
-    const judgeReason = String(context?.judge?.reason || context?.judgeReason || '').trim();
-    if ((judgeReason || objective) && (config.rerank?.enable !== false)) {
-      const ranked = await rerankManifest({ manifest, judgeReason, objective, candidateK: config.rerank?.candidateK, topN: config.rerank?.topN });
+    const judgeOperations = context?.judge?.operations || context?.judgeOperations;
+    if ((judgeOperations || objective) && (config.rerank?.enable !== false)) {
+      const ranked = await rerankManifest({ 
+        manifest, 
+        judgeOperations,  // operations 数组
+        objective, 
+        candidateK: config.rerank?.candidateK, 
+        topN: config.rerank?.topN 
+      });
       if (Array.isArray(ranked?.manifest) && ranked.manifest.length) {
         manifest = ranked.manifest;
         if (config.flags.enableVerboseSteps) {
           const tops = manifest.slice(0, Math.min(5, manifest.length)).map(x => x.aiName);
-          logger.info('FC 规划前重排序Top工具', { label: 'RERANK', top: tops });
+          logger.info('FC 规划前重排序Top工具', { label: 'RERANK', top: tops, operations: judgeOperations?.length || 0 });
         }
       }
     }
@@ -204,11 +225,34 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
   const overlayGlobal = overlays.global?.system || overlays.global || '';
   const overlayPlan = overlays.plan?.system || overlays.emit_plan?.system || overlays.plan || overlays.emit_plan || '';
   const sys = composeSystem(ep.system, [overlayGlobal, overlayPlan].filter(Boolean).join('\n\n'));
-  const policyText = await buildFCPolicy({ locale: 'zh-CN' });
+  const policyText = await buildFCPolicy();
   const planInstrText = await buildPlanFunctionCallInstruction({ allowedAiNames, locale: 'zh-CN' });
+  
+  // 从相同 runId 复用执行历史（Sentra XML），避免在上游拼接历史
+  let historyMessages = [];
+  try {
+    const runId = context?.runId;
+    if (runId) {
+      const history = await HistoryStore.list(runId, 0, -1);
+      const toolResults = (history || []).filter(h => h.type === 'tool_result');
+      if (toolResults.length > 0) {
+        const xml = toolResults.map(h => formatSentraResult({
+          stepIndex: Number(h.plannedStepIndex ?? h.stepIndex ?? 0),
+          aiName: h.aiName,
+          reason: h.reason,
+          args: h.args || {},
+          result: h.result || {}
+        })).join('\n\n');
+        if (xml.trim()) {
+          historyMessages.push({ role: 'assistant', content: xml });
+        }
+      }
+    }
+  } catch {}
   const messages = compactMessages([
     { role: 'system', content: sys },
     ...(Array.isArray(conversation) ? conversation : []),
+    ...historyMessages,
     { role: 'user', content: renderTemplate(ep.user_goal, { objective }) },
     ...(usePT ? [{ role: 'assistant', content: renderTemplate(ep.assistant_thought, { preThought: preThought || '' }) }] : []),
     { role: 'assistant', content: renderTemplate(ep.assistant_manifest, { manifestBulleted: manifestToBulletedText(manifest) }) },
@@ -229,8 +273,21 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
   let lastContent = '';
   const enableMulti = !!config.planner?.multiEnable && Number(config.planner?.multiCandidates || 0) > 1;
   if (enableMulti) {
-    // 多计划生成：并行生成 K 份候选
     const K = Math.max(2, Math.min(5, Number(config.planner.multiCandidates || 3)));
+    const half = Math.ceil(K / 2);
+    const minWait = Math.max(0, Number(config.planner?.candidateMinTimeoutMs ?? 3000));
+    const maxWait = Math.max(minWait, Number(config.planner?.candidateMaxTimeoutMs ?? 25000));
+    const factor = Number.isFinite(config.planner?.candidateTimeFactor) ? Number(config.planner.candidateTimeFactor) : 1.25;
+    const extra = 1 + 0.25 * (K - half);
+    const queue = [];
+    const resolvers = [];
+    function push(x) { const r = resolvers.shift(); if (r) r(x); else queue.push(x); }
+    function next() { if (queue.length) return Promise.resolve(queue.shift()); return new Promise(res => resolvers.push(res)); }
+    const startedAt = now();
+    let finished = 0;
+    const done = [];
+    let deadline = 0;
+
     const tasks = [];
     for (let i = 0; i < K; i++) {
       const diversifyHint = `多方案生成：这是变体 #${i + 1}。请提供与其它变体差异明显且可执行的计划，步骤不超过 ${Math.max(1, Number(config.planner?.maxSteps || 8))} 步。`;
@@ -238,7 +295,8 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
         ...messages,
         { role: 'user', content: diversifyHint },
       ]);
-      tasks.push(generateSinglePlan({
+      const t0 = now();
+      const p = generateSinglePlan({
         baseMessages: msg,
         allowedAiNames,
         fc,
@@ -247,17 +305,43 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
         maxRetries,
         policyText,
         planInstrText,
-      }));
+      })
+        .then((res) => ({ ok: true, res, i, ms: now() - t0 }))
+        .catch(() => ({ ok: false, res: null, i, ms: now() - t0 }))
+        .then((r) => { push(r); return r; });
+      tasks.push(p);
     }
-    const cand = await Promise.all(tasks);
-    const candidates = cand
-      .map((c) => ({ steps: Array.isArray(c.steps) ? c.steps : [], raw: c.raw || '' }))
+
+    while (finished < K) {
+      let waiter;
+      if (deadline > 0) {
+        const remain = Math.max(0, deadline - now());
+        waiter = Promise.race([next(), new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), remain))]);
+      } else {
+        waiter = next();
+      }
+      const evt = await waiter;
+      if (evt && evt.timeout) break;
+      if (!evt) break;
+      finished += 1;
+      if (evt.ok && evt.res && Array.isArray(evt.res.steps) && evt.res.steps.length > 0) done.push(evt);
+      if (done.length === half && deadline === 0) {
+        const mean = done.reduce((s, x) => s + Number(x.ms || 0), 0) / Math.max(1, done.length);
+        const waitMs = Math.max(minWait, Math.min(maxWait, mean * factor * extra));
+        if (config.flags.enableVerboseSteps) {
+          logger.info('FC 多计划：达到50%完成阈值，进入动态等待', { label: 'PLAN', K, half, meanMs: Math.round(mean), waitMs: Math.round(waitMs) });
+        }
+        deadline = now() + waitMs;
+      }
+    }
+
+    const candidates = done
+      .map((d) => ({ steps: Array.isArray(d.res.steps) ? d.res.steps : [], raw: d.res.raw || '' }))
       .filter((c) => c.steps.length > 0);
     if (config.flags.enableVerboseSteps) {
       logger.info('FC 多计划：生成候选数量', { label: 'PLAN', count: candidates.length });
     }
     if (candidates.length === 0) {
-      // 回退到单计划路径
       const one = await generateSinglePlan({ baseMessages: messages, allowedAiNames, fc, planningTemp, top_p, maxRetries, policyText, planInstrText });
       steps = Array.isArray(one.steps) ? one.steps : [];
       lastContent = one.raw || '';

@@ -5,15 +5,25 @@
     "plan": {
       "type": "object",
       "properties": {
-        "overview": { "type": "string" },
+        "overview": { 
+          "type": "string",
+          "description": "计划的整体概述（可选）。简洁说明本次任务的总体目标和执行策略，避免过度详细的步骤描述。示例：'分析用户消息内容，识别需求后调用相应工具完成任务' 而非 '第一步xxx，第二步xxx'。"
+        },
         "steps": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "aiName": { "type": "string" },
-              "reason": { "type": "string" },
-              "nextStep": { "type": "string" },
+              "reason": { 
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "调用该工具的理由（数组格式）。每项应简洁描述使用该工具的目的和必要性，不要包含具体的结果预测或数据猜测。示例：[\"分析图片内容\", \"识别情绪特征\"] 而非 [\"获取三个表情ID\"]。重点说明为什么需要调用，而非预测会得到什么结果。"
+              },
+              "nextStep": { 
+                "type": "string",
+                "description": "当前步骤完成后的下一步行动计划。可以描述如何使用本步骤的执行结果，但避免预测具体的结果数据。示例：'根据识别结果选择合适的表情' 而非 '使用返回的76,66,356这三个表情ID'。"
+              },
               "draftArgs": { "type": "object", "additionalProperties": true },
               "dependsOn": { "type": "array", "items": { "type": "integer" } }
             },

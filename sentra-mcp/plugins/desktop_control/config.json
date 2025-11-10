@@ -1,0 +1,70 @@
+{
+  "name": "desktop_control",
+  "description": "应用控制专用插件（基于 nircmd.exe）。仅聚焦：应用/窗口/键盘/鼠标。通过单一字符串 instruction 下达自然语言指令，由插件解析并执行。",
+  "inputSchema": {
+    "type": "object",
+    "required": ["instruction"],
+    "properties": {
+      "instruction": {
+        "type": "string",
+        "description": "自然语言指令。例如：'open steam and maximize'、'focus chrome'、'minimize all'、'press win+d'、'move mouse to 100,200'、'click'、'type hello world'"
+      }
+    }
+  },
+  "meta": {
+    "version": "3.0.0",
+    "author": "Sentra Agent",
+    "platform": "windows",
+    "dependencies": "nircmd.exe (50KB, 已内置或系统PATH)",
+    "lightweight": true,
+    "tool": "nircmd.exe",
+    "website": "https://www.nirsoft.net/utils/nircmd.html",
+    "features": [
+      "窗口管理：最小化/最大化/恢复/隐藏/显示/关闭/激活（按进程名或标题）",
+      "鼠标：移动/点击/双击/按下/释放",
+      "键盘：按键/组合键/输入文本",
+      "应用：启动/聚焦/关闭",
+      "智能：支持自然语言 instruction 解析"
+    ],
+    "action_categories": {
+      "自然语言指令（推荐）": [
+        "open steam and maximize",
+        "focus chrome",
+        "close notepad",
+        "minimize all",
+        "press win+d",
+        "move mouse to 960,540",
+        "right click",
+        "type hello world"
+      ]
+    },
+    "examples": [
+      { "description": "打开 Steam 并最大化", "params": { "instruction": "open steam and maximize" } },
+      { "description": "激活 Chrome", "params": { "instruction": "focus chrome" } },
+      { "description": "关闭记事本", "params": { "instruction": "close notepad" } },
+      { "description": "显示桌面（最小化所有）", "params": { "instruction": "minimize all" } },
+      { "description": "移动鼠标到 960,540", "params": { "instruction": "move mouse to 960,540" } },
+      { "description": "右键点击", "params": { "instruction": "right click" } },
+      { "description": "输入文本 hello world", "params": { "instruction": "type hello world" } },
+      { "description": "按 Win+D", "params": { "instruction": "press win+d" } }
+    ],
+    "notes": [
+      "仅支持 Windows 平台",
+      "需要 nircmd.exe（放在插件 bin 目录或系统 PATH 中）",
+      "下载地址：https://www.nirsoft.net/utils/nircmd.html",
+      "nircmd.exe 大小仅 ~50KB，轻量级",
+      "大部分操作无需管理员权限",
+      "processName 和 title 参数二选一（当使用结构化调用时）",
+      "键盘输入支持组合键：ctrl, alt, shift, win"
+    ],
+    "install": {
+      "nircmd_download": "https://www.nirsoft.net/utils/nircmd-x64.zip",
+      "install_steps": [
+        "1. 下载 nircmd-x64.zip",
+        "2. 解压 nircmd.exe 到 plugins/desktop_control/bin/ 目录",
+        "3. 或者复制到 C:\\Windows\\System32（全局使用）",
+        "4. 重启 Node.js 进程"
+      ]
+    }
+  }
+}

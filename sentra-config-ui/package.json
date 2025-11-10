@@ -1,0 +1,33 @@
+{
+  "name": "sentra-config-ui",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Web-based configuration manager for Sentra Agent",
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "server:dev": "tsx watch server/index.ts",
+    "client:dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "server:prod": "node --loader tsx server/index.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/static": "^7.0.1",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react95": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.3"
+  }
+}

@@ -6,7 +6,13 @@
     "properties": {
       "path": {
         "type": "string",
-        "description": "文件路径，相对路径基于 baseDir，绝对路径直接写入。文件格式由扩展名自动检测：.xlsx/.docx/.pdf/.csv/.zip/.json/.txt 等。"
+        "description": "文件路径。**必须使用绝对路径**（包含完整盘符或根目录），避免相对路径导致的歧义。文件格式由扩展名自动检测：.xlsx/.docx/.pdf/.csv/.zip/.json/.txt 等。",
+        "examples": [
+          "E:/projects/report.xlsx",
+          "C:/Users/Admin/Documents/data.json",
+          "/home/user/documents/report.pdf",
+          "/var/data/export.csv"
+        ]
       },
       "content": {
         "description": "文件内容，格式根据文件类型而定：\n- 文本/JSON: string 或 object\n- Excel: [[row1], [row2]] 或 { sheets: [{ name, data: [[]] }] }\n- Word: string 或 { paragraphs: [...] }\n- PDF: string 或 { title, content, footer }\n- CSV: [[]] 或 { headers, records }\n- ZIP: { files: [{ name, content/path }] } 或 { directory: '/path' }\n- 二进制: Buffer 或 base64 string"
@@ -67,7 +73,7 @@
   "timeoutMs": 120000,
   "meta": {
     "realWorldAction": "操作电脑文件，支持发送文件给用户",
-    "responseStyle": "markdown结合自然语言(如果需要输出文件路径必须反馈文件路径给用户，否则自然语言即可)",
-    "responseExample": "如果涉及文件路径，比如使用write_file发送文件，那么需要反馈绝对路径，例如：![快乐源泉.docx](E:/sentra-agent/sentra-mcp/artifacts/topic_happy.docx)"
+    "responseStyle": "markdown结合自然语言(必须使用绝对路径反馈文件位置)",
+    "responseExample": "✅ 文件已保存：![快乐源泉.docx](E:/sentra-agent/sentra-mcp/artifacts/topic_happy.docx)\n\n注意：必须使用绝对路径（包含盘符），不要使用相对路径或省略盘符。"
   }
 }

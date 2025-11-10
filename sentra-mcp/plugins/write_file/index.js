@@ -4,7 +4,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import logger from '../../src/logger/index.js';
-import { abs as toAbs } from '../../src/utils/path.js';
+import { abs as toAbs, toPosix } from '../../src/utils/path.js';
 
 // 获取当前文件所在目录（插件目录）
 const __filename = fileURLToPath(import.meta.url);
@@ -100,7 +100,7 @@ async function writeExcelFile(absPath, data) {
   
   await workbook.xlsx.writeFile(absPath);
   const stats = await fs.stat(absPath);
-  return { path: absPath, size: stats.size, type: 'excel' };
+  return { path: toPosix(absPath), size: stats.size, type: 'excel' };
 }
 
 async function writeWordFile(absPath, data) {
@@ -157,7 +157,7 @@ async function writeWordFile(absPath, data) {
   
   const buffer = await Packer.toBuffer(doc);
   await fs.writeFile(absPath, buffer);
-  return { path: absPath, size: buffer.length, type: 'word' };
+  return { path: toPosix(absPath), size: buffer.length, type: 'word' };
 }
 
 // 检测是否包含中文
@@ -293,7 +293,7 @@ async function writePdfFile(absPath, data) {
       
       stream.on('finish', async () => {
         const stats = await fs.stat(absPath);
-        resolve({ path: absPath, size: stats.size, type: 'pdf' });
+        resolve({ path: toPosix(absPath), size: stats.size, type: 'pdf' });
       });
       
       stream.on('error', reject);
@@ -345,7 +345,7 @@ async function writeCsvFile(absPath, data) {
   }
   
   const stats = await fs.stat(absPath);
-  return { path: absPath, size: stats.size, type: 'csv' };
+  return { path: toPosix(absPath), size: stats.size, type: 'csv' };
 }
 
 // ==================== ZIP 文件处理 ====================
@@ -357,7 +357,7 @@ async function writeZipFile(absPath, data) {
     const archive = archiver('zip', { zlib: { level: 9 } });
     
     output.on('close', () => {
-      resolve({ path: absPath, size: archive.pointer(), type: 'zip' });
+      resolve({ path: toPosix(absPath), size: archive.pointer(), type: 'zip' });
     });
     
     archive.on('error', reject);
@@ -393,14 +393,14 @@ async function writeJsonFile(absPath, data) {
   const jsonString = JSON.stringify(data, null, 2);
   await fs.writeFile(absPath, jsonString, 'utf-8');
   const stats = await fs.stat(absPath);
-  return { path: absPath, size: stats.size, type: 'json' };
+  return { path: toPosix(absPath), size: stats.size, type: 'json' };
 }
 
 async function writeTextFile(absPath, content, encoding = 'utf-8') {
   const data = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
   await fs.writeFile(absPath, data, { encoding });
   const stats = await fs.stat(absPath);
-  return { path: absPath, size: stats.size, type: 'text' };
+  return { path: toPosix(absPath), size: stats.size, type: 'text' };
 }
 
 async function writeBinaryFile(absPath, content) {
@@ -416,7 +416,7 @@ async function writeBinaryFile(absPath, content) {
   }
   
   await fs.writeFile(absPath, buffer);
-  return { path: absPath, size: buffer.length, type: 'binary' };
+  return { path: toPosix(absPath), size: buffer.length, type: 'binary' };
 }
 
 async function doWrite(absPath, content, options = {}) {
@@ -478,7 +478,8 @@ async function doWrite(absPath, content, options = {}) {
 // ==================== Markdown 路径格式化 ====================
 function toMarkdownPath(abs) {
   const label = path.basename(abs);
-  return `![${label}](${abs})`;
+  const posixPath = toPosix(abs); // 转换为 POSIX 格式（正斜杠），确保跨平台兼容
+  return `![${label}](${posixPath})`;
 }
 
 // ==================== 主处理函数 ====================
@@ -516,7 +517,7 @@ export default async function handler(args = {}, options = {}) {
       success: true,
       data: {
         action: 'write_file',
-        path: abs,
+        path: toPosix(abs), // 返回 POSIX 格式的绝对路径（正斜杠）
         path_markdown: toMarkdownPath(abs),
         size,
         fileType: type,

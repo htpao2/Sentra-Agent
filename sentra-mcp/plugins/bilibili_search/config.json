@@ -8,11 +8,11 @@
       "pick": { "type": "string", "enum": ["first", "random"], "description": "选择第一条或随机一条，默认 first" },
       "user_id": {
         "type": "string",
-        "description": "私聊对象的 user_id（与 group_id 二选一，发送音乐卡片时需提供）"
+        "description": "私聊对象的 user_id（可选，发送音乐卡片时需提供至少一个ID，同时提供时优先使用 group_id）"
       },
       "group_id": {
         "type": "string",
-        "description": "群聊对象的 group_id（与 user_id 二选一，发送音乐卡片时需提供）"
+        "description": "群聊对象的 group_id（可选，发送音乐卡片时需提供至少一个ID，同时提供时优先使用此参数）"
       },
       "send_as_music_card": {
         "type": "boolean",

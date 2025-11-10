@@ -1,4 +1,4 @@
-// 将 HTML/URL/文件渲染为图片的插件实现
+// 将 HTML 字符串或本地文件渲染为图片的插件实现
 // 基于 Puppeteer 最佳实践，支持智能等待、自定义样式注入、元素截图等功能
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -15,18 +15,94 @@ async function smartWait(page, strategy = 'auto') {
   } else if (strat === 'networkidle') {
     // 等待网络空闲，适合有异步请求的页面
     try {
-      await page.waitForNetworkIdle({ idleTime: 500, timeout: 8000 });
+      await page.waitForNetworkIdle({ idleTime: 1000, timeout: 15000 });
     } catch (e) {
       logger.debug?.('web_render_image:networkidle timeout, continuing', { error: String(e?.message || e) });
     }
   } else {
     // auto: 智能等待 - 先等 DOM ready，再等网络趋于稳定
     try {
-      await page.waitForFunction(() => document.readyState === 'complete', { timeout: 5000 });
+      await page.waitForFunction(() => document.readyState === 'complete', { timeout: 10000 });
     } catch {}
     try {
-      await page.waitForNetworkIdle({ idleTime: 500, timeout: 3000 });
+      await page.waitForNetworkIdle({ idleTime: 1000, timeout: 8000 });
     } catch {}
+  }
+}
+
+// 等待所有图片加载完成（包括 img、背景图、懒加载）
+async function waitForImages(page, timeout = 15000) {
+  try {
+    await page.evaluate(async (timeoutMs) => {
+      const start = Date.now();
+      
+      // 1. 获取所有 <img> 标签
+      const imgs = Array.from(document.querySelectorAll('img'));
+      
+      // 2. 等待每个图片完成加载
+      const promises = imgs.map((img) => {
+        return new Promise((resolve) => {
+          // 已经加载完成
+          if (img.complete && img.naturalWidth > 0) {
+            resolve();
+            return;
+          }
+          
+          // 监听加载完成或失败
+          const onLoad = () => {
+            img.removeEventListener('load', onLoad);
+            img.removeEventListener('error', onError);
+            resolve();
+          };
+          const onError = () => {
+            img.removeEventListener('load', onLoad);
+            img.removeEventListener('error', onError);
+            resolve(); // 即使失败也继续，避免阻塞
+          };
+          
+          img.addEventListener('load', onLoad);
+          img.addEventListener('error', onError);
+          
+          // 超时保护
+          setTimeout(() => {
+            img.removeEventListener('load', onLoad);
+            img.removeEventListener('error', onError);
+            resolve();
+          }, timeoutMs);
+        });
+      });
+      
+      // 3. 等待所有图片（带总超时）
+      await Promise.race([
+        Promise.all(promises),
+        new Promise(resolve => setTimeout(resolve, timeoutMs))
+      ]);
+      
+      const elapsed = Date.now() - start;
+      return { loaded: imgs.length, elapsed };
+    }, timeout);
+  } catch (e) {
+    logger.debug?.('web_render_image: waitForImages failed', { error: String(e?.message || e) });
+  }
+}
+
+// 等待字体加载完成
+async function waitForFonts(page, timeout = 5000) {
+  try {
+    await page.evaluate(async (timeoutMs) => {
+      if (!document.fonts || typeof document.fonts.ready !== 'object') {
+        return { status: 'unsupported' };
+      }
+      
+      await Promise.race([
+        document.fonts.ready,
+        new Promise(resolve => setTimeout(resolve, timeoutMs))
+      ]);
+      
+      return { status: 'loaded', count: document.fonts.size };
+    }, timeout);
+  } catch (e) {
+    logger.debug?.('web_render_image: waitForFonts failed', { error: String(e?.message || e) });
   }
 }
 
@@ -54,6 +130,37 @@ ${trimmed}
 </html>`;
 }
 
+// 将 HTML 中的本地绝对路径（如 E:\path\to\file.png 或 E:/path/to/file.png）
+// 自动重写为 file:/// 协议，便于浏览器正确加载本地资源
+function rewriteLocalPaths(html) {
+  try {
+    const replacer = (match, attr, quote, p) => {
+      try {
+        const raw = String(p).trim();
+        // 已经是 URL 的情况，直接跳过。特殊处理 file://E:/... 规范化为 file:///E:/...
+        if (/^(data:|blob:|file:|https?:|about:|javascript:|#|\/\/)/i.test(raw)) {
+          if (/^file:\/\/[A-Za-z]:\//i.test(raw) && !/^file:\/\//i.test(raw.replace(/^file:\/\//i, 'file:///'))) {
+            const fixed = raw.replace(/^file:\/\/(?=[A-Za-z]:\/)/i, 'file:///');
+            return `${attr}=${quote}${fixed}${quote}`;
+          }
+          return match;
+        }
+
+        // 规范化分隔符，仅处理形如 C:/ 或 C:\ 起始的 Windows 盘符绝对路径
+        const normalized = raw.replace(/\\/g, '/');
+        if (/^[A-Za-z]:\//.test(normalized)) {
+          const fileHref = toFileUrl(normalized);
+          if (fileHref) return `${attr}=${quote}${fileHref}${quote}`;
+        }
+      } catch {}
+      return match;
+    };
+    return String(html).replace(/\b(src|href)=(['"])([^'"]+)\2/gi, replacer);
+  } catch {
+    return html;
+  }
+}
+
 export default async function handler(args = {}, options = {}) {
   let browser = null;
   let page = null;
@@ -63,7 +170,6 @@ export default async function handler(args = {}, options = {}) {
 
     // === 1. 解析输入参数 ===
     const htmlRaw = String(args.html || '').trim();
-    let url = String(args.url || '').trim();
     const file = String(args.file || '').trim();
     const css = String(args.css || '').trim();
     const js = String(args.js || '').trim();
@@ -71,9 +177,14 @@ export default async function handler(args = {}, options = {}) {
     const fullPage = args.fullPage !== false; // 默认整页截图
     const wait_for = String(args.wait_for || 'auto').toLowerCase();
 
-    // 至少提供一种输入
-    if (!htmlRaw && !url && !file) {
-      return { success: false, code: 'INVALID', error: '必须提供 html、url 或 file 之一' };
+    // url 参数已不再支持
+    if (typeof args.url === 'string' && args.url.trim()) {
+      return { success: false, code: 'UNSUPPORTED', error: 'web_render_image 插件仅支持 html 或 file 参数，不再支持 url。' };
+    }
+
+    // 至少提供 html 或 file 之一
+    if (!htmlRaw && !file) {
+      return { success: false, code: 'INVALID', error: '必须提供 html 或 file 参数之一' };
     }
 
     // === 2. 准备输出目录和文件名 ===
@@ -98,6 +209,7 @@ export default async function handler(args = {}, options = {}) {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-software-rasterizer',
+      '--allow-file-access-from-files',
     ];
     
     browser = await puppeteer.launch({
@@ -109,6 +221,18 @@ export default async function handler(args = {}, options = {}) {
     
     page = await browser.newPage();
     
+    // 监听资源加载失败事件（用于调试）
+    const failedResources = [];
+    page.on('requestfailed', (request) => {
+      const url = request.url();
+      const failure = request.failure();
+      failedResources.push({ url, reason: failure?.errorText || 'unknown' });
+      logger.debug?.('web_render_image: 资源加载失败', { 
+        url: url.slice(0, 100), 
+        reason: failure?.errorText 
+      });
+    });
+    
     // 自适应视口：默认 1366x768（适合大多数场景）
     await page.setViewport({
       width: 1366,
@@ -117,22 +241,14 @@ export default async function handler(args = {}, options = {}) {
     });
 
     // === 4. 加载页面内容 ===
+    let fileUrl;
     if (htmlRaw) {
-      // 渲染 HTML 字符串
+      // 渲染 HTML 字符串：写入临时文件并使用 file:// 打开，确保本地资源可访问
       const fullHtml = buildFullHtml(htmlRaw);
-      const waitUntil = wait_for === 'load' ? 'load' : 'networkidle2';
-      await page.setContent(fullHtml, {
-        waitUntil,
-        timeout: 30000,
-      });
-    } else if (url) {
-      // 访问 URL
-      if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-      const waitUntil = wait_for === 'load' ? 'load' : 'networkidle2';
-      await page.goto(url, {
-        waitUntil,
-        timeout: 30000,
-      });
+      const safeHtml = rewriteLocalPaths(fullHtml);
+      const tempHtmlPath = path.join(artifactsDir, `render_${timestamp}.html`);
+      await fs.writeFile(tempHtmlPath, safeHtml, 'utf-8');
+      fileUrl = toFileUrl(tempHtmlPath);
     } else {
       // 加载本地文件
       const absFile = toAbs(file);
@@ -140,13 +256,15 @@ export default async function handler(args = {}, options = {}) {
       if (!exists) {
         return { success: false, code: 'FILE_NOT_FOUND', error: `文件不存在: ${absFile}` };
       }
-      const fileUrl = toFileUrl(absFile);
-      const waitUntil = wait_for === 'load' ? 'load' : 'networkidle2';
-      await page.goto(fileUrl, {
-        waitUntil,
-        timeout: 30000,
-      });
+      fileUrl = toFileUrl(absFile);
     }
+    
+    // 🔥 统一使用 'load' 或 'networkidle2'，确保资源加载
+    const waitUntil = wait_for === 'domcontentloaded' ? 'domcontentloaded' : (wait_for === 'networkidle' ? 'networkidle2' : 'load');
+    await page.goto(fileUrl, {
+      waitUntil,
+      timeout: 30000,
+    });
 
     // === 5. 注入自定义样式和脚本 ===
     if (css) {
@@ -167,6 +285,13 @@ export default async function handler(args = {}, options = {}) {
 
     // === 6. 智能等待页面渲染完成 ===
     await smartWait(page, wait_for);
+    
+    // === 6.5. 等待图片和字体加载完成 ===
+    await waitForImages(page, 15000);
+    await waitForFonts(page, 5000);
+    
+    // 额外等待 500ms，确保渲染稳定
+    await new Promise(resolve => setTimeout(resolve, 500));
 
     // === 7. 截图 ===
     if (selector) {
@@ -202,7 +327,8 @@ export default async function handler(args = {}, options = {}) {
         size_bytes: stat.size,
         format: 'png',
         viewport: { width: 1366, height: 768, scale: 2 },
-        source: htmlRaw ? 'html' : (url ? 'url' : 'file'),
+        source: htmlRaw ? 'html' : 'file',
+        failed_resources: failedResources.length > 0 ? failedResources : undefined,
       },
     };
   } catch (e) {
