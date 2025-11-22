@@ -61,12 +61,22 @@ Sentra Agent 是一个为生产环境设计的 AI Agent 框架。我们理解构
 
 我们提供了跨平台的前置依赖检测脚本，会自动按需安装/跳过以下组件：Git、Node.js 18+、Python 3.10+、Redis、PM2（可选 Neo4j）。
 
-```bash
-npm run install:prereqs
-```
+- **Windows**：
+  ```powershell
+  scripts\install-prereqs.bat
+  ```
+  - 优先调用 `winget`（或已安装的 `choco`），未检测到包管理器会提示手动安装。
+  - 若系统未安装 Node.js 18+，脚本会自动下载临时 Node（默认 v20.18.0）到 `.cache/node-bootstrap`，也可设置 `NODE_VERSION` 指定版本。
+  - 如需使用现有 Node，可在运行前设置 `set NODE_BIN="C:\Program Files\nodejs\node.exe"`。
 
-- Windows：优先使用 `winget`（或已安装的 `choco`），未检测到包管理器会提示手动安装。
-- Linux：自动识别 `apt` / `dnf` / `yum` / `pacman`，执行必要的 `sudo` 安装命令。
+- **Linux**（macOS 亦可使用） ：
+  ```bash
+  chmod +x scripts/install-prereqs.sh
+  NODE_BIN=node ./scripts/install-prereqs.sh
+  ```
+  - 自动识别 `apt` / `dnf` / `yum` / `pacman`，执行必要的 `sudo` 安装命令。
+  - 若系统无可用 Node ≥ 18，将自动下载指定版本（默认 v20.18.0）到 `.cache/node-bootstrap`。可通过 `NODE_VERSION` 覆盖版本号，或显式设置 `NODE_BIN=/opt/node/bin/node`。
+
 - 已安装会直接跳过，失败时会给出手动指引。
 
 > macOS / 其他平台可以直接参考下方的手动安装指引。

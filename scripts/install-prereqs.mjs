@@ -204,10 +204,10 @@ const prerequisites = [
     skipEnv: 'SENTRA_SKIP_REDIS_INSTALL',
     check: () => commandExists('redis-server', ['--version']),
     installers: {
-      windows: () => installWindowsPackage({ wingetId: 'Memurai.MemuraiDeveloper', chocoPkg: 'memurai-developer' }),
+      windows: () => installRedisOnWindows(),
       linux: () => installLinuxPackages({ apt: ['redis-server'], dnf: ['redis'], yum: ['redis'], pacman: ['redis'] })
     },
-    manualHint: 'Windows 可使用 Docker: docker run -d --name redis -p 6379:6379 redis:7'
+    manualHint: 'Windows 推荐使用 Memurai（Redis 兼容）：访问 https://www.memurai.com/download/ 下载安装包并按向导安装，安装后确保 Redis/Memurai 服务已启动。'
   },
   {
     name: 'PM2 (全局 npm 包)',
@@ -218,14 +218,14 @@ const prerequisites = [
     manualHint: '如需手动安装，可执行 npm install -g pm2'
   },
   {
-    name: 'Neo4j (可选)',
-    optional: true,
+    name: 'Neo4j 图数据库',
     skipEnv: 'SENTRA_SKIP_NEO4J_INSTALL',
     check: () => commandExists('neo4j', ['--version']) || commandExists('neo4j-admin', ['--version']),
     installers: {
+      windows: () => installNeo4jOnWindows(),
       linux: () => installNeo4jOnLinux()
     },
-    manualHint: '推荐使用 Docker：docker run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j:5'
+    manualHint: 'Windows 可从 https://neo4j.com/download/ 下载 Neo4j Desktop/Server 安装包；Linux 可参考官方文档或使用 apt 源安装（脚本会为 Debian/Ubuntu 自动添加 Neo4j 源）。'
   }
 ];
 
@@ -233,7 +233,7 @@ const failures = [];
 
 (async function main() {
   console.log(chalk.bold.magenta('\nSentra Agent 前置依赖安装器'));
-  console.log(chalk.gray('将自动检测并按需安装 Git / Node.js / Python / Redis / PM2（以及可选 Neo4j）。\n'));
+  console.log(chalk.gray('将自动检测并按需安装 Git / Node.js / Python / Redis / PM2 / Neo4j。\n'));
 
   info(`检测到平台：${isWindows ? 'Windows' : 'Linux'}`);
   if (isWindows && !ctx.windowsInstaller) {
@@ -291,7 +291,7 @@ async function ensurePrerequisite(prereq) {
   if (prereq.skipEnv) {
     const raw = String(process.env[prereq.skipEnv] || '').toLowerCase();
     if (raw === '1' || raw === 'true' || raw === 'yes') {
-      console.log(chalk.yellow(`已根据环境变量 ${prereq.skipEnv} 跳过自动安装（请确保你已通过 Docker / 远程服务等方式准备好 ${prereq.name}）。`));
+      console.log(chalk.yellow(`已根据环境变量 ${prereq.skipEnv} 跳过自动安装（请确保你已通过其它方式准备好 ${prereq.name}）。`));
       return;
     }
   }
@@ -466,6 +466,101 @@ async function installNodeOnLinux() {
 async function installPm2Global() {
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   await runCommand(npmCmd, ['install', '-g', 'pm2']);
+}
+
+async function installRedisOnWindows() {
+  if (!ctx.windowsInstaller) {
+    throw new Error('未检测到 winget / chocolatey，无法自动安装 Redis/Memurai。');
+  }
+
+  try {
+    if (ctx.windowsInstaller === 'winget') {
+      info('尝试通过 winget 安装 Memurai（Redis 兼容）...');
+      await runCommand('winget', [
+        'install',
+        '--id', 'Memurai.MemuraiDeveloper',
+        '-e',
+        '--source', 'winget',
+        '--accept-package-agreements',
+        '--accept-source-agreements'
+      ]);
+      info('Memurai 安装命令已执行，如未自动加入 PATH，请重启终端或检查系统服务是否已启动。');
+      return;
+    }
+
+    if (ctx.windowsInstaller === 'choco') {
+      info('尝试通过 chocolatey 安装 Memurai（Redis 兼容）...');
+      await runCommand('choco', ['install', 'memurai-developer', '-y']);
+      info('Memurai 安装命令已执行，请确认服务已启动。');
+      return;
+    }
+  } catch (err) {
+    warn(`通过 ${ctx.windowsInstaller} 安装 Memurai 失败：${err?.message || err}`);
+    if (ctx.windowsInstaller === 'winget') {
+      const launched = await runMemuraiInstallerInteractivelyFromWingetCache();
+      if (launched) {
+        info('请在弹出的安装向导中完成 Memurai 部署，完成后回到此终端继续。');
+        return;
+      }
+    }
+    throw new Error('自动安装 Memurai 失败，请从 https://www.memurai.com/download/ 手动下载安装包并完成配置后再重试。');
+  }
+
+  throw new Error('当前未配置可用的 Windows 包管理器用于安装 Redis/Memurai。');
+}
+
+async function runMemuraiInstallerInteractivelyFromWingetCache() {
+  const homeDir = os.homedir();
+  const cacheDir = path.join(homeDir, 'AppData', 'Local', 'Temp', 'WinGet');
+  try {
+    const dirEntries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
+    const candidates = dirEntries
+      .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith('memurai.memuraideveloper'))
+      .sort((a, b) => b.name.localeCompare(a.name));
+    for (const entry of candidates) {
+      const fullDir = path.join(cacheDir, entry.name);
+      const files = await fs.promises.readdir(fullDir);
+      const msiName = files.find((name) => name.toLowerCase().endsWith('.msi'));
+      if (!msiName) continue;
+      const msiPath = path.join(fullDir, msiName);
+      info(`发现已有 Memurai 安装包：${msiPath}`);
+      info('将以交互模式启动安装器，请按照向导完成安装。');
+      await runCommand('msiexec', ['/i', msiPath]);
+      return true;
+    }
+  } catch {
+    // ignore, fallback to manual guidance
+  }
+  return false;
+}
+
+async function installNeo4jOnWindows() {
+  if (!ctx.windowsInstaller) {
+    throw new Error('未检测到 winget / chocolatey，无法自动安装 Neo4j。');
+  }
+
+  if (ctx.windowsInstaller === 'winget') {
+    info('尝试通过 winget 安装 Neo4j Desktop...');
+    await runCommand('winget', [
+      'install',
+      '--id', 'Neo4j.Neo4jDesktop',
+      '-e',
+      '--source', 'winget',
+      '--accept-package-agreements',
+      '--accept-source-agreements'
+    ]);
+    info('Neo4j Desktop 安装命令已执行，请在安装完成后创建本地数据库并确保其运行。');
+    return;
+  }
+
+  if (ctx.windowsInstaller === 'choco') {
+    info('尝试通过 chocolatey 安装 Neo4j Community...');
+    await runCommand('choco', ['install', 'neo4j-community', '-y']);
+    info('Neo4j Community 安装命令已执行，请确保 Windows 服务已启动。');
+    return;
+  }
+
+  throw new Error('当前未配置可用的 Windows 包管理器用于安装 Neo4j。');
 }
 
 async function installNeo4jOnLinux() {
