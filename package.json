@@ -13,7 +13,8 @@
     "pm2:delete": "pm2 delete sentra-agent",
     "pm2:logs": "pm2 logs sentra-agent",
     "pm2:monit": "pm2 monit",
-    "pm2:status": "pm2 status"
+    "pm2:status": "pm2 status",
+    "install:prereqs": "node scripts/install-prereqs.mjs"
   },
   "dependencies": {
     "@axync/extract-json": "^1.1.3",

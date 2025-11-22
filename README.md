@@ -57,6 +57,24 @@ Sentra Agent 是一个为生产环境设计的 AI Agent 框架。我们理解构
 
 ### 安装前置依赖
 
+#### 一键安装脚本（推荐，Windows / Linux）
+
+我们提供了跨平台的前置依赖检测脚本，会自动按需安装/跳过以下组件：Git、Node.js 18+、Python 3.10+、Redis、PM2（可选 Neo4j）。
+
+```bash
+git clone https://github.com/JustForSO/Sentra-Agent.git
+cd Sentra-Agent
+npm run install:prereqs
+```
+
+- Windows：优先使用 `winget`（或已安装的 `choco`），未检测到包管理器会提示手动安装。
+- Linux：自动识别 `apt` / `dnf` / `yum` / `pacman`，执行必要的 `sudo` 安装命令。
+- 已安装会直接跳过，失败时会给出手动指引。
+
+> macOS / 其他平台可以直接参考下方的手动安装指引。
+
+#### 手动安装指引
+
 下面给出常见平台的一行命令与官方链接，任选其一。安装完成后用右侧命令验证。
 
 - Git：
