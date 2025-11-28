@@ -43,7 +43,7 @@ class UserPersonaManager {
     this.minMessagesForUpdate = options.minMessagesForUpdate || parseInt(process.env.PERSONA_MIN_MESSAGES || '10');
     
     this.maxHistorySize = options.maxHistorySize || 100; // 最多保留历史消息数
-    this.model = options.model || process.env.PERSONA_MODEL || 'gpt-4o-mini';
+    this.model = options.model || process.env.PERSONA_MODEL || 'gpt-4.1-mini';
     this.recentMessagesCount = options.recentMessagesCount || parseInt(process.env.PERSONA_RECENT_MESSAGES || '40');
     this.halfLifeMs = options.halfLifeMs || parseInt(process.env.PERSONA_HALFLIFE_MS || '172800000');
     this.maxTraits = options.maxTraits || parseInt(process.env.PERSONA_MAX_TRAITS || '6');

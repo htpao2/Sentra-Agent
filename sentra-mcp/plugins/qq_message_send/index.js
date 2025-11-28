@@ -53,9 +53,14 @@ export default async function handler(args = {}, options = {}) {
   const sdkPath = 'send.private';
 
   const userIdRaw = args.user_id ?? args.qq ?? args.userId;
+  const groupIdRaw = args.group_id ?? args.groupId ?? args.group;
   const user_id = Number(userIdRaw);
   if (!Number.isFinite(user_id) || user_id <= 0) {
-    return { success: false, code: 'INVALID_USER_ID', error: `user_id 无效: ${userIdRaw}` };
+    const errorMsg =
+      groupIdRaw != null && userIdRaw == null
+        ? `检测到 group_id=${groupIdRaw}，但本插件仅用于发送私聊消息。请提供目标用户的 QQ 号 user_id（不是群号）。`
+        : `user_id 无效: ${userIdRaw}（必须是目标用户的 QQ 号，而不是群号或其他标识）。`;
+    return { success: false, code: 'INVALID_USER_ID', error: errorMsg };
   }
 
   // 归一化文本：支持字符串或字符串数组，自动做 HTML 实体反转义并按空行拆段

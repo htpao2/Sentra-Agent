@@ -42,7 +42,7 @@ class ImageProcessor {
     });
     
     // 视觉模型配置
-    this.visionModel = process.env.VISION_MODEL || 'gpt-4o-mini';
+    this.visionModel = process.env.VISION_MODEL || 'gpt-4.1-mini';
     this.visionMaxTokens = process.env.VISION_MAX_TOKENS === '-1' ? undefined : parseInt(process.env.VISION_MAX_TOKENS) || 1000;
 
     // 文本模型客户端（用于对视觉描述做结构化抽取/Tools）
@@ -50,7 +50,7 @@ class ImageProcessor {
       apiKey: process.env.OPENAI_API_KEY,
       baseURL: process.env.OPENAI_BASE_URL
     });
-    this.textModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    this.textModel = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
   }
 
   /**

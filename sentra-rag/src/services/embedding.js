@@ -159,7 +159,7 @@ class EmbeddingService {
       const mimeType = this.getMimeType(imagePath);
 
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini', // 使用支持视觉的模型
+        model: 'gpt-4.1-mini', // 使用支持视觉的模型
         messages: [
           {
             role: 'user',

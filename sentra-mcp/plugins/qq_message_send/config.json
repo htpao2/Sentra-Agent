@@ -1,12 +1,13 @@
 {
   "name": "qq_message_send",
-  "description": "QQ平台：主动发送私聊消息（支持文本与多媒体资源，单条或多条合并发送）",
+  "description": "QQ平台：主动发送私聊消息（仅支持私聊，不支持群聊；可发送文本与多媒体资源，单条或多条合并发送）",
   "inputSchema": {
     "type": "object",
     "properties": {
       "user_id": {
         "type": "integer",
-        "description": "目标QQ号（必填，数字类型）。从上下文或历史消息中获取真实的QQ号，不要使用昵称或备注名。"
+        "description": "目标用户的 QQ 号（必填，数字类型，仅用于单人私聊）。应填写对方用户的 QQ 号，而不是群号（group_id）或群聊 ID。从上下文或历史消息中获取真实的用户 QQ 号，例如最近联系人列表或引用消息中的发送者 QQ 号，不要使用昵称、备注名或群名。",
+        "examples": [123456789]
       },
       "text": {
         "oneOf": [

@@ -1,35 +1,46 @@
 import { Agent } from '../agent.js';
 import { createLogger } from './logger.js';
+import { getEnv, getEnvInt, getEnvBool } from './envHotReloader.js';
 
 const logger = createLogger('ReplyIntervention');
 
-const ENABLE_REPLY_INTERVENTION = (process.env.ENABLE_REPLY_INTERVENTION || 'true') === 'true';
-const REPLY_DECISION_MODEL = process.env.REPLY_DECISION_MODEL || process.env.MAIN_AI_MODEL || 'gpt-4o-mini';
-const REPLY_DECISION_MAX_TOKENS = parseInt(process.env.REPLY_DECISION_MAX_TOKENS || '128', 10);
+function isReplyInterventionEnabled() {
+  return getEnvBool('ENABLE_REPLY_INTERVENTION', true);
+}
+
+function getDecisionConfig() {
+  const mainModel = getEnv('MAIN_AI_MODEL', getEnv('MODEL_NAME', 'gpt-3.5-turbo'));
+  const model = getEnv('REPLY_DECISION_MODEL', mainModel || 'gpt-4o-mini');
+  const maxTokens = getEnvInt('REPLY_DECISION_MAX_TOKENS', 128);
+  const maxRetries = getEnvInt('REPLY_DECISION_MAX_RETRIES', getEnvInt('MAX_RETRIES', 3));
+  const timeout = getEnvInt('REPLY_DECISION_TIMEOUT', getEnvInt('TIMEOUT', 15000));
+  return { model, maxTokens, maxRetries, timeout };
+}
 
 let sharedAgent = null;
 
 function getAgent() {
-  if (!ENABLE_REPLY_INTERVENTION) {
+  if (!isReplyInterventionEnabled()) {
     return null;
   }
   if (sharedAgent) {
     return sharedAgent;
   }
   try {
+    const { model, maxTokens, maxRetries, timeout } = getDecisionConfig();
     sharedAgent = new Agent({
       // 复用主站点配置，避免单独维护一套 API_KEY/API_BASE_URL
-      apiKey: process.env.API_KEY,
-      apiBaseUrl: process.env.API_BASE_URL,
-      defaultModel: REPLY_DECISION_MODEL,
+      apiKey: getEnv('API_KEY', process.env.OPENAI_API_KEY),
+      apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
+      defaultModel: model,
       temperature: 0,
-      maxTokens: REPLY_DECISION_MAX_TOKENS,
-      maxRetries: parseInt(process.env.REPLY_DECISION_MAX_RETRIES || process.env.MAX_RETRIES || '3', 10),
-      timeout: parseInt(process.env.REPLY_DECISION_TIMEOUT || process.env.TIMEOUT || '15000', 10)
+      maxTokens,
+      maxRetries,
+      timeout
     });
     logger.config('ReplyIntervention 初始化', {
-      model: REPLY_DECISION_MODEL,
-      maxTokens: REPLY_DECISION_MAX_TOKENS
+      model,
+      maxTokens
     });
   } catch (e) {
     logger.error('初始化 ReplyIntervention Agent 失败，将回退为默认必回策略', e);
@@ -577,7 +588,7 @@ function buildUserPayload(msg, extraSignals = {}, context = null, policyConfig =
  * @returns {Promise<{ shouldReply: boolean, confidence: number, reason: string, priority: string, shouldQuote: boolean, raw?: any }|null>}
  */
 export async function planGroupReplyDecision(msg, options = {}) {
-  if (!ENABLE_REPLY_INTERVENTION) {
+  if (!isReplyInterventionEnabled()) {
     return null;
   }
 
@@ -603,15 +614,16 @@ export async function planGroupReplyDecision(msg, options = {}) {
   const userContent = buildUserPayload(msg, extraSignals, options.context || null, options.policy || null);
 
   try {
+    const { model, maxTokens } = getDecisionConfig();
     const raw = await agent.chat(
       [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userContent }
       ],
       {
-        model: REPLY_DECISION_MODEL,
+        model,
         temperature: 0.1,
-        maxTokens: REPLY_DECISION_MAX_TOKENS
+        maxTokens
       }
     );
 
@@ -661,7 +673,7 @@ export async function planGroupReplyDecision(msg, options = {}) {
 }
 
 export async function decideSendDedupPair(baseText, candidateText) {
-  if (!ENABLE_REPLY_INTERVENTION) {
+  if (!isReplyInterventionEnabled()) {
     return null;
   }
 
@@ -688,13 +700,14 @@ export async function decideSendDedupPair(baseText, candidateText) {
   ].join('\n');
 
   try {
+    const { model } = getDecisionConfig();
     const raw = await agent.chat(
       [
         { role: 'system', content: DEDUP_SYSTEM_PROMPT },
         { role: 'user', content: userContent }
       ],
       {
-        model: REPLY_DECISION_MODEL,
+        model,
         temperature: 0,
         maxTokens: 96
       }
@@ -774,7 +787,7 @@ const OVERRIDE_SYSTEM_PROMPT = [
 ].join('\n');
 
 export async function decideOverrideIntent(payload) {
-  if (!ENABLE_REPLY_INTERVENTION) {
+  if (!isReplyInterventionEnabled()) {
     return null;
   }
 
@@ -820,13 +833,14 @@ export async function decideOverrideIntent(payload) {
 
     const userContent = lines.join('\n');
 
+    const { model } = getDecisionConfig();
     const raw = await agent.chat(
       [
         { role: 'system', content: OVERRIDE_SYSTEM_PROMPT },
         { role: 'user', content: userContent }
       ],
       {
-        model: REPLY_DECISION_MODEL,
+        model,
         temperature: 0,
         maxTokens: 128
       }

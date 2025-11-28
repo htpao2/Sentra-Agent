@@ -391,7 +391,7 @@ class TextProcessor {
 - 格式：[主体] + [核心行为/事件]`;
 
       const response = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
         messages: [
           { role: 'system', content: '你是一个精确的文本分块器。' },
           { role: 'user', content: `${prompt}\n\n文本：\n${text}` }
@@ -602,7 +602,7 @@ ${text}
 请使用extract_entities工具返回结果。`;
 
       const response = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
         messages: [
           {
             role: 'user',
@@ -656,7 +656,7 @@ ${text}
 请使用extract_relations工具返回结果。`;
 
       const response = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
         messages: [
           {
             role: 'user',
@@ -708,7 +708,7 @@ ${text}
 请使用analyze_text_structure工具返回结果。`;
 
       const response = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
         messages: [
           {
             role: 'user',

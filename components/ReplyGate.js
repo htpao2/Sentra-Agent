@@ -3,8 +3,11 @@ import { tokenCounter } from '../src/token-counter.js';
 import emojiRegex from 'emoji-regex';
 import natural from 'natural';
 import LinkifyIt from 'linkify-it';
+import { getEnv } from '../utils/envHotReloader.js';
 
-const DEFAULT_MODEL = process.env.REPLY_DECISION_MODEL || process.env.MAIN_AI_MODEL || 'gpt-4o-mini';
+function getDefaultModel() {
+  return getEnv('REPLY_DECISION_MODEL', getEnv('MAIN_AI_MODEL', 'gpt-4.1-mini'));
+}
 const linkify = new LinkifyIt();
 const EMOJI_REGEX = emojiRegex();
 const WORD_CHAR_REGEX = /[\p{L}\p{N}]/u;
@@ -66,7 +69,7 @@ function computeInterestScore(rawText, signals = {}, context = {}) {
   }
 
   try {
-    tokenStats = tokenCounter.getTextStats(text, DEFAULT_MODEL);
+    tokenStats = tokenCounter.getTextStats(text, getDefaultModel());
   } catch {
     tokenStats = { tokenCount: 0, charCount: text.length, wordCount: 0 };
   }

@@ -176,7 +176,7 @@ const personaManager = ENABLE_USER_PERSONA ? new UserPersonaManager({
   updateIntervalMs: getEnvInt('PERSONA_UPDATE_INTERVAL_MS', 600000),
   minMessagesForUpdate: getEnvInt('PERSONA_MIN_MESSAGES', 10),
   maxHistorySize: getEnvInt('PERSONA_MAX_HISTORY', 100),
-  model: getEnv('PERSONA_MODEL', 'gpt-4o-mini'),
+  model: getEnv('PERSONA_MODEL', 'gpt-4.1-mini'),
   recentMessagesCount: getEnvInt('PERSONA_RECENT_MESSAGES', 40),
   halfLifeMs: getEnvInt('PERSONA_HALFLIFE_MS', 172800000),
   maxTraits: getEnvInt('PERSONA_MAX_TRAITS', 6),

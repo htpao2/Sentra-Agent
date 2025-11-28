@@ -20,7 +20,7 @@ program
 program
   .command('chat')
   .description('开始交互式聊天')
-  .option('-m, --model <model>', '模型名称', 'gpt-4o-mini')
+  .option('-m, --model <model>', '模型名称', 'gpt-4.1-mini')
   .option('-t, --temperature <temperature>', '温度参数', '0.7')
   .option('-u, --url <url>', 'API基础URL', 'https://yuanplus.chat/v1/')
   .option('-k, --key <key>', 'API密钥', '')
@@ -112,7 +112,7 @@ program
   .command('query')
   .description('单次查询')
   .argument('<message>', '要查询的消息')
-  .option('-m, --model <model>', '模型名称', 'gpt-4o-mini')
+  .option('-m, --model <model>', '模型名称', 'gpt-4.1-mini')
   .option('-t, --temperature <temperature>', '温度参数', '0.7')
   .option('-u, --url <url>', 'API基础URL', 'https://yuanplus.chat/v1/')
   .option('-k, --key <key>', 'API密钥', '')
@@ -153,7 +153,7 @@ program
   .command('tokens')
   .description('计算token数量')
   .argument('<text>', '要计算token的文本')
-  .option('-m, --model <model>', '模型名称', 'gpt-4o-mini')
+  .option('-m, --model <model>', '模型名称', 'gpt-4.1-mini')
   .option('--stats', '显示详细统计信息')
   .option('--batch <file>', '批量计算文件中的文本')
   .action((text, options) => {
@@ -231,7 +231,7 @@ program
 program
   .command('info')
   .description('显示agent信息')
-  .option('-m, --model <model>', '模型名称', 'gpt-4o-mini')
+  .option('-m, --model <model>', '模型名称', 'gpt-4.1-mini')
   .option('-t, --temperature <temperature>', '温度参数', '0.7')
   .option('-u, --url <url>', 'API基础URL', 'https://yuanplus.chat/v1/')
   .option('-k, --key <key>', 'API密钥', '')

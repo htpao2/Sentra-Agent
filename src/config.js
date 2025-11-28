@@ -10,7 +10,7 @@ dotenv.config();
 export const getConfigFromEnv = () => ({
   apiBaseUrl: process.env.API_BASE_URL || 'https://yuanplus.chat/v1/',
   apiKey: process.env.API_KEY || 'sk-ZsC6m89ewvSfx29HqOIEVBPCZOCrhjO0dv3ZhYEmCBl9ijzz',
-  modelName: process.env.MODEL_NAME || 'gpt-4o-mini',
+  modelName: process.env.MODEL_NAME || 'gpt-4.1-mini',
   temperature: parseFloat(process.env.TEMPERATURE) || 0.7,
   maxTokens: parseInt(process.env.MAX_TOKENS) || 1000,
   maxRetries: parseInt(process.env.MAX_RETRIES) || 3,

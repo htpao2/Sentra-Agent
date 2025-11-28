@@ -1,14 +1,29 @@
 import { createLogger } from '../utils/logger.js';
 import { tokenCounter } from '../src/token-counter.js';
 import { repairSentraResponse } from '../utils/formatRepair.js';
+import { getEnv, getEnvInt, getEnvBool } from '../utils/envHotReloader.js';
 
 const logger = createLogger('ChatWithRetry');
 
-const MAX_RESPONSE_RETRIES = parseInt(process.env.MAX_RESPONSE_RETRIES || '2', 10);
-const MAX_RESPONSE_TOKENS = parseInt(process.env.MAX_RESPONSE_TOKENS || '260', 10);
-const TOKEN_COUNT_MODEL = process.env.TOKEN_COUNT_MODEL || 'gpt-4o-mini';
-const ENABLE_STRICT_FORMAT_CHECK = (process.env.ENABLE_STRICT_FORMAT_CHECK || 'true') === 'true';
-const ENABLE_FORMAT_REPAIR = (process.env.ENABLE_FORMAT_REPAIR || 'true') === 'true';
+function getMaxResponseRetries() {
+  return getEnvInt('MAX_RESPONSE_RETRIES', 2);
+}
+
+function getMaxResponseTokens() {
+  return getEnvInt('MAX_RESPONSE_TOKENS', 260);
+}
+
+function getTokenCountModel() {
+  return getEnv('TOKEN_COUNT_MODEL', 'gpt-4.1-mini');
+}
+
+function isStrictFormatCheckEnabled() {
+  return getEnvBool('ENABLE_STRICT_FORMAT_CHECK', true);
+}
+
+function isFormatRepairEnabled() {
+  return getEnvBool('ENABLE_FORMAT_REPAIR', true);
+}
 
 function validateResponseFormat(response) {
   if (!response || typeof response !== 'string') {
@@ -48,7 +63,7 @@ function extractAndCountTokens(response) {
     .filter(Boolean);
 
   const combinedText = texts.join(' ');
-  const tokens = tokenCounter.countTokens(combinedText, TOKEN_COUNT_MODEL);
+  const tokens = tokenCounter.countTokens(combinedText, getTokenCountModel());
 
   return { text: combinedText, tokens };
 }
@@ -73,18 +88,23 @@ export async function chatWithRetry(agent, conversations, modelOrOptions, groupI
   let lastResponse = null;
   let lastFormatReason = '';
 
+  const maxResponseRetries = getMaxResponseRetries();
+  const maxResponseTokens = getMaxResponseTokens();
+  const strictFormatCheck = isStrictFormatCheckEnabled();
+  const formatRepairEnabled = isFormatRepairEnabled();
+
   const options =
     typeof modelOrOptions === 'string'
       ? { model: modelOrOptions }
       : (modelOrOptions || {});
 
-  while (retries <= MAX_RESPONSE_RETRIES) {
+  while (retries <= maxResponseRetries) {
     try {
       const attemptIndex = retries + 1;
       logger.debug(`[${groupId}] AI请求第${attemptIndex}次尝试`);
 
       let convThisTry = conversations;
-      if (ENABLE_STRICT_FORMAT_CHECK && lastFormatReason) {
+      if (strictFormatCheck && lastFormatReason) {
         const allowInject =
           lastFormatReason.includes('缺少 <sentra-response> 标签') ||
           lastFormatReason.includes('包含非法的只读标签');
@@ -100,24 +120,24 @@ export async function chatWithRetry(agent, conversations, modelOrOptions, groupI
       let response = await agent.chat(convThisTry, options);
       lastResponse = response;
 
-      if (ENABLE_STRICT_FORMAT_CHECK) {
+      if (strictFormatCheck) {
         const formatCheck = validateResponseFormat(response);
         if (!formatCheck.valid) {
           lastFormatReason = formatCheck.reason || '';
           logger.warn(`[${groupId}] 格式验证失败: ${formatCheck.reason}`);
 
-          if (retries < MAX_RESPONSE_RETRIES) {
+          if (retries < maxResponseRetries) {
             retries++;
             logger.debug(`[${groupId}] 格式验证失败，直接重试（第${retries + 1}次）...`);
             await sleep(1000);
             continue;
           }
 
-          if (ENABLE_FORMAT_REPAIR && typeof response === 'string' && response.trim()) {
+          if (formatRepairEnabled && typeof response === 'string' && response.trim()) {
             try {
               const repaired = await repairSentraResponse(response, {
                 agent,
-                model: process.env.REPAIR_AI_MODEL
+                model: getEnv('REPAIR_AI_MODEL', undefined)
               });
               const repairedCheck = validateResponseFormat(repaired);
               if (repairedCheck.valid) {
@@ -137,9 +157,9 @@ export async function chatWithRetry(agent, conversations, modelOrOptions, groupI
       const { text, tokens } = extractAndCountTokens(response);
       logger.debug(`[${groupId}] Token统计: ${tokens} tokens, 文本长度: ${text.length}`);
 
-      if (tokens > MAX_RESPONSE_TOKENS) {
-        logger.warn(`[${groupId}] Token超限: ${tokens} > ${MAX_RESPONSE_TOKENS}`);
-        if (retries < MAX_RESPONSE_RETRIES) {
+      if (tokens > maxResponseTokens) {
+        logger.warn(`[${groupId}] Token超限: ${tokens} > ${maxResponseTokens}`);
+        if (retries < maxResponseRetries) {
           retries++;
           logger.debug(`[${groupId}] Token超限，直接重试（第${retries + 1}次）...`);
           await sleep(500);
@@ -150,23 +170,23 @@ export async function chatWithRetry(agent, conversations, modelOrOptions, groupI
           response: null,
           retries,
           success: false,
-          reason: `Token超限: ${tokens}>${MAX_RESPONSE_TOKENS}`
+          reason: `Token超限: ${tokens}>${maxResponseTokens}`
         };
       }
 
-      logger.success(`[${groupId}] AI响应成功 (${tokens}/${MAX_RESPONSE_TOKENS} tokens)`);
+      logger.success(`[${groupId}] AI响应成功 (${tokens}/${maxResponseTokens} tokens)`);
       return { response, retries, success: true };
     } catch (error) {
       logger.error(`[${groupId}] AI请求失败 - 第${retries + 1}次尝试`, error);
       lastError = error;
       lastFormatReason = '';
-      if (retries < MAX_RESPONSE_RETRIES) {
+      if (retries < maxResponseRetries) {
         retries++;
         logger.warn(`[${groupId}] 网络错误，1秒后第${retries + 1}次重试...`);
         await sleep(1000);
         continue;
       }
-      logger.error(`[${groupId}] AI请求失败 - 已达最大重试次数${MAX_RESPONSE_RETRIES}次`);
+      logger.error(`[${groupId}] AI请求失败 - 已达最大重试次数${maxResponseRetries}次`);
       return { response: null, retries, success: false, reason: lastError?.message };
     }
   }

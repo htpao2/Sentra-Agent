@@ -2,14 +2,29 @@ import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { createLogger } from './logger.js';
 import { getRedis } from './redisClient.js';
+import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('GroupHistory');
 
-const GROUP_HISTORY_KEY_PREFIX = process.env.REDIS_GROUP_HISTORY_PREFIX || 'sentra:group:';
-const GROUP_HISTORY_TTL_SECONDS = parseInt(process.env.REDIS_GROUP_HISTORY_TTL_SECONDS || '0', 10) || 0;
-const DECISION_GROUP_RECENT_MESSAGES = parseInt(process.env.REPLY_DECISION_GROUP_RECENT_MESSAGES || '15', 10);
-const DECISION_SENDER_RECENT_MESSAGES = parseInt(process.env.REPLY_DECISION_SENDER_RECENT_MESSAGES || '5', 10);
-const DECISION_CONTEXT_MAX_CHARS = parseInt(process.env.REPLY_DECISION_CONTEXT_MAX_CHARS || '120', 10);
+function getGroupHistoryKeyPrefix() {
+  return getEnv('REDIS_GROUP_HISTORY_PREFIX', 'sentra:group:');
+}
+
+function getGroupHistoryTtlSeconds() {
+  return getEnvInt('REDIS_GROUP_HISTORY_TTL_SECONDS', 0) || 0;
+}
+
+function getDecisionGroupRecentMessagesDefault() {
+  return getEnvInt('REPLY_DECISION_GROUP_RECENT_MESSAGES', 15);
+}
+
+function getDecisionSenderRecentMessagesDefault() {
+  return getEnvInt('REPLY_DECISION_SENDER_RECENT_MESSAGES', 5);
+}
+
+function getDecisionContextMaxCharsDefault() {
+  return getEnvInt('REPLY_DECISION_CONTEXT_MAX_CHARS', 120);
+}
 
 /**
  * Per-Group
@@ -160,7 +175,7 @@ async function loadHistoryFromRedis(groupId) {
   const redis = getRedis();
   if (!redis) return null;
 
-  const key = `${GROUP_HISTORY_KEY_PREFIX}${groupId}`;
+  const key = `${getGroupHistoryKeyPrefix()}${groupId}`;
   try {
     const raw = await redis.get(key);
     if (!raw) return null;
@@ -176,11 +191,12 @@ async function saveHistoryToRedis(groupId, history) {
   const redis = getRedis();
   if (!redis) return;
 
-  const key = `${GROUP_HISTORY_KEY_PREFIX}${groupId}`;
+  const key = `${getGroupHistoryKeyPrefix()}${groupId}`;
   try {
     const payload = JSON.stringify(serializeHistory(history));
-    if (Number.isFinite(GROUP_HISTORY_TTL_SECONDS) && GROUP_HISTORY_TTL_SECONDS > 0) {
-      await redis.set(key, payload, 'EX', GROUP_HISTORY_TTL_SECONDS);
+    const ttlSeconds = getGroupHistoryTtlSeconds();
+    if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+      await redis.set(key, payload, 'EX', ttlSeconds);
     } else {
       await redis.set(key, payload);
     }
@@ -193,7 +209,7 @@ async function deleteHistoryFromRedis(groupId) {
   const redis = getRedis();
   if (!redis) return;
 
-  const key = `${GROUP_HISTORY_KEY_PREFIX}${groupId}`;
+  const key = `${getGroupHistoryKeyPrefix()}${groupId}`;
   try {
     await redis.del(key);
   } catch (e) {
@@ -654,13 +670,13 @@ class GroupHistoryManager {
 
     let groupLimit = typeof options.groupLimit === 'number' && options.groupLimit > 0
       ? options.groupLimit
-      : DECISION_GROUP_RECENT_MESSAGES;
+      : getDecisionGroupRecentMessagesDefault();
     let senderLimit = typeof options.senderLimit === 'number' && options.senderLimit > 0
       ? options.senderLimit
-      : DECISION_SENDER_RECENT_MESSAGES;
+      : getDecisionSenderRecentMessagesDefault();
     let maxChars = typeof options.maxChars === 'number' && options.maxChars > 0
       ? options.maxChars
-      : DECISION_CONTEXT_MAX_CHARS;
+      : getDecisionContextMaxCharsDefault();
 
     if (!Number.isFinite(groupLimit) || groupLimit <= 0) {
       groupLimit = 0;

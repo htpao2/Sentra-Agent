@@ -5,6 +5,7 @@ import https from 'https';
 import http from 'http';
 import { readFileSync, createWriteStream, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { promisify } from 'util';
+import { getEnv } from '../utils/envHotReloader.js';
 
 /**
  * Token计算工具类 - 支持文本和图片的token计算
@@ -37,20 +38,21 @@ export class TokenCounter {
    * @returns {Object} tiktoken编码器
    */
   getEncoder(modelName) {
-    if (!this.encoders.has(modelName)) {
+    const effectiveModel = modelName || getEnv('TOKEN_COUNT_MODEL', 'gpt-4.1-mini');
+    if (!this.encoders.has(effectiveModel)) {
       try {
-        const encoder = encoding_for_model(modelName);
-        this.encoders.set(modelName, encoder);
+        const encoder = encoding_for_model(effectiveModel);
+        this.encoders.set(effectiveModel, encoder);
         return encoder;
       } catch (error) {
-        console.warn(`不支持的模型: ${modelName}, 使用默认编码器`);
+        console.warn(`不支持的模型: ${effectiveModel}, 使用默认编码器`);
         // 使用GPT-4的编码器作为默认
         const encoder = encoding_for_model('gpt-4o');
-        this.encoders.set(modelName, encoder);
+        this.encoders.set(effectiveModel, encoder);
         return encoder;
       }
     }
-    return this.encoders.get(modelName);
+    return this.encoders.get(effectiveModel);
   }
 
   /**
@@ -59,9 +61,9 @@ export class TokenCounter {
    * @param {string} modelName 模型名称
    * @returns {number} token数量
    */
-  countTokens(text, modelName = 'gpt-4o-mini') {
+  countTokens(text, modelName) {
     try {
-      const encoder = this.getEncoder(modelName);
+      const encoder = this.getEncoder(modelName || getEnv('TOKEN_COUNT_MODEL', 'gpt-4.1-mini'));
       const tokens = encoder.encode(text);
       return tokens.length;
     } catch (error) {
@@ -76,7 +78,7 @@ export class TokenCounter {
    * @param {string} modelName 模型名称
    * @returns {Promise<number>} token数量
    */
-  async countMessageTokens(messages, modelName = 'gpt-4o-mini') {
+  async countMessageTokens(messages, modelName) {
     let totalTokens = 0;
 
     // 每条消息的基础开销
@@ -93,19 +95,19 @@ export class TokenCounter {
 
       // 处理消息角色
       if (message.role) {
-        totalTokens += this.countTokens(message.role, modelName);
+        totalTokens += this.countTokens(message.role, modelName || getEnv('TOKEN_COUNT_MODEL', 'gpt-4.1-mini'));
       }
 
       // 处理消息内容
       if (message.content) {
         if (typeof message.content === 'string') {
           // 纯文本消息
-          totalTokens += this.countTokens(message.content, modelName);
+          totalTokens += this.countTokens(message.content, modelName || getEnv('TOKEN_COUNT_MODEL', 'gpt-4.1-mini'));
         } else if (Array.isArray(message.content)) {
           // 多模态消息（文本+图片）
           for (const item of message.content) {
             if (item.type === 'text') {
-              totalTokens += this.countTokens(item.text, modelName);
+              totalTokens += this.countTokens(item.text, modelName || getEnv('TOKEN_COUNT_MODEL', 'gpt-4.1-mini'));
             } else if (item.type === 'image_url') {
               totalTokens += await this.calculateImageTokens(item);
             }
@@ -444,7 +446,7 @@ export class TokenCounter {
    * @param {string} modelName 模型名称
    * @returns {Object} 统计信息
    */
-  getTextStats(text, modelName = 'gpt-4o-mini') {
+  getTextStats(text, modelName = 'gpt-4.1-mini') {
     const tokenCount = this.countTokens(text, modelName);
     const charCount = text.length;
     const wordCount = text.split(/\s+/).filter(word => word.length > 0).length;
@@ -466,7 +468,7 @@ export class TokenCounter {
    * @param {string} modelName 模型名称
    * @returns {Promise<number>} 估算的总token数
    */
-  async estimateMaxTokens(messages, maxTokens = 4096, modelName = 'gpt-4o-mini') {
+  async estimateMaxTokens(messages, maxTokens = 4096, modelName = 'gpt-4.1-mini') {
     const messageTokens = await this.countMessageTokens(messages, modelName);
     return messageTokens + maxTokens;
   }
@@ -512,7 +514,7 @@ export class TokenCounter {
    * @param {string} modelName 模型名称
    * @returns {Array<Object>} 包含每个文本的token计算结果
    */
-  countMultipleTokens(texts, modelName = 'gpt-4o-mini') {
+  countMultipleTokens(texts, modelName = 'gpt-4.1-mini') {
     return texts.map(text => ({
       text,
       tokenCount: this.countTokens(text, modelName),

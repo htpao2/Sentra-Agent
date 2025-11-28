@@ -61,7 +61,7 @@ function buildConfigFromEnv() {
   llm: {
     baseURL: process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
     apiKey: process.env.OPENAI_API_KEY || '',
-    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
     temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2),
     maxTokens: int(process.env.OPENAI_MAX_TOKENS, 4096),
     toolChoice: process.env.OPENAI_TOOL_CHOICE || 'auto',
@@ -77,7 +77,7 @@ function buildConfigFromEnv() {
   fcLlm: {
     baseURL: process.env.FC_BASE_URL || process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
     apiKey: process.env.FC_API_KEY || process.env.OPENAI_API_KEY || '',
-    model: process.env.FC_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    model: process.env.FC_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini',
     temperature: Number(process.env.FC_TEMPERATURE || process.env.OPENAI_TEMPERATURE || 0.2),
     maxTokens: int(process.env.FC_MAX_TOKENS, -1), // -1 表示省略 max_tokens
     format: (process.env.FC_FORMAT || 'sentra').toLowerCase(),
@@ -134,7 +134,7 @@ function buildConfigFromEnv() {
   summarizer: {
     baseURL: process.env.SUMMARIZER_BASE_URL || process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
     apiKey: process.env.SUMMARIZER_API_KEY || process.env.OPENAI_API_KEY || '',
-    model: process.env.SUMMARIZER_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    model: process.env.SUMMARIZER_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini',
     temperature: Number(process.env.SUMMARIZER_TEMPERATURE || 0.1),
   },
   // 工具候选重排序（ReRank）配置
@@ -156,7 +156,7 @@ function buildConfigFromEnv() {
   judge: {
     baseURL: process.env.JUDGE_BASE_URL || process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
     apiKey: process.env.JUDGE_API_KEY || process.env.OPENAI_API_KEY || '',
-    model: process.env.JUDGE_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    model: process.env.JUDGE_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini',
     temperature: Number(process.env.JUDGE_TEMPERATURE || 0.1),
     maxTokens: int(process.env.JUDGE_MAX_TOKENS, -1),
     raceTimeoutMs: int(process.env.JUDGE_RACE_TIMEOUT_MS, 12000),
@@ -165,7 +165,7 @@ function buildConfigFromEnv() {
   reasoner: {
     baseURL: process.env.REASONER_BASE_URL || process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
     apiKey: process.env.REASONER_API_KEY || process.env.OPENAI_API_KEY || '',
-    model: process.env.REASONER_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    model: process.env.REASONER_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini',
     temperature: Number(process.env.REASONER_TEMPERATURE || process.env.OPENAI_TEMPERATURE || 0.2),
     // -1 或未设置表示“不限制/由服务端决定”，调用时将省略 max_tokens
     maxTokens: int(process.env.REASONER_MAX_TOKENS, -1),
@@ -311,5 +311,5 @@ export function getStageModel(stage) {
     reflection: config.llm?.model,
   };
   
-  return nativeModelMap[stage] || config.llm?.model || 'gpt-4o-mini';
+  return nativeModelMap[stage] || config.llm?.model || 'gpt-4.1-mini';
 }
