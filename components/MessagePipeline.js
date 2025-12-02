@@ -232,7 +232,23 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
     const systemContent = systemParts.join('\n\n');
 
     let conversations = [{ role: 'system', content: systemContent }, ...historyConversations];
-    const overlays = { global: AGENT_PRESET_PLAIN_TEXT || AGENT_PRESET_RAW_TEXT || '' };
+    const baseGlobalOverlay = AGENT_PRESET_PLAIN_TEXT || AGENT_PRESET_RAW_TEXT || '';
+    let overlays;
+    if (isProactive) {
+      overlays = {
+        global: baseGlobalOverlay,
+        plan:
+          '本轮为由 <sentra-root-directive type="proactive"> 标记的主动发言，请以 root directive 中的 objective 为最高准则，优先规划能够引出“新视角/新子话题”的步骤，可以合理使用各类 MCP 工具（搜索、网页解析、天气/时间、音乐/图片/视频、文档/代码、思维导图等）先获取真实信息或可分享素材，再结合 Bot 人设组织分享或提问，避免仅安排继续解释当前问题或重复提醒。',
+        arggen:
+          '当为主动回合生成工具参数时，优先选择那些能够为用户带来具体可观察结果的工具（例如搜索结果、网页摘要、图片/视频/音乐卡片、天气/实时信息等），并将参数控制在一次轻量查询或生成的范围内，避免过度复杂的多轮采集或无关查询。',
+        judge:
+          '在审核候选计划时，优先选择那些能够通过工具获得具体信息或可视化内容、并围绕当前语境提出新问题或补充背景的方案；对于仅包含“继续解释当前问题”或没有任何工具调用、且缺乏新意的计划，应认为不合格，并允许最终保持沉默。',
+        final_judge:
+          '在最终评估主动回复时，请检查内容是否真正带来了新的信息、视角或轻度转场，而不是复述之前的回答；若回复仅为很短且空泛的客套话（例如简单的“哈哈”“不错哦”等）或对已有解答的轻微改写，应倾向设置 noReply=true 或大幅压缩内容，对于主动回合，保持沉默优于输出低价值内容。'
+      };
+    } else {
+      overlays = { global: baseGlobalOverlay };
+    }
     const sendAndWaitWithConv = (m) => {
       const mm = m || {};
       if (!mm.requestId) {
