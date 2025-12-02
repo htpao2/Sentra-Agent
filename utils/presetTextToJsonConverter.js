@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { createLogger } from './logger.js';
+import { getEnv } from './envHotReloader.js';
 
 const logger = createLogger('PresetTextToJson');
 
@@ -288,7 +289,7 @@ export async function convertPresetTextToJson({ agent, rawText, fileName, model 
     { role: 'user', content: userContent }
   ];
 
-  const chosenModel = model || process.env.AGENT_PRESET_CONVERTER_MODEL || process.env.MAIN_AI_MODEL;
+  const chosenModel = model || getEnv('AGENT_PRESET_CONVERTER_MODEL', getEnv('MAIN_AI_MODEL'));
 
   logger.info(`convertPresetTextToJson: 开始转换预设(XML 工作流)，file=${fileName || ''}, model=${chosenModel || ''}`);
 

@@ -1,5 +1,6 @@
 import { createLogger } from './logger.js';
 import { getRedis, isRedisReady } from './redisClient.js';
+import { getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('AttentionStats');
 const localCache = new Map();
@@ -18,7 +19,7 @@ function clamp01(x) {
 }
 
 function getTtlSec() {
-  const raw = parseInt(process.env.ATTENTION_STATS_TTL_SEC || '600', 10);
+  const raw = getEnvInt('ATTENTION_STATS_TTL_SEC', 600);
   if (!Number.isFinite(raw) || raw <= 0) return 600;
   return raw;
 }

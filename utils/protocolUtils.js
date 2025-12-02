@@ -202,8 +202,15 @@ export function buildSentraUserQuestionBlock(msg) {
  * 解析<sentra-response>协议
  */
 export function parseSentraResponse(response) {
+  const hasSentraTag = typeof response === 'string' && response.includes('<sentra-response>');
   const responseContent = extractXMLTag(response, 'sentra-response');
   if (!responseContent) {
+    if (hasSentraTag) {
+      // 存在 <sentra-response> 标签但内容为空：视为“本轮选择保持沉默”，由上层跳过发送
+      logger.warn('检测到空的 <sentra-response> 块，将跳过发送');
+      return { textSegments: [], resources: [], replyMode: 'none', mentions: [], shouldSkip: true };
+    }
+
     logger.warn('未找到 <sentra-response> 块，返回原文');
     return { textSegments: [response], resources: [] };
   }
@@ -315,10 +322,33 @@ export function parseSentraResponse(response) {
       //logger.debug(`emoji: ${emoji.source}`);
       validated.emoji = emoji;  // 添加 emoji 到返回结果
     }
+
+    // 如果既没有文本也没有资源，则标记为 shouldSkip，供上层逻辑跳过发送
+    if ((!validated.textSegments || validated.textSegments.length === 0) &&
+        (!validated.resources || validated.resources.length === 0)) {
+      validated.shouldSkip = true;
+    }
+
     return validated;
   } catch (e) {
     logger.error('协议验证失败', e.errors);
-    const fallback = { textSegments: textSegments.length > 0 ? textSegments : [response], resources: [], replyMode, mentions };
+    const hasTag = typeof response === 'string' && response.includes('<sentra-response>');
+    let fallback;
+
+    if (textSegments.length === 0 && hasTag) {
+      // 已经有 sentra-response 标签，但解析/验证失败且没有任何有效文本：视为“本轮保持沉默”
+      logger.warn('协议验证失败且 <sentra-response> 中没有有效内容，将跳过发送');
+      fallback = { textSegments: [], resources: [], replyMode, mentions, shouldSkip: true };
+    } else {
+      // 旧行为回退：无 sentra-response 或仍有可用文本时，回退到原文
+      fallback = {
+        textSegments: textSegments.length > 0 ? textSegments : [response],
+        resources: [],
+        replyMode,
+        mentions
+      };
+    }
+
     if (emoji) fallback.emoji = emoji;  // 即使验证失败也保留 emoji
     return fallback;
   }

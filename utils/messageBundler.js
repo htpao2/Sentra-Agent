@@ -1,12 +1,13 @@
 import { createLogger } from './logger.js';
 import { OpenAIEmbeddings } from '@langchain/openai';
+import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('MessageBundler');
 
-const BUNDLE_WINDOW_MS = parseInt(process.env.BUNDLE_WINDOW_MS || '5000', 10);
-const BUNDLE_MAX_MS = parseInt(process.env.BUNDLE_MAX_MS || '15000', 10);
-const BUNDLE_MIN_SIMILARITY = parseFloat(process.env.BUNDLE_MIN_SIMILARITY || '0.6');
-const BUNDLE_MAX_LOW_SIM_COUNT = parseInt(process.env.BUNDLE_MAX_LOW_SIM_COUNT || '2', 10);
+const BUNDLE_WINDOW_MS = getEnvInt('BUNDLE_WINDOW_MS', 5000);
+const BUNDLE_MAX_MS = getEnvInt('BUNDLE_MAX_MS', 15000);
+const BUNDLE_MIN_SIMILARITY = parseFloat(getEnv('BUNDLE_MIN_SIMILARITY', '0.6'));
+const BUNDLE_MAX_LOW_SIM_COUNT = getEnvInt('BUNDLE_MAX_LOW_SIM_COUNT', 2);
 
 // senderId -> { collecting: true, messages: [], lastUpdate: number }
 const senderBundles = new Map();
@@ -25,9 +26,9 @@ let embeddingInitFailed = false;
 function getEmbeddingClient() {
   if (embeddingClient || embeddingInitFailed) return embeddingClient;
 
-  const apiKey = process.env.EMBEDDING_API_KEY || process.env.API_KEY;
-  const baseURL = process.env.EMBEDDING_API_BASE_URL || process.env.API_BASE_URL;
-  const model = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
+  const apiKey = getEnv('EMBEDDING_API_KEY', getEnv('API_KEY'));
+  const baseURL = getEnv('EMBEDDING_API_BASE_URL', getEnv('API_BASE_URL'));
+  const model = getEnv('EMBEDDING_MODEL', 'text-embedding-3-small');
 
   if (!apiKey) {
     embeddingInitFailed = true;

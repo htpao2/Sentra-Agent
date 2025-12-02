@@ -1,14 +1,16 @@
 import { DateTime } from 'luxon';
 import { createLogger } from './logger.js';
+import { getEnv } from './envHotReloader.js';
 
 const logger = createLogger('ContextCompressor');
 
 const BOT_PRIMARY_NAME = (() => {
   try {
-    const raw = process.env.BOT_NAMES || '';
+    const raw = getEnv('BOT_NAMES', '');
     const list = raw.split(',').map((s) => s.trim()).filter(Boolean);
     return list[0];
   } catch {
+
     return 'you';
   }
 })();

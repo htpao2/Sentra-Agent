@@ -57,8 +57,11 @@ export async function streamChatCompletion(config, onChunk, onProgress) {
       ...extra
     };
 
-    if (max_tokens) {
-      requestBody.max_tokens = max_tokens;
+    if (typeof max_tokens !== 'undefined') {
+      const mt = Number(max_tokens);
+      if (Number.isFinite(mt) && mt > 0) {
+        requestBody.max_tokens = mt;
+      }
     }
 
     const response = await fetch(url, {

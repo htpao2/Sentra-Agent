@@ -1,4 +1,4 @@
-import { getEnvBool } from '../utils/envHotReloader.js';
+import { getEnv, getEnvBool } from '../utils/envHotReloader.js';
 import { ConversationAnalyzer } from './gate/analyzer.js';
 
 function clamp01(x) {
@@ -14,7 +14,7 @@ function isReplyGateEnabled() {
 
 function getBotNames() {
   try {
-    const raw = process.env.BOT_NAMES || '';
+    const raw = getEnv('BOT_NAMES', '');
     if (!raw.trim()) return [];
     return raw.split(',').map((s) => s.trim()).filter(Boolean);
   } catch {

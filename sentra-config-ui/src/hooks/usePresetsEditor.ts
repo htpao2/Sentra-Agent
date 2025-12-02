@@ -2,14 +2,21 @@ import { useState, useEffect, useCallback } from 'react';
 import { PresetFile } from '../types/config';
 import { fetchPresets, fetchPresetFile, savePresetFile, deletePresetFile } from '../services/api';
 
+export interface PresetFolder {
+    name: string;
+    files: PresetFile[];
+}
+
 export interface PresetsEditorState {
     files: PresetFile[];
+    folders: PresetFolder[];
     selectedFile: PresetFile | null;
     fileContent: string;
     searchTerm: string;
     loading: boolean;
     saving: boolean;
     loadingFile: boolean;
+    expandedFolders: Set<string>;
     setSearchTerm: (term: string) => void;
     selectFile: (file: PresetFile | null) => void;
     saveFile: () => Promise<void>;
@@ -17,6 +24,39 @@ export interface PresetsEditorState {
     createFile: (filename: string) => Promise<void>;
     deleteFile: (file: PresetFile) => Promise<void>;
     refreshFiles: () => Promise<void>;
+    toggleFolder: (folderName: string) => void;
+}
+
+// Helper to group files by folder
+function groupFilesByFolder(files: PresetFile[]): PresetFolder[] {
+    const folderMap = new Map<string, PresetFile[]>();
+
+    for (const file of files) {
+        const folderPath = file.path.includes('/')
+            ? file.path.substring(0, file.path.lastIndexOf('/'))
+            : '';
+        const folderName = folderPath || '根目录';
+
+        if (!folderMap.has(folderName)) {
+            folderMap.set(folderName, []);
+        }
+        folderMap.get(folderName)!.push(file);
+    }
+
+    // Convert to array and sort
+    const folders = Array.from(folderMap.entries()).map(([name, files]) => ({
+        name,
+        files: files.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+    }));
+
+    // Sort folders: root first, then alphabetically
+    folders.sort((a, b) => {
+        if (a.name === '根目录') return -1;
+        if (b.name === '根目录') return 1;
+        return a.name.localeCompare(b.name, 'zh-Hans-CN');
+    });
+
+    return folders;
 }
 
 export function usePresetsEditor(
@@ -24,16 +64,16 @@ export function usePresetsEditor(
     isAuthenticated: boolean
 ): PresetsEditorState {
     const [files, setFiles] = useState<PresetFile[]>([]);
+    const [folders, setFolders] = useState<PresetFolder[]>([]);
     const [selectedFile, setSelectedFile] = useState<PresetFile | null>(null);
     const [fileContent, setFileContent] = useState<string>('');
     const [searchTerm, setSearchTerm] = useState('');
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [loadingFile, setLoadingFile] = useState(false);
+    const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['根目录']));
 
     const loadFiles = useCallback(async (silent = false) => {
-        // Check if user is authenticated before making API call
-        // We use the prop passed in, but also check storage as a fallback/confirmation
         const token = sessionStorage.getItem('sentra_auth_token');
         if (!token && !isAuthenticated) {
             console.log('Skipping presets load: not authenticated');
@@ -44,9 +84,9 @@ export function usePresetsEditor(
             if (!silent) setLoading(true);
             const data = await fetchPresets();
             setFiles(data);
+            setFolders(groupFilesByFolder(data));
         } catch (error) {
             console.error('Failed to load presets:', error);
-            // Only show toast if we thought we were authenticated
             if (isAuthenticated) {
                 addToast('error', '加载失败', '无法获取预设文件列表');
             }
@@ -90,7 +130,6 @@ export function usePresetsEditor(
             setSaving(true);
             await savePresetFile(selectedFile.path, fileContent);
             addToast('success', '保存成功', `文件 ${selectedFile.name} 已保存`);
-            // Refresh list in case size/time changed
             loadFiles(true);
         } catch (error) {
             console.error('Failed to save file:', error);
@@ -103,7 +142,6 @@ export function usePresetsEditor(
     const createFile = useCallback(async (filename: string) => {
         try {
             setSaving(true);
-            // Check if file already exists
             if (files.some(f => f.path === filename || f.name === filename)) {
                 addToast('error', '创建失败', '文件已存在');
                 return;
@@ -113,10 +151,6 @@ export function usePresetsEditor(
             addToast('success', '创建成功', `文件 ${filename} 已创建`);
             await loadFiles(true);
 
-            // Select the new file
-            // We need to find it in the new list, but since loadFiles is async state update, 
-            // we might need to wait or just manually construct the object.
-            // For now, let's just try to fetch it.
             const newFile: PresetFile = {
                 name: filename.split('/').pop() || filename,
                 path: filename,
@@ -139,13 +173,11 @@ export function usePresetsEditor(
             await deletePresetFile(file.path);
             addToast('success', '删除成功', `文件 ${file.name} 已删除`);
 
-            // Clear selection if deleted file was selected
             if (selectedFile?.path === file.path) {
                 setSelectedFile(null);
                 setFileContent('');
             }
 
-            // Refresh file list
             await loadFiles(true);
         } catch (error) {
             console.error('Failed to delete file:', error);
@@ -155,20 +187,36 @@ export function usePresetsEditor(
         }
     }, [selectedFile, addToast, loadFiles]);
 
+    const toggleFolder = useCallback((folderName: string) => {
+        setExpandedFolders(prev => {
+            const next = new Set(prev);
+            if (next.has(folderName)) {
+                next.delete(folderName);
+            } else {
+                next.add(folderName);
+            }
+            return next;
+        });
+    }, []);
+
     return {
         files,
+        folders,
         selectedFile,
         fileContent,
         searchTerm,
         loading,
         saving,
         loadingFile,
+        expandedFolders,
         setSearchTerm,
         selectFile,
         saveFile,
         setFileContent,
         createFile,
         deleteFile,
-        refreshFiles: () => loadFiles(false)
+        refreshFiles: () => loadFiles(false),
+        toggleFolder
     };
 }
+

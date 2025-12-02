@@ -10,6 +10,17 @@ const __dirname = path.dirname(__filename);
 
 const logger = createLogger('Agent');
 
+function previewData(data, limit = 1200) {
+  if (data == null) return '[empty]';
+  try {
+    const text = typeof data === 'string' ? data : JSON.stringify(data);
+    if (!text) return '[empty]';
+    return text.length > limit ? `${text.slice(0, limit)}…` : text;
+  } catch (err) {
+    return `[unserializable: ${err.message || 'unknown'}]`;
+  }
+}
+
 /**
  * Agent 类 - 轻量级 AI 对话代理
  * 支持环境变量配置、重试机制、Function Calling
@@ -120,10 +131,26 @@ class Agent {
         const data = await response.json();
         
         if (!data.choices || !data.choices[0]) {
+          logger.error('Agent.chat: API响应缺少 choices', {
+            responsePreview: previewData(data)
+          });
           throw new Error('Invalid API response: missing choices');
         }
         
         const message = data.choices[0].message;
+
+        if (!message || typeof message !== 'object') {
+          logger.warn('Agent.chat: API响应 message 异常', {
+            responsePreview: previewData(data)
+          });
+        }
+        
+        if (!message || typeof message.content !== 'string' || !message.content.trim()) {
+          logger.warn('Agent.chat: API返回空的 message.content', {
+            messagePreview: previewData(message),
+            responsePreview: previewData(data)
+          });
+        }
         
         // 如果使用了 tools，优先返回 tool_calls 的参数（解析后的JSON对象）
         if (message.tool_calls && message.tool_calls.length > 0) {

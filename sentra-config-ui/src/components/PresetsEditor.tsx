@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import styles from './PresetsEditor.module.css';
-import { IoSearch, IoDocumentText, IoSave, IoReload, IoInformationCircle, IoAdd, IoTrash } from 'react-icons/io5';
+import { IoSearch, IoDocumentText, IoSave, IoReload, IoInformationCircle, IoAdd, IoTrash, IoChevronDown, IoChevronForward, IoFolder, IoFolderOpen } from 'react-icons/io5';
 import Editor from '@monaco-editor/react';
 import { SafeInput } from './SafeInput';
 import { PresetsEditorState } from '../hooks/usePresetsEditor';
@@ -14,28 +14,36 @@ interface PresetsEditorProps {
 
 export const PresetsEditor: React.FC<PresetsEditorProps> = ({ theme, state }) => {
     const {
-        files,
+        folders,
         selectedFile,
         fileContent,
         searchTerm,
         loading,
         saving,
         loadingFile,
+        expandedFolders,
         setSearchTerm,
         selectFile,
         saveFile,
         setFileContent,
         createFile,
-        deleteFile
+        deleteFile,
+        toggleFolder
     } = state;
 
     const [showNewFileModal, setShowNewFileModal] = useState(false);
     const [newFileName, setNewFileName] = useState('');
     const [showDeleteModal, setShowDeleteModal] = useState(false);
 
-    const filteredFiles = files.filter(f =>
-        f.name.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    // Filter folders and files based on search term
+    const filteredFolders = searchTerm
+        ? folders.map(folder => ({
+            ...folder,
+            files: folder.files.filter(f =>
+                f.name.toLowerCase().includes(searchTerm.toLowerCase())
+            )
+        })).filter(folder => folder.files.length > 0)
+        : folders;
 
     const getLanguage = (filename: string) => {
         const ext = filename.split('.').pop()?.toLowerCase();
@@ -92,19 +100,46 @@ export const PresetsEditor: React.FC<PresetsEditorProps> = ({ theme, state }) =>
                     {loading ? (
                         <div style={{ padding: 20, textAlign: 'center', color: '#888' }}>加载中...</div>
                     ) : (
-                        filteredFiles.map(file => (
-                            <div
-                                key={file.path}
-                                className={`${styles.fileItem} ${selectedFile?.path === file.path ? styles.active : ''}`}
-                                onClick={() => selectFile(file)}
-                            >
-                                <IoDocumentText className={styles.fileIcon} />
-                                <div className={styles.fileName}>{file.name}</div>
+                        filteredFolders.map(folder => (
+                            <div key={folder.name} className={styles.folderGroup}>
+                                <div
+                                    className={styles.folderHeader}
+                                    onClick={() => toggleFolder(folder.name)}
+                                >
+                                    {expandedFolders.has(folder.name) ? (
+                                        <>
+                                            <IoChevronDown size={14} className={styles.folderChevron} />
+                                            <IoFolderOpen size={16} className={styles.folderIcon} />
+                                        </>
+                                    ) : (
+                                        <>
+                                            <IoChevronForward size={14} className={styles.folderChevron} />
+                                            <IoFolder size={16} className={styles.folderIcon} />
+                                        </>
+                                    )}
+                                    <span className={styles.folderName}>{folder.name}</span>
+                                    <span className={styles.fileCount}>({folder.files.length})</span>
+                                </div>
+                                {expandedFolders.has(folder.name) && (
+                                    <div className={styles.folderFiles}>
+                                        {folder.files.map(file => (
+                                            <div
+                                                key={file.path}
+                                                className={`${styles.fileItem} ${selectedFile?.path === file.path ? styles.active : ''}`}
+                                                onClick={() => selectFile(file)}
+                                            >
+                                                <IoDocumentText className={styles.fileIcon} />
+                                                <div className={styles.fileName}>{file.name}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         ))
                     )}
                 </div>
             </div>
+
 
             <div className={styles.editorArea}>
                 {selectedFile ? (

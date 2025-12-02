@@ -23,6 +23,10 @@ const logger = createLogger('SendUtils');
  */
 async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply = true) {
   const parsed = parseSentraResponse(response);
+  if (parsed && parsed.shouldSkip) {
+    logger.warn('smartSend: 解析结果标记为 shouldSkip，本次不发送任何内容');
+    return;
+  }
   const textSegments = parsed.textSegments || [response];
   const protocolResources = parsed.resources || [];
   const emoji = parsed.emoji || null;
@@ -365,6 +369,13 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
   try {
     if (typeof response === 'string') {
       const parsed = parseSentraResponse(response);
+
+      // 如果解析结果表明应跳过发送，则直接返回，不进入发送队列
+      if (parsed && parsed.shouldSkip) {
+        logger.warn(`smartSend: 解析结果标记为 shouldSkip，跳过发送任务 (groupId=${groupId})`);
+        return null;
+      }
+
       const segments = Array.isArray(parsed.textSegments) ? parsed.textSegments : [];
       textForDedup = segments
         .map((s) => (typeof s === 'string' ? s.trim() : ''))

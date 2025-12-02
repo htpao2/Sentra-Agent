@@ -19,6 +19,7 @@ import { fileURLToPath } from 'url';
 import { extractXMLTag, extractAllXMLTags } from './xmlUtils.js';
 import { createLogger } from './logger.js';
 import { repairSentraPersona } from './formatRepair.js';
+import { getEnv, getEnvInt, getEnvBool } from './envHotReloader.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,19 +38,19 @@ class UserPersonaManager {
     this.dataDir = options.dataDir || path.join(process.cwd(), 'userData');
     
     // 时间间隔控制（毫秒）- 默认 10 分钟
-    this.updateIntervalMs = options.updateIntervalMs || parseInt(process.env.PERSONA_UPDATE_INTERVAL_MS || '600000');
+    this.updateIntervalMs = options.updateIntervalMs || getEnvInt('PERSONA_UPDATE_INTERVAL_MS', 600000);
     
     // 消息阈值 - 距离上次更新至少需要积累的消息数
-    this.minMessagesForUpdate = options.minMessagesForUpdate || parseInt(process.env.PERSONA_MIN_MESSAGES || '10');
+    this.minMessagesForUpdate = options.minMessagesForUpdate || getEnvInt('PERSONA_MIN_MESSAGES', 10);
     
     this.maxHistorySize = options.maxHistorySize || 100; // 最多保留历史消息数
-    this.model = options.model || process.env.PERSONA_MODEL || 'gpt-4.1-mini';
-    this.recentMessagesCount = options.recentMessagesCount || parseInt(process.env.PERSONA_RECENT_MESSAGES || '40');
-    this.halfLifeMs = options.halfLifeMs || parseInt(process.env.PERSONA_HALFLIFE_MS || '172800000');
-    this.maxTraits = options.maxTraits || parseInt(process.env.PERSONA_MAX_TRAITS || '6');
-    this.maxInterests = options.maxInterests || parseInt(process.env.PERSONA_MAX_INTERESTS || '8');
-    this.maxPatterns = options.maxPatterns || parseInt(process.env.PERSONA_MAX_PATTERNS || '6');
-    this.maxInsights = options.maxInsights || parseInt(process.env.PERSONA_MAX_INSIGHTS || '6');
+    this.model = options.model || getEnv('PERSONA_MODEL', 'gpt-4.1-mini');
+    this.recentMessagesCount = options.recentMessagesCount || getEnvInt('PERSONA_RECENT_MESSAGES', 40);
+    this.halfLifeMs = options.halfLifeMs || getEnvInt('PERSONA_HALFLIFE_MS', 172800000);
+    this.maxTraits = options.maxTraits || getEnvInt('PERSONA_MAX_TRAITS', 6);
+    this.maxInterests = options.maxInterests || getEnvInt('PERSONA_MAX_INTERESTS', 8);
+    this.maxPatterns = options.maxPatterns || getEnvInt('PERSONA_MAX_PATTERNS', 6);
+    this.maxInsights = options.maxInsights || getEnvInt('PERSONA_MAX_INSIGHTS', 6);
     
     // 内存缓存 - 减少文件读写
     this.cache = new Map(); // sender_id -> { persona, messages, messageCount }
@@ -695,10 +696,10 @@ Apply these strategies systematically:
       
       if (!personaXML) {
         // 使用格式修复器尝试修复为 <sentra-persona>
-        const enableRepair = (process.env.ENABLE_FORMAT_REPAIR || 'true') === 'true';
+        const enableRepair = getEnvBool('ENABLE_FORMAT_REPAIR', true);
         if (enableRepair && typeof content === 'string' && content.trim()) {
           try {
-            const repaired = await repairSentraPersona(content, { agent: this.agent, model: process.env.REPAIR_AI_MODEL });
+            const repaired = await repairSentraPersona(content, { agent: this.agent, model: getEnv('REPAIR_AI_MODEL') });
             const extracted = extractXMLTag(repaired, 'sentra-persona');
             if (extracted) {
               personaXML = extracted;

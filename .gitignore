@@ -118,5 +118,3 @@ test/1.txt.backup
 # User Data (Privacy Protection)
 userData/
 !userData/README.md
-
-sentra-presets/

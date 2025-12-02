@@ -1,5 +1,6 @@
 ﻿import { getRedis } from './redisClient.js';
 import { createLogger } from './logger.js';
+import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('ConversationUtils');
 
@@ -12,13 +13,14 @@ const logger = createLogger('ConversationUtils');
 const conversationHistory = new Map();
 
 // Redis key 前缀配置（私聊 / 群聊分别使用独立前缀，不再兼容旧字段）
-const REDIS_CONV_PRIVATE_PREFIX = process.env.REDIS_CONV_PRIVATE_PREFIX || 'sentra:conv:private:';
-const REDIS_CONV_GROUP_PREFIX = process.env.REDIS_CONV_GROUP_PREFIX || 'sentra:conv:group:';
+const REDIS_CONV_PRIVATE_PREFIX = getEnv('REDIS_CONV_PRIVATE_PREFIX', 'sentra:conv:private:');
+const REDIS_CONV_GROUP_PREFIX = getEnv('REDIS_CONV_GROUP_PREFIX', 'sentra:conv:group:');
 
 // TTL 与最大条数配置
-const REDIS_CONV_TTL_SECONDS = parseInt(process.env.REDIS_CONV_TTL_SECONDS || '86400', 10);
-const parsedConvMaxMessages = parseInt(process.env.REDIS_CONV_MAX_MESSAGES ?? '0', 10);
-const REDIS_CONV_MAX_MESSAGES = Number.isNaN(parsedConvMaxMessages) ? 0 : parsedConvMaxMessages; // <=0 表示不限制，仅由 TTL 控制
+const REDIS_CONV_TTL_SECONDS = getEnvInt('REDIS_CONV_TTL_SECONDS', 86400);
+const convMaxMessagesRaw = getEnv('REDIS_CONV_MAX_MESSAGES', '0');
+const convMaxMessagesParsed = parseInt(convMaxMessagesRaw, 10);
+const REDIS_CONV_MAX_MESSAGES = Number.isNaN(convMaxMessagesParsed) ? 0 : convMaxMessagesParsed; // <=0 表示不限制，仅由 TTL 控制
 
 function buildConversationKey(msg) {
   return msg.type === 'private'

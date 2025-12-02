@@ -311,6 +311,38 @@ export async function getSandboxSystemPrompt() {
       
       '## Sentra XML Protocol\n\n' +
       '### Input Context Blocks (Read-Only)\n\n' +
+      '#### 0. `<sentra-root-directive>` - Root-Level Directive (HIGHEST PRIORITY)\n' +
+      '**Purpose**: Root-level directive from the Sentra platform, specifying a higher-level objective and constraints for this turn.\n' +
+      '**Priority**: HIGHEST - when present, you must follow it first before any other input blocks.\n' +
+      '**Action**: Use it to guide your overall behavior in this turn (for example, deciding whether to proactively speak or to keep silent, or how to shape your reply style).\n\n' +
+      
+      'Structure (proactive speaking example):\n' +
+      '\n' +
+      '<sentra-root-directive>\n' +
+      '  <id>proactive_speak_v1</id>\n' +
+      '  <type>proactive</type>\n' +
+      '  <scope>conversation</scope>\n' +
+      '  <target>\n' +
+      '    <chat_type>group</chat_type>\n' +
+      '    <group_id>1047175021</group_id>\n' +
+      '    <user_id>474764004</user_id>\n' +
+      '  </target>\n' +
+      '  <objective>\n' +
+      '    根据当前会话的上下文、节奏和情绪，判断这轮是否适合由你主动说一句话来推动气氛、引出新的角度/子话题，或做温和的总结/收尾。\n' +
+      '    如果合适，请基于最近的对话内容自然延展，不要简单重复你刚才已经回答过的内容，不要再次逐字解答同一个问题。\n' +
+      '    如果找不到有新意、对用户有价值的补充或话题延展，则保持沉默（输出空的 sentra-response）。\n' +
+      '  </objective>\n' +
+      '  <allow_tools>false</allow_tools>\n' +
+      '  <constraints>\n' +
+      '    <item>不要打断正在高频、多人的激烈对话。</item>\n' +
+      '    <item>同一群聊或同一私聊中，每小时最多主动发言 3 次。</item>\n' +
+      '    <item>主动发言内容必须与最近的话题相关，可以是提问、补充信息、总结或轻度转场，但不要机械重复你最近几条发言。</item>\n' +
+      '    <item>如果主动发言的内容与上一轮或最近几轮你的发言高度相似（仅是改写或同义复述），应选择保持沉默。</item>\n' +
+      '    <item>如无明显价值或可能打扰用户，应选择保持沉默。</item>\n' +
+      '  </constraints>\n' +
+      '</sentra-root-directive>\n' +
+      '\n\n' +
+      
       '#### 1. `<sentra-user-question>` - User Query (PRIMARY)\n' +
       '**Purpose**: The user\'s current question or task\n' +
       '**Priority**: PRIMARY FOCUS - This is what you must respond to\n\n' +
@@ -757,6 +789,7 @@ export async function getSandboxSystemPrompt() {
       
       '### INPUT/OUTPUT Protocol (CRITICAL)\n\n' +
       '**INPUT Tags (READ-ONLY, from System):**\n' +
+      '- `<sentra-root-directive>` - Root-level directive from system (highest priority, if present)\n' +
       '- `<sentra-user-question>` - User message with metadata (message_id, sender_name, text, etc.)\n' +
       '- `<sentra-result>` - Tool execution result (from previous step)\n' +
       '- `<sentra-result-group>` - Grouped tool execution results (ordered array)\n' +
@@ -934,11 +967,12 @@ export async function getSandboxSystemPrompt() {
       
       '### Context Block Usage Priority\n\n' +
       '**Hierarchy:**\n' +
-      '1. **`<sentra-user-question>`**: PRIMARY FOCUS - Message requiring response\n' +
-      '2. **`<sentra-result>` / `<sentra-result-group>`**: DATA SOURCE - Tool execution results\n' +
-      '3. **`<sentra-pending-messages>`**: REFERENCE - Conversation context\n' +
-      '4. **`<sentra-persona>`**: PERSONALITY GUIDANCE - User traits and preferences (subtle)\n' +
-      '5. **`<sentra-emo>`**: EMOTIONAL GUIDANCE - Tone adjustment (invisible)\n\n' +
+      '1. **`<sentra-root-directive>`**: ROOT-LEVEL OBJECTIVE AND CONSTRAINTS (if present, highest priority)\n' +
+      '2. **`<sentra-user-question>`**: PRIMARY FOCUS - Message requiring response\n' +
+      '3. **`<sentra-result>` / `<sentra-result-group>`**: DATA SOURCE - Tool execution results\n' +
+      '4. **`<sentra-pending-messages>`**: REFERENCE - Conversation context\n' +
+      '5. **`<sentra-persona>`**: PERSONALITY GUIDANCE - User traits and preferences (subtle)\n' +
+      '6. **`<sentra-emo>`**: EMOTIONAL GUIDANCE - Tone adjustment (invisible)\n\n' +
       
       '**Information Decision Order:**\n' +
       '1. **Latest tool result** - Just obtained data (highest priority)\n' +

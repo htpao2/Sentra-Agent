@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { IoChevronBack, IoAdd, IoSave, IoSearch, IoDocumentText, IoTrash } from 'react-icons/io5';
+import { IoChevronBack, IoAdd, IoSave, IoSearch, IoDocumentText, IoTrash, IoChevronDown, IoChevronForward, IoFolder, IoFolderOpen } from 'react-icons/io5';
 import Editor from '@monaco-editor/react';
 import { PresetsEditorState } from '../hooks/usePresetsEditor';
 
@@ -12,29 +12,36 @@ interface IOSPresetsEditorProps {
 
 export const IOSPresetsEditor: React.FC<IOSPresetsEditorProps> = ({ onClose, state }) => {
     const {
-        files,
+        folders,
         selectedFile,
         fileContent,
         searchTerm,
         loading,
         saving,
         loadingFile,
+        expandedFolders,
         setSearchTerm,
         selectFile,
         saveFile,
         setFileContent,
         createFile,
-        deleteFile
+        deleteFile,
+        toggleFolder
     } = state;
 
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [newFileName, setNewFileName] = useState('');
     const [showDeleteModal, setShowDeleteModal] = useState(false);
 
-    // Filter files
-    const filteredFiles = files.filter(f =>
-        f.name.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    // Filter folders and files based on search term
+    const filteredFolders = searchTerm
+        ? folders.map(folder => ({
+            ...folder,
+            files: folder.files.filter(f =>
+                f.name.toLowerCase().includes(searchTerm.toLowerCase())
+            )
+        })).filter(folder => folder.files.length > 0)
+        : folders;
 
     const handleCreate = async () => {
         if (!newFileName) return;
@@ -66,23 +73,12 @@ export const IOSPresetsEditor: React.FC<IOSPresetsEditorProps> = ({ onClose, sta
             }}>
                 <div className="ios-back-btn" onClick={() => {
                     if (selectedFile) {
-                        selectFile(null as any); // Hack to deselect, but better to add deselect method to hook or just pass null if hook allows
-                        // Actually hook expects PresetFile. Let's check hook.
-                        // The hook doesn't have a clear way to deselect except maybe passing a dummy or handling it.
-                        // Let's just close the app if on file list, or go back to list if on file.
-                        // Wait, selectFile(null) might crash if types are strict.
-                        // Let's look at how we can "go back".
-                        // If we are in file view (selectedFile is set), we want to go back to list.
-                        // But the hook's selectFile takes a PresetFile.
-                        // We might need to reload the page or just use a local state for view?
-                        // The state 'selectedFile' controls the view.
-                        // We can't easily set it to null via selectFile because of types.
-                        // But we can force it if we cast, or update the hook.
-                        // For now, let's assume onClose closes the whole thing.
+                        selectFile(null as any);
+                    } else {
+                        onClose();
                     }
-                    onClose();
                 }} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', color: '#0a84ff', fontSize: '17px' }}>
-                    <IoChevronBack size={24} /> 主页
+                    <IoChevronBack size={24} /> {selectedFile ? '返回' : '主页'}
                 </div>
                 <div style={{ fontWeight: 600, fontSize: '17px' }}>
                     {selectedFile ? selectedFile.name : '预设撰写'}
@@ -113,7 +109,7 @@ export const IOSPresetsEditor: React.FC<IOSPresetsEditorProps> = ({ onClose, sta
                             <>
                                 <Editor
                                     height="100%"
-                                    defaultLanguage="markdown" // Presets are usually prompts/markdown
+                                    defaultLanguage="markdown"
                                     theme="vs-dark"
                                     value={fileContent}
                                     onChange={(val) => setFileContent(val || '')}
@@ -136,14 +132,7 @@ export const IOSPresetsEditor: React.FC<IOSPresetsEditorProps> = ({ onClose, sta
                                     background: '#1c1c1e',
                                     borderTop: '1px solid #333'
                                 }}>
-                                    <div onClick={() => {
-                                        // We need a way to deselect. 
-                                        // Since we can't via hook easily without changing it, 
-                                        // we'll just reload files which might reset selection? 
-                                        // No, hook state persists.
-                                        // Let's cast to any to pass null, and we fixed the hook to handle it.
-                                        selectFile(null as any);
-                                    }} style={{ color: '#0a84ff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                                    <div onClick={() => selectFile(null as any)} style={{ color: '#0a84ff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
                                         <IoChevronBack /> 返回列表
                                     </div>
                                     <div onClick={() => setShowDeleteModal(true)} style={{ color: '#ff453a', cursor: 'pointer' }}>
@@ -185,35 +174,70 @@ export const IOSPresetsEditor: React.FC<IOSPresetsEditorProps> = ({ onClose, sta
                             </div>
                         </div>
 
-                        {/* List */}
+                        {/* List with folders */}
                         <div style={{ flex: 1, overflowY: 'auto' }}>
                             {loading ? (
                                 <div style={{ padding: 20, textAlign: 'center', color: '#666' }}>加载中...</div>
-                            ) : filteredFiles.length === 0 ? (
+                            ) : filteredFolders.length === 0 ? (
                                 <div style={{ padding: 40, textAlign: 'center', color: '#666' }}>
                                     {searchTerm ? '未找到匹配文件' : '暂无预设文件'}
                                 </div>
                             ) : (
-                                filteredFiles.map(file => (
-                                    <div
-                                        key={file.path}
-                                        onClick={() => selectFile(file)}
-                                        style={{
-                                            padding: '12px 16px',
-                                            borderBottom: '1px solid #2c2c2e',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            cursor: 'pointer',
-                                            background: '#000'
-                                        }}
-                                    >
-                                        <IoDocumentText color="#0a84ff" size={24} style={{ marginRight: 12 }} />
-                                        <div style={{ flex: 1 }}>
-                                            <div style={{ color: '#fff', fontSize: '16px', marginBottom: 4 }}>{file.name}</div>
-                                            <div style={{ color: '#666', fontSize: '12px' }}>
-                                                {new Date(file.modified).toLocaleString()} · {(file.size / 1024).toFixed(1)} KB
-                                            </div>
+                                filteredFolders.map(folder => (
+                                    <div key={folder.name}>
+                                        {/* Folder Header */}
+                                        <div
+                                            onClick={() => toggleFolder(folder.name)}
+                                            style={{
+                                                padding: '12px 16px',
+                                                background: '#1c1c1e',
+                                                borderBottom: '1px solid #2c2c2e',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            {expandedFolders.has(folder.name) ? (
+                                                <>
+                                                    <IoChevronDown color="#8e8e93" size={16} style={{ marginRight: 8 }} />
+                                                    <IoFolderOpen color="#ffd700" size={20} style={{ marginRight: 10 }} />
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <IoChevronForward color="#8e8e93" size={16} style={{ marginRight: 8 }} />
+                                                    <IoFolder color="#ffd700" size={20} style={{ marginRight: 10 }} />
+                                                </>
+                                            )}
+                                            <span style={{ flex: 1, color: '#fff', fontSize: '15px', fontWeight: 500 }}>
+                                                {folder.name}
+                                            </span>
+                                            <span style={{ color: '#666', fontSize: '13px' }}>
+                                                ({folder.files.length})
+                                            </span>
                                         </div>
+                                        {/* Folder Files */}
+                                        {expandedFolders.has(folder.name) && folder.files.map(file => (
+                                            <div
+                                                key={file.path}
+                                                onClick={() => selectFile(file)}
+                                                style={{
+                                                    padding: '12px 16px 12px 52px',
+                                                    borderBottom: '1px solid #2c2c2e',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    cursor: 'pointer',
+                                                    background: '#000'
+                                                }}
+                                            >
+                                                <IoDocumentText color="#0a84ff" size={22} style={{ marginRight: 12 }} />
+                                                <div style={{ flex: 1 }}>
+                                                    <div style={{ color: '#fff', fontSize: '15px', marginBottom: 2 }}>{file.name}</div>
+                                                    <div style={{ color: '#666', fontSize: '11px' }}>
+                                                        {new Date(file.modified).toLocaleString()} · {(file.size / 1024).toFixed(1)} KB
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
                                 ))
                             )}

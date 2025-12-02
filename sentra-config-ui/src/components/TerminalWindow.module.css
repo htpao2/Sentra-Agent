@@ -1,117 +1,73 @@
 .terminalContainer {
     width: 100%;
-    flex: 1;
-    min-height: 0;
-    /* Crucial for nested flex scrolling */
-    display: flex;
-    flex-direction: column;
-    background: #1e1e1e;
-    position: relative;
+    height: 100%;
+    background: #000;
     overflow: hidden;
+    position: relative;
 }
 
-.terminal {
-    flex: 1;
-    min-width: 0; /* allow flex child to shrink to container width */
-    padding: 12px;
-    overflow-y: auto;
-    overflow-x: hidden; /* avoid horizontal scrollbar */
-
-    font-family: 'Cascadia Mono', 'Consolas', 'Fira Code', 'JetBrains Mono', 'Noto Sans Mono', 'Noto Sans Symbols 2', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: 13px;
-    line-height: 1.4;
-    color: #fff;
-    /* wrap long lines but preserve spacing/newlines */
-    white-space: pre-wrap;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    touch-action: pan-y;
-    overscroll-behavior: contain;
+.terminalWrapper {
+    width: 100%;
+    height: 100%;
 }
 
-.output {
-    padding-bottom: 20px;
-}
-
-.killBtn {
+/* Scroll to bottom hint */
+.scrollHint {
     position: absolute;
-    top: 10px;
-    right: 10px;
-    background: rgba(255, 59, 48, 0.2);
-    border: 1px solid rgba(255, 59, 48, 0.5);
-    color: #ff3b30;
-    border-radius: 4px;
-    padding: 4px 8px;
-    font-size: 11px;
+    bottom: 20px;
+    right: 20px;
+    background: rgba(51, 154, 240, 0.9);
+    color: white;
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
     cursor: pointer;
-    transition: all 0.2s;
-    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transition: all 0.2s ease;
+    user-select: none;
+    z-index: 100;
     display: flex;
     align-items: center;
     gap: 4px;
 }
 
-.killBtn:hover {
-    background: rgba(255, 59, 48, 0.3);
+.scrollHint:hover {
+    background: rgba(51, 154, 240, 1);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
 }
 
-/* Custom scrollbar */
-.terminal::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+.scrollHint:active {
+    transform: translateY(0);
 }
 
-.terminal::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.05);
+/* Override xterm.css if needed */
+:global(.xterm-viewport) {
+    overflow-y: auto !important;
 }
 
-.terminal::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
-    border-radius: 4px;
-}
-
-.terminal::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.3);
-}
-
-/* Header styles for nicer look */
-.header {
-    padding: 6px 10px;
-    background: linear-gradient(180deg, #2a2a2a, #212121);
-    color: #bdbdbd;
-    font-size: 11px;
-    border-bottom: 1px solid #3a3a3a;
+/* Mac Traffic Lights (retained for parent usage if needed) */
+.trafficLights {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    gap: 8px;
+    padding: 10px;
 }
 
-.status {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+.trafficLight {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
 }
 
-.pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 6px;
-    border-radius: 999px;
-    font-size: 10px;
-    line-height: 1;
+.close {
+    background: #ff5f56;
 }
 
-.running {
-    background: rgba(46, 204, 113, 0.15);
-    color: #2ecc71;
-    border: 1px solid rgba(46, 204, 113, 0.4);
+.minimize {
+    background: #ffbd2e;
 }
 
-.exited {
-    background: rgba(255, 99, 71, 0.15);
-    color: #ff6b6b;
-    border: 1px solid rgba(255, 99, 71, 0.4);
+.maximize {
+    background: #27c93f;
 }

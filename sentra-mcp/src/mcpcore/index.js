@@ -7,6 +7,7 @@ import { ok, fail } from '../utils/result.js';
 import { getRedis, isRedisReady } from '../redis/client.js';
 import { config } from '../config/index.js';
 import { Governance } from '../governance/policy.js';
+import { embedTexts } from '../openai/client.js';
 import crypto from 'node:crypto';
 
 function makeAINameLocal(name) {
@@ -29,6 +30,17 @@ function __getLocalRemainMs(aiName) {
   return remain > 0 ? remain : 0;
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, Math.max(0, ms))); }
+
+function cosineSim(a = [], b = []) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || a.length === 0) return 0;
+  let dot = 0; let na = 0; let nb = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i]; const y = b[i];
+    dot += x * y; na += x * x; nb += y * y;
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
 
 export class MCPCore {
   constructor() {
@@ -230,6 +242,19 @@ export class MCPCore {
     const ttlSec = Math.max(1, Number(config.planner?.toolCache?.ttlSeconds || 600));
     let cacheKey = null;
 
+    const memCfg = config.memory || {};
+    const vecCfg = memCfg.resultCache || {};
+    const vecBaseEnabled = !!(memCfg.enable && vecCfg.enable && isRedisReady());
+    const vecDeny = Array.isArray(vecCfg.denylist) && vecCfg.denylist.length ? new Set(vecCfg.denylist) : null;
+    const vecAllow = Array.isArray(vecCfg.allowlist) ? vecCfg.allowlist : [];
+    const vecAllowed = vecBaseEnabled && (!vecDeny || !vecDeny.has(aiName)) && (!vecAllow.length || vecAllow.includes(aiName));
+    const vecReuseThreshold = Number(vecCfg.reuseThreshold ?? memCfg.reuseThreshold ?? 0.97);
+    const vecTtlSec = Math.max(1, Number(vecCfg.ttlSeconds || 86400));
+    const vecPoolN = Math.max(10, Number(memCfg.candidatePool || 200));
+    const vecPrefix = String(memCfg.prefix || 'sentra:mcp:mem');
+    let argsVec = null;
+    let vecCacheTried = false;
+
     const maxCooldownRetries = Math.max(0, Number(config.planner?.cooldownFunctionRetry ?? 0));
     let attempt = 0;
     while (true) {
@@ -261,6 +286,72 @@ export class MCPCore {
           }
         }
 
+        if (vecAllowed && !vecCacheTried) {
+          vecCacheTried = true;
+          try {
+            if (!argsVec) {
+              const text = MCPCore._stableStringify({ aiName, args: args || {} });
+              const [vec] = await embedTexts({ texts: [text] });
+              argsVec = Array.isArray(vec) ? vec : [];
+            }
+            if (Array.isArray(argsVec) && argsVec.length) {
+              const r = getRedis();
+              const idxKey = `${vecPrefix}:argcache:index:${aiName}`;
+              const keys = await r.zrevrange(idxKey, 0, vecPoolN - 1);
+              if (keys && keys.length) {
+                const pipeline = r.pipeline();
+                for (const k of keys) pipeline.hgetall(k);
+                const rows = await pipeline.exec();
+                let bestScore = 0;
+                let bestResult = null;
+                let bestArgsPreview = null;
+                const nowTs = Date.now();
+                const maxAgeMs = vecTtlSec * 1000;
+                for (const row of rows) {
+                  const err = row && row[0];
+                  const d = row && row[1];
+                  if (err || !d) continue;
+                  const ts = Number(d.ts || 0);
+                  if (maxAgeMs > 0 && ts > 0 && nowTs - ts > maxAgeMs) continue;
+                  let emb;
+                  try { emb = JSON.parse(d.embedding || '[]'); } catch { emb = []; }
+                  if (!Array.isArray(emb) || !emb.length) continue;
+                  const s = cosineSim(argsVec, emb);
+                  if (!Number.isFinite(s)) continue;
+                  if (s >= vecReuseThreshold && s >= bestScore) {
+                    let parsed;
+                    try { parsed = JSON.parse(d.result || 'null'); } catch { parsed = null; }
+                    if (parsed && parsed.success === true) {
+                      bestScore = s;
+                      bestResult = parsed;
+                      if (typeof d.args === 'string') {
+                        const raw = d.args;
+                        bestArgsPreview = raw.length > 240
+                          ? `${raw.slice(0, 240)}... (len=${raw.length})`
+                          : raw;
+                      } else {
+                        bestArgsPreview = null;
+                      }
+                    }
+                  }
+                }
+                if (bestResult) {
+                  logger.info('命中向量工具结果缓存', {
+                    label: 'MCP',
+                    aiName,
+                    provider: t.providerType,
+                    score: Number(bestScore.toFixed?.(3) || bestScore),
+                    argsPreview: bestArgsPreview,
+                  });
+                  return bestResult;
+                }
+              }
+            }
+          } catch (e) {
+            logger.warn?.('读取向量工具结果缓存失败（忽略）', { label: 'MCP', aiName, error: String(e) });
+          }
+        }
+
         if (t.providerType === 'local') {
           if (t._validate && !t._validate(args || {})) {
             const e = new Error('Validation failed');
@@ -284,6 +375,39 @@ export class MCPCore {
               logger.warn?.('写入工具缓存失败（忽略）', { label: 'MCP', aiName, error: String(e) });
             }
           }
+          if (vecAllowed && out?.success === true) {
+            try {
+              if (!argsVec) {
+                const text = MCPCore._stableStringify({ aiName, args: args || {} });
+                const [vec] = await embedTexts({ texts: [text] });
+                argsVec = Array.isArray(vec) ? vec : [];
+              }
+              if (Array.isArray(argsVec) && argsVec.length) {
+                const r = getRedis();
+                const ts = Date.now();
+                const docKey = `${vecPrefix}:argcache:doc:${aiName}:${ts}:${Math.random().toString(36).slice(2, 10)}`;
+                const idxKey = `${vecPrefix}:argcache:index:${aiName}`;
+                const payload = {
+                  ts: String(ts),
+                  args: MCPCore._stableStringify({ aiName, args: args || {} }),
+                  embedding: JSON.stringify(argsVec),
+                  result: JSON.stringify(out),
+                };
+                const currentSize = await r.zcard(idxKey);
+                const multi = r.multi();
+                multi.hset(docKey, payload);
+                multi.zadd(idxKey, ts, docKey);
+                multi.expire(docKey, vecTtlSec * 2);
+                if (currentSize + 1 > vecPoolN) {
+                  const removeCount = (currentSize + 1) - vecPoolN;
+                  if (removeCount > 0) multi.zremrangebyrank(idxKey, 0, removeCount - 1);
+                }
+                await multi.exec();
+              }
+            } catch (e) {
+              logger.warn?.('写入向量工具结果缓存失败（忽略）', { label: 'MCP', aiName, error: String(e) });
+            }
+          }
           return out;
         }
         if (t.providerType === 'external') {
@@ -302,6 +426,39 @@ export class MCPCore {
               logger.debug?.('写入工具结果缓存', { label: 'MCP', aiName, cacheKey, ttlSec });
             } catch (e) {
               logger.warn?.('写入工具缓存失败（忽略）', { label: 'MCP', aiName, error: String(e) });
+            }
+          }
+          if (vecAllowed && out?.success === true) {
+            try {
+              if (!argsVec) {
+                const text = MCPCore._stableStringify({ aiName, args: args || {} });
+                const [vec] = await embedTexts({ texts: [text] });
+                argsVec = Array.isArray(vec) ? vec : [];
+              }
+              if (Array.isArray(argsVec) && argsVec.length) {
+                const r = getRedis();
+                const ts = Date.now();
+                const docKey = `${vecPrefix}:argcache:doc:${aiName}:${ts}:${Math.random().toString(36).slice(2, 10)}`;
+                const idxKey = `${vecPrefix}:argcache:index:${aiName}`;
+                const payload = {
+                  ts: String(ts),
+                  args: MCPCore._stableStringify({ aiName, args: args || {} }),
+                  embedding: JSON.stringify(argsVec),
+                  result: JSON.stringify(out),
+                };
+                const currentSize = await r.zcard(idxKey);
+                const multi = r.multi();
+                multi.hset(docKey, payload);
+                multi.zadd(idxKey, ts, docKey);
+                multi.expire(docKey, vecTtlSec * 2);
+                if (currentSize + 1 > vecPoolN) {
+                  const removeCount = (currentSize + 1) - vecPoolN;
+                  if (removeCount > 0) multi.zremrangebyrank(idxKey, 0, removeCount - 1);
+                }
+                await multi.exec();
+              }
+            } catch (e) {
+              logger.warn?.('写入向量工具结果缓存失败（忽略）', { label: 'MCP', aiName, error: String(e) });
             }
           }
           return out;

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { createLogger } from '../utils/logger.js';
+import { getEnvBool, getEnvInt } from '../utils/envHotReloader.js';
 import { buildAgentPresetXml, formatPresetJsonAsPlainText } from '../utils/jsonToSentraXmlConverter.js';
 import { savePresetCacheForTeaching } from '../utils/presetTextToJsonConverter.js';
 import { maybeTeachPreset } from './PresetTeachingManager.js';
@@ -31,7 +32,7 @@ export async function triggerPresetTeachingIfNeededCore(options = {}) {
     applyPresetUpdate
   } = options;
 
-  const enabled = (process.env.AGENT_PRESET_TEACHING_ENABLED || 'false') === 'true';
+  const enabled = getEnvBool('AGENT_PRESET_TEACHING_ENABLED', false);
   if (!enabled) return null;
   if (!agent || typeof agent.chat !== 'function') return null;
   if (!historyManager || !groupId) return null;
@@ -57,7 +58,7 @@ export async function triggerPresetTeachingIfNeededCore(options = {}) {
 
   let recentContextText = '';
   try {
-    const ctxPairs = parseInt(process.env.AGENT_PRESET_TEACHING_CONTEXT_PAIRS || '0', 10) || 0;
+    const ctxPairs = getEnvInt('AGENT_PRESET_TEACHING_CONTEXT_PAIRS', 0) || 0;
     if (
       ctxPairs > 0 &&
       historyManager &&

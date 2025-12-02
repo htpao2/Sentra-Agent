@@ -11,6 +11,7 @@ import { createLogger } from './logger.js';
 import { planGroupReplyDecision } from './replyIntervention.js';
 import { assessReplyWorth } from '../components/ReplyGate.js';
 import { loadAttentionStats, updateAttentionStatsAfterDecision } from './attentionStats.js';
+import { getEnv, getEnvInt, getEnvBool } from './envHotReloader.js';
 
 const logger = createLogger('ReplyPolicy');
 
@@ -336,7 +337,7 @@ function removeActiveTask(senderId, taskId) {
  * 解析环境变量中的bot名称列表
  */
 function parseBotNames() {
-  const names = process.env.BOT_NAMES || '';
+  const names = getEnv('BOT_NAMES', '');
   if (!names.trim()) return [];
   return names.split(',').map(n => n.trim()).filter(Boolean);
 }
@@ -346,11 +347,11 @@ function parseBotNames() {
  */
 function getConfig() {
   const botNames = parseBotNames();
-  const attentionWindowMsEnv = parseInt(process.env.ATTENTION_WINDOW_MS || '120000', 10);
-  const attentionMaxSendersEnv = parseInt(process.env.ATTENTION_MAX_SENDERS || '3', 10);
+  const attentionWindowMsEnv = getEnvInt('ATTENTION_WINDOW_MS', 120000);
+  const attentionMaxSendersEnv = getEnvInt('ATTENTION_MAX_SENDERS', 3);
   const attentionWindowMs = Number.isFinite(attentionWindowMsEnv) ? attentionWindowMsEnv : 120000;
   const attentionMaxSenders = Number.isFinite(attentionMaxSendersEnv) ? attentionMaxSendersEnv : 3;
-  const followupWindowSecEnv = parseInt(process.env.REPLY_DECISION_FOLLOWUP_WINDOW_SEC || '180', 10);
+  const followupWindowSecEnv = getEnvInt('REPLY_DECISION_FOLLOWUP_WINDOW_SEC', 180);
   const replyFollowupWindowSec = Number.isFinite(followupWindowSecEnv) && followupWindowSecEnv > 0
     ? followupWindowSecEnv
     : 0;
@@ -358,28 +359,28 @@ function getConfig() {
     // bot 名称列表（支持多个昵称，仅用于简单“是否被提及”的判断）
     botNames,
     // Per-sender 最大并发数
-    maxConcurrentPerSender: parseInt(process.env.MAX_CONCURRENT_PER_SENDER || '1'),
+    maxConcurrentPerSender: getEnvInt('MAX_CONCURRENT_PER_SENDER', 1),
     // 队列任务最大等待时间（毫秒）
-    queueTimeout: parseInt(process.env.QUEUE_TIMEOUT) || 30000,
+    queueTimeout: getEnvInt('QUEUE_TIMEOUT', 30000),
     // 显式 @ 是否必须回复（true=显式 @ 一律回复；false=交给模型和人设决定）
-    mentionMustReply: process.env.MENTION_MUST_REPLY === 'true',
+    mentionMustReply: getEnvBool('MENTION_MUST_REPLY', false),
     replyFollowupWindowSec,
-    attentionEnabled: (process.env.ATTENTION_WINDOW_ENABLED || 'true') === 'true',
+    attentionEnabled: getEnvBool('ATTENTION_WINDOW_ENABLED', true),
     attentionWindowMs,
     attentionMaxSenders,
     // 群/用户疲劳控制（短期窗口 + 指数退避）
-    userFatigueEnabled: (process.env.USER_FATIGUE_ENABLED || 'true') === 'true',
-    userReplyWindowMs: parseInt(process.env.USER_REPLY_WINDOW_MS || '300000', 10),
-    userReplyBaseLimit: parseInt(process.env.USER_REPLY_BASE_LIMIT || '5', 10),
-    userReplyMinIntervalMs: parseInt(process.env.USER_REPLY_MIN_INTERVAL_MS || '10000', 10),
-    userReplyBackoffFactor: parseFloat(process.env.USER_REPLY_BACKOFF_FACTOR || '2'),
-    userReplyMaxBackoffMultiplier: parseFloat(process.env.USER_REPLY_MAX_BACKOFF_MULTIPLIER || '8'),
-    groupFatigueEnabled: (process.env.GROUP_FATIGUE_ENABLED || 'true') === 'true',
-    groupReplyWindowMs: parseInt(process.env.GROUP_REPLY_WINDOW_MS || '300000', 10),
-    groupReplyBaseLimit: parseInt(process.env.GROUP_REPLY_BASE_LIMIT || '30', 10),
-    groupReplyMinIntervalMs: parseInt(process.env.GROUP_REPLY_MIN_INTERVAL_MS || '2000', 10),
-    groupReplyBackoffFactor: parseFloat(process.env.GROUP_REPLY_BACKOFF_FACTOR || '2'),
-    groupReplyMaxBackoffMultiplier: parseFloat(process.env.GROUP_REPLY_MAX_BACKOFF_MULTIPLIER || '8')
+    userFatigueEnabled: getEnvBool('USER_FATIGUE_ENABLED', true),
+    userReplyWindowMs: getEnvInt('USER_REPLY_WINDOW_MS', 300000),
+    userReplyBaseLimit: getEnvInt('USER_REPLY_BASE_LIMIT', 5),
+    userReplyMinIntervalMs: getEnvInt('USER_REPLY_MIN_INTERVAL_MS', 10000),
+    userReplyBackoffFactor: parseFloat(getEnv('USER_REPLY_BACKOFF_FACTOR', '2')),
+    userReplyMaxBackoffMultiplier: parseFloat(getEnv('USER_REPLY_MAX_BACKOFF_MULTIPLIER', '8')),
+    groupFatigueEnabled: getEnvBool('GROUP_FATIGUE_ENABLED', true),
+    groupReplyWindowMs: getEnvInt('GROUP_REPLY_WINDOW_MS', 300000),
+    groupReplyBaseLimit: getEnvInt('GROUP_REPLY_BASE_LIMIT', 30),
+    groupReplyMinIntervalMs: getEnvInt('GROUP_REPLY_MIN_INTERVAL_MS', 2000),
+    groupReplyBackoffFactor: parseFloat(getEnv('GROUP_REPLY_BACKOFF_FACTOR', '2')),
+    groupReplyMaxBackoffMultiplier: parseFloat(getEnv('GROUP_REPLY_MAX_BACKOFF_MULTIPLIER', '8'))
   };
 }
 

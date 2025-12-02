@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from './logger.js';
+import { getEnv } from './envHotReloader.js';
 
 const logger = createLogger('AgentPresetLoader');
 
@@ -12,7 +13,7 @@ const logger = createLogger('AgentPresetLoader');
  * @returns {{ fileName: string, path: string, isDefaultFallback: boolean, text: string, parsedJson: any|null }}
  */
 export function loadAgentPresetSync() {
-  const presetFileName = process.env.AGENT_PRESET_FILE || 'default.txt';
+  const presetFileName = getEnv('AGENT_PRESET_FILE', 'default.txt');
   const presetPath = path.join('./agent-presets', presetFileName);
 
   let usedPath = presetPath;

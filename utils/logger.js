@@ -4,6 +4,7 @@
  */
 
 import chalk from 'chalk';
+import { getEnv } from './envHotReloader.js';
 
 /**
  * 日志级别定义
@@ -35,7 +36,8 @@ function getTimestamp() {
 class Logger {
   constructor(options = {}) {
     this.moduleName = options.moduleName || 'App';
-    this.minLevel = LogLevel[process.env.LOG_LEVEL?.toUpperCase()] ?? LogLevel.INFO;
+    const levelName = getEnv('LOG_LEVEL', '').toUpperCase();
+    this.minLevel = LogLevel[levelName] ?? LogLevel.INFO;
     this.enableTimestamp = options.enableTimestamp !== false;
   }
 

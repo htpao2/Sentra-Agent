@@ -1,5 +1,6 @@
 import { createLogger } from './logger.js';
 import { Agent } from '../agent.js';
+import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('FormatRepair');
 
@@ -20,16 +21,16 @@ export async function repairSentraResponse(rawText, opts = {}) {
   }
 
   const agent = opts.agent || new Agent({
-    apiKey: process.env.API_KEY,
-    apiBaseUrl: process.env.API_BASE_URL,
-    defaultModel: process.env.REPAIR_AI_MODEL || process.env.MAIN_AI_MODEL,
-    temperature: parseFloat(process.env.TEMPERATURE || '0.7'),
-    maxTokens: parseInt(process.env.MAX_TOKENS || '4096'),
-    maxRetries: parseInt(process.env.MAX_RETRIES || '3'),
-    timeout: parseInt(process.env.TIMEOUT || '60000')
+    apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+    apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
+    defaultModel: getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL')),
+    temperature: parseFloat(getEnv('TEMPERATURE', '0.7')),
+    maxTokens: getEnvInt('MAX_TOKENS', 4096),
+    maxRetries: getEnvInt('MAX_RETRIES', 3),
+    timeout: getEnvInt('TIMEOUT', 60000)
   });
 
-  const model = opts.model || process.env.REPAIR_AI_MODEL || process.env.MAIN_AI_MODEL;
+  const model = opts.model || getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL'));
   const temperature = opts.temperature ?? 0.2;
 
   const systemPrompt = [
@@ -170,16 +171,16 @@ export async function repairSentraDecision(rawText, opts = {}) {
   if (!rawText || typeof rawText !== 'string') throw new Error('repairSentraDecision: rawText 无效');
 
   const agent = opts.agent || new Agent({
-    apiKey: process.env.API_KEY,
-    apiBaseUrl: process.env.API_BASE_URL,
-    defaultModel: process.env.REPAIR_AI_MODEL || process.env.MAIN_AI_MODEL,
+    apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+    apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
+    defaultModel: getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL')),
     temperature: 0.2,
-    maxTokens: parseInt(process.env.MAX_TOKENS || '4096'),
-    maxRetries: parseInt(process.env.MAX_RETRIES || '3'),
-    timeout: parseInt(process.env.TIMEOUT || '60000')
+    maxTokens: getEnvInt('MAX_TOKENS', 4096),
+    maxRetries: getEnvInt('MAX_RETRIES', 3),
+    timeout: getEnvInt('TIMEOUT', 60000)
   });
 
-  const model = opts.model || process.env.REPAIR_AI_MODEL || process.env.MAIN_AI_MODEL;
+  const model = opts.model || getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL'));
   const temperature = opts.temperature ?? 0.2;
 
   const systemPrompt = [
@@ -241,16 +242,16 @@ export async function repairSentraPersona(rawText, opts = {}) {
   if (!rawText || typeof rawText !== 'string') throw new Error('repairSentraPersona: rawText 无效');
 
   const agent = opts.agent || new Agent({
-    apiKey: process.env.API_KEY,
-    apiBaseUrl: process.env.API_BASE_URL,
-    defaultModel: process.env.REPAIR_AI_MODEL || process.env.MAIN_AI_MODEL,
+    apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+    apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
+    defaultModel: getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL')),
     temperature: 0.2,
-    maxTokens: parseInt(process.env.MAX_TOKENS || '4096'),
-    maxRetries: parseInt(process.env.MAX_RETRIES || '3'),
-    timeout: parseInt(process.env.TIMEOUT || '60000')
+    maxTokens: getEnvInt('MAX_TOKENS', 4096),
+    maxRetries: getEnvInt('MAX_RETRIES', 3),
+    timeout: getEnvInt('TIMEOUT', 60000)
   });
 
-  const model = opts.model || process.env.REPAIR_AI_MODEL || process.env.MAIN_AI_MODEL;
+  const model = opts.model || getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL'));
   const temperature = opts.temperature ?? 0.3;
 
   const systemPrompt = [

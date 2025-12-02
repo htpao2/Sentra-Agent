@@ -13,7 +13,14 @@ const repoRoot = path.resolve(uiDir, '..');
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const out = { pm: 'auto', py: 'auto', force: false, dryRun: false, only: 'all', pipIndex: process.env.PIP_INDEX_URL || '' };
+  const out = {
+    pm: process.env.PACKAGE_MANAGER || 'auto',
+    py: 'auto',
+    force: false,
+    dryRun: false,
+    only: 'all',
+    pipIndex: process.env.PIP_INDEX_URL || ''
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--force') out.force = true;
@@ -27,7 +34,7 @@ function parseArgs() {
     else if (a.startsWith('--pip-index=')) out.pipIndex = a.split('=')[1];
     else if (a === '--pip-index' && args[i + 1]) { out.pipIndex = args[++i]; }
     else if (a === '--help' || a === '-h') {
-      console.log(chalk.cyan('Usage: node scripts/bootstrap.mjs [--pm pnpm|npm|cnpm] [--py uv|venv] [--only all|node|python] [--force] [--dry-run] [--pip-index <url>]'));
+      console.log(chalk.cyan('Usage: node scripts/bootstrap.mjs [--pm pnpm|npm|cnpm|yarn] [--py uv|venv] [--only all|node|python] [--force] [--dry-run] [--pip-index <url>]'));
       process.exit(0);
     }
   }
@@ -104,10 +111,12 @@ function choosePM(preferred) {
     if (!commandExists(preferred)) throw new Error(`Package manager ${preferred} not found in PATH`);
     return preferred;
   }
+  // Auto detection priority: pnpm > npm > cnpm > yarn
   if (commandExists('pnpm')) return 'pnpm';
   if (commandExists('npm')) return 'npm';
   if (commandExists('cnpm')) return 'cnpm';
-  throw new Error('No package manager found. Please install pnpm or npm or cnpm, or pass --pm option.');
+  if (commandExists('yarn')) return 'yarn';
+  throw new Error('No package manager found. Please install one or set PACKAGE_MANAGER in .env');
 }
 
 function resolveMirrorProfileDefaults() {

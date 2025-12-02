@@ -147,6 +147,31 @@ function resolveNpmRegistry() {
     );
 }
 
+function commandExists(cmd, checkArgs = ['--version']) {
+    try {
+        const r = spawn(cmd, checkArgs, { stdio: 'ignore', shell: true });
+        r.on('close', () => { });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function choosePM(preferred) {
+    if (preferred && preferred !== 'auto') {
+        if (!commandExists(preferred)) {
+            throw new Error(`Package manager ${preferred} not found in PATH`);
+        }
+        return preferred;
+    }
+    // Auto detection priority: pnpm > npm > cnpm > yarn
+    if (commandExists('pnpm')) return 'pnpm';
+    if (commandExists('npm')) return 'npm';
+    if (commandExists('cnpm')) return 'cnpm';
+    if (commandExists('yarn')) return 'yarn';
+    throw new Error('No package manager found. Please install one or set PACKAGE_MANAGER in .env');
+}
+
 async function execCommand(command, args, cwd, extraEnv = {}) {
     return new Promise((resolve, reject) => {
         const proc = spawn(command, args, {
@@ -325,16 +350,17 @@ async function update() {
         if (projectsToInstall.length > 0) {
             console.log(chalk.cyan(`\n📥 Installing dependencies for ${projectsToInstall.length} project(s)...\n`));
             const npmRegistry = resolveNpmRegistry();
+            const pm = choosePM(env.PACKAGE_MANAGER || 'auto');
 
             for (const { dir, label, reason } of projectsToInstall) {
-                spinner.start(`Installing ${label} (${reason})...`);
+                spinner.start(`Installing ${label} (${reason}) with ${pm}...`);
                 try {
-                    const env = {};
+                    const extraEnv = {};
                     if (npmRegistry) {
-                        env.npm_config_registry = npmRegistry;
-                        env.NPM_CONFIG_REGISTRY = npmRegistry;
+                        extraEnv.npm_config_registry = npmRegistry;
+                        extraEnv.NPM_CONFIG_REGISTRY = npmRegistry;
                     }
-                    await execCommand('npm', ['install'], dir, env);
+                    await execCommand(pm, ['install'], dir, extraEnv);
                     spinner.succeed(`Installed ${label}`);
                 } catch (error) {
                     spinner.fail(`Failed to install ${label}`);

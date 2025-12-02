@@ -5,6 +5,7 @@ export function setupSocketHandlers(ctx) {
     emo,
     historyManager,
     personaManager,
+    desireManager,
     getActiveTaskCount,
     handleIncomingMessage,
     decideOverrideIntent,
@@ -43,6 +44,15 @@ export function setupSocketHandlers(ctx) {
         logger.debug('<< message', msg.type, msg.group_id || msg.sender_id);
         const userid = String(msg?.sender_id ?? '');
         const username = msg?.sender_name || '';
+
+        if (desireManager) {
+          try {
+            await desireManager.onUserMessage(msg);
+          } catch (e) {
+            logger.debug('DesireManager onUserMessage failed', { err: String(e) });
+          }
+        }
+
         const emoText =
           typeof msg?.text === 'string' && msg.text.trim() ? msg.text : msg?.summary || '';
         if (userid && emoText) {
@@ -176,7 +186,7 @@ export function setupSocketHandlers(ctx) {
 
   socket.on('reconnect_exhausted', () => {
     logger.error(
-      `WebSocket 重连耗尽（尝试 ${process.env.WS_MAX_RECONNECT_ATTEMPTS} 次，每次间隔 ${process.env.WS_RECONNECT_INTERVAL_MS}ms）`
+      `WebSocket 重连耗尽（尝试 ${getEnvInt('WS_MAX_RECONNECT_ATTEMPTS', 60)} 次，每次间隔 ${getEnvInt('WS_RECONNECT_INTERVAL_MS', 10000)}ms）`
     );
   });
 }

@@ -1,10 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from './logger.js';
+import { getEnv } from './envHotReloader.js';
 
 const logger = createLogger('PresetTeachingLog');
 
-const DEFAULT_LOG_FILE = process.env.AGENT_PRESET_TEACHING_LOG_FILE || './logs/preset-teaching.log';
+const DEFAULT_LOG_FILE = getEnv('AGENT_PRESET_TEACHING_LOG_FILE', './logs/preset-teaching.log');
 
 function ensureDirForFile(filePath) {
   try {

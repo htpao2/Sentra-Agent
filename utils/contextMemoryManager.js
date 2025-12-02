@@ -1,12 +1,13 @@
 import { DateTime } from 'luxon';
 import { getRedis } from './redisClient.js';
 import { createLogger } from './logger.js';
+import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('ContextMemory');
 
-const MEMORY_PREFIX = process.env.REDIS_CONTEXT_MEMORY_PREFIX || 'sentra:memory:';
-const MEMORY_TTL_SECONDS = parseInt(process.env.REDIS_CONTEXT_MEMORY_TTL_SECONDS || '0', 10) || 0;
-const TIMEZONE = process.env.CONTEXT_MEMORY_TIMEZONE || 'Asia/Shanghai';
+const MEMORY_PREFIX = getEnv('REDIS_CONTEXT_MEMORY_PREFIX', 'sentra:memory:');
+const MEMORY_TTL_SECONDS = getEnvInt('REDIS_CONTEXT_MEMORY_TTL_SECONDS', 0) || 0;
+const TIMEZONE = getEnv('CONTEXT_MEMORY_TIMEZONE', 'Asia/Shanghai');
 const CURSOR_SUFFIX = ':cursor';
 
 function getRedisSafe() {

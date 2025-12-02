@@ -1,16 +1,17 @@
 import Redis from 'ioredis';
 import { createLogger } from './logger.js';
+import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('RedisClient');
 
 let redisInstance = null;
 
 function getRedisConfig() {
-  const host = process.env.REDIS_HOST || '127.0.0.1';
-  const port = parseInt(process.env.REDIS_PORT || '6379', 10);
-  const db = parseInt(process.env.REDIS_DB || '0', 10);
-  const password = process.env.REDIS_PASSWORD || undefined;
-  const enabled = process.env.REDIS_ENABLED;
+  const host = getEnv('REDIS_HOST', '127.0.0.1');
+  const port = getEnvInt('REDIS_PORT', 6379);
+  const db = getEnvInt('REDIS_DB', 0);
+  const password = getEnv('REDIS_PASSWORD', undefined) || undefined;
+  const enabled = getEnv('REDIS_ENABLED', undefined);
 
   // 显式关闭：REDIS_ENABLED=false
   if (enabled === 'false') {

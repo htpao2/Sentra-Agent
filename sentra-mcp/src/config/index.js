@@ -130,6 +130,14 @@ function buildConfigFromEnv() {
     rsM: int(process.env.MEM_RS_M, 16),
     rsEfConstruction: int(process.env.MEM_RS_EF_CONSTRUCTION, 200),
     rsEfRuntime: int(process.env.MEM_RS_EF_RUNTIME, 200),
+    // 工具结果向量缓存（基于 args 相似度复用结果）
+    resultCache: {
+      enable: bool(process.env.MEM_RESULT_CACHE_ENABLE, true),
+      reuseThreshold: Number(process.env.MEM_RESULT_REUSE_THRESHOLD || process.env.MEM_REUSE_THRESHOLD || 0.97),
+      ttlSeconds: int(process.env.MEM_RESULT_TTL_SEC, 86400),
+      allowlist: parseCsv(process.env.MEM_RESULT_CACHE_ALLOWLIST),
+      denylist: parseCsv(process.env.MEM_RESULT_CACHE_DENYLIST),
+    },
   },
   summarizer: {
     baseURL: process.env.SUMMARIZER_BASE_URL || process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',

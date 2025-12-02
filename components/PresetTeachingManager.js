@@ -1,5 +1,6 @@
 import { createLogger } from '../utils/logger.js';
 import { appendTeachingLog } from '../utils/presetTeachingLogViewer.js';
+import { getEnv, getEnvBool } from '../utils/envHotReloader.js';
 
 const logger = createLogger('PresetTeaching');
 
@@ -670,18 +671,18 @@ export async function maybeTeachPreset(options = {}) {
     conversationText
   } = options;
 
-  const enabled = (process.env.AGENT_PRESET_TEACHING_ENABLED || 'false') === 'true';
+  const enabled = getEnvBool('AGENT_PRESET_TEACHING_ENABLED', false);
   if (!enabled) return null;
 
   if (!agent || typeof agent.chat !== 'function') return null;
   if (!presetJson || typeof presetJson !== 'object' || Array.isArray(presetJson)) return null;
 
-  const wlConfig = parseWhitelist(process.env.AGENT_PRESET_TEACHING_WHITELIST || '');
+  const wlConfig = parseWhitelist(getEnv('AGENT_PRESET_TEACHING_WHITELIST', ''));
   if (!isUserInWhitelist(userId, wlConfig)) {
     return null;
   }
 
-  const model = process.env.AGENT_PRESET_TEACHING_MODEL || process.env.MAIN_AI_MODEL;
+  const model = getEnv('AGENT_PRESET_TEACHING_MODEL', getEnv('MAIN_AI_MODEL'));
   const historyText = typeof conversationText === 'string' ? conversationText : '';
 
   const { nodes, indexById } = buildTeachingNodesFromPreset(presetJson);

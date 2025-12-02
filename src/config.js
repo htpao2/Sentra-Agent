@@ -7,15 +7,23 @@ dotenv.config();
  * 从环境变量获取配置
  * @returns {Object} 配置对象
  */
-export const getConfigFromEnv = () => ({
-  apiBaseUrl: process.env.API_BASE_URL || 'https://yuanplus.chat/v1/',
-  apiKey: process.env.API_KEY || 'sk-ZsC6m89ewvSfx29HqOIEVBPCZOCrhjO0dv3ZhYEmCBl9ijzz',
-  modelName: process.env.MODEL_NAME || 'gpt-4.1-mini',
-  temperature: parseFloat(process.env.TEMPERATURE) || 0.7,
-  maxTokens: parseInt(process.env.MAX_TOKENS) || 1000,
-  maxRetries: parseInt(process.env.MAX_RETRIES) || 3,
-  timeout: parseInt(process.env.TIMEOUT) || 60000
-});
+export const getConfigFromEnv = () => {
+	const rawTemp = parseFloat(process.env.TEMPERATURE);
+	const rawMaxTokens = parseInt(process.env.MAX_TOKENS, 10);
+	const rawMaxRetries = parseInt(process.env.MAX_RETRIES, 10);
+	const rawTimeout = parseInt(process.env.TIMEOUT, 10);
+
+	return {
+		apiBaseUrl: process.env.API_BASE_URL || 'https://yuanplus.chat/v1/',
+		apiKey: process.env.API_KEY || 'sk-ZsC6m89ewvSfx29HqOIEVBPCZOCrhjO0dv3ZhYEmCBl9ijzz',
+		modelName: process.env.MODEL_NAME || 'gpt-4.1-mini',
+		temperature: Number.isFinite(rawTemp) ? rawTemp : 0.7,
+		// MAX_TOKENS 支持设置为 -1，表示不限制，由服务端决定（不会在请求中发送 max_tokens）
+		maxTokens: Number.isFinite(rawMaxTokens) ? rawMaxTokens : 1000,
+		maxRetries: Number.isFinite(rawMaxRetries) ? rawMaxRetries : 3,
+		timeout: Number.isFinite(rawTimeout) ? rawTimeout : 60000
+	};
+};
 
 /**
  * 配置类

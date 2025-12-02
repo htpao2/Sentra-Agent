@@ -80,8 +80,13 @@ export function MobileView(props: MobileViewProps) {
     .sort((a, b) => b.count - a.count);
   const fallback = [...allItems].sort((a, b) => getDisplayName(a.name).localeCompare(getDisplayName(b.name), 'zh-Hans-CN'));
   const pick = (arr: { item: FileItem, count?: number }[], n: number) => arr.slice(0, n).map(x => x.item);
-  const selected = (topByUsage[0]?.count ? pick(topByUsage, 3) : fallback.slice(0, 3));
-  const iosDockExtra = selected.map(it => ({
+
+  // Select top 2 items for dock (reduced from 3 to fit max 5 dock items total)
+  const selected = (topByUsage[0]?.count ? pick(topByUsage, 2) : fallback.slice(0, 2));
+
+  // Create dock items from selected (maximum 2 dynamic items)
+  // Total dock: Launchpad (1) + 2 dynamic + Presets (1) + File Manager (1) = 5 items
+  const iosDockExtra = selected.slice(0, 2).map(it => ({
     id: `${it.type}-${it.name}`,
     name: getDisplayName(it.name),
     icon: getIconForType(it.name, it.type),
@@ -92,7 +97,8 @@ export function MobileView(props: MobileViewProps) {
     }
   }));
 
-  // Add Presets to Dock
+  // Add fixed items (Presets + File Manager = 2 items)
+  // Total: Launchpad (always present) + 2 dynamic + 2 fixed = 5 items (maximum)
   iosDockExtra.push({
     id: 'ios-presets',
     name: '预设撰写',
@@ -100,13 +106,13 @@ export function MobileView(props: MobileViewProps) {
     onClick: () => setIosPresetsEditorOpen(true)
   });
 
-  // Add File Manager to Dock
   iosDockExtra.push({
     id: 'ios-filemanager',
     name: '文件管理',
     icon: getIconForType('file-manager', 'module'),
     onClick: () => setIosFileManagerOpen(true)
   });
+
 
   return (
     <>

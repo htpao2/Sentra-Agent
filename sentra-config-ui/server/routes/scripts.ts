@@ -163,4 +163,20 @@ export async function scriptRoutes(fastify: FastifyInstance) {
 
         return { success: true, message: 'Process terminated' };
     });
+    // Send input to script process
+    fastify.post<{
+        Params: { id: string };
+        Body: { data: string };
+    }>('/api/scripts/input/:id', async (request, reply) => {
+        const { id } = request.params;
+        const { data } = request.body || {};
+
+        const success = scriptRunner.writeInput(id, data);
+
+        if (!success) {
+            return reply.code(400).send({ error: 'Failed to write input (process not found or exited)' });
+        }
+
+        return { success: true };
+    });
 }

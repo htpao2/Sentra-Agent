@@ -1,8 +1,57 @@
 import { Agent } from '../agent.js';
 import { createLogger } from './logger.js';
 import { getEnv, getEnvInt, getEnvBool } from './envHotReloader.js';
+import { initAgentPresetCore } from '../components/AgentPresetInitializer.js';
 
 const logger = createLogger('ReplyIntervention');
+
+let cachedPresetContextForDecision = null;
+let presetInitPromiseForDecision = null;
+
+async function getDecisionAgentPresetContext() {
+  if (cachedPresetContextForDecision !== null) {
+    return cachedPresetContextForDecision;
+  }
+
+  if (!presetInitPromiseForDecision) {
+    presetInitPromiseForDecision = (async () => {
+      try {
+        // 复用 ReplyIntervention 的 Agent 实例，确保与主站点配置一致
+        const presetAgent = getAgent && typeof getAgent === 'function' ? getAgent() : null;
+        const snapshot = await initAgentPresetCore(presetAgent || null);
+        const xml = snapshot && typeof snapshot.xml === 'string' ? snapshot.xml.trim() : '';
+        const plain = snapshot && typeof snapshot.plainText === 'string' ? snapshot.plainText.trim() : '';
+
+        let context = '';
+        if (xml) {
+          context = xml;
+        } else if (plain) {
+          const maxLen = 4000;
+          const truncated = plain.length > maxLen ? plain.slice(0, maxLen) : plain;
+          context = [
+            '<sentra-agent-preset-text>',
+            escapeXmlText(truncated),
+            '</sentra-agent-preset-text>'
+          ].join('\n');
+        }
+
+        cachedPresetContextForDecision = context || '';
+
+        if (cachedPresetContextForDecision) {
+          logger.info('ReplyIntervention: 已加载 Agent 预设上下文用于回复决策');
+        }
+
+        return cachedPresetContextForDecision;
+      } catch (e) {
+        logger.warn('ReplyIntervention: 加载 Agent 预设失败，将不注入人设上下文', { err: String(e) });
+        cachedPresetContextForDecision = '';
+        return cachedPresetContextForDecision;
+      }
+    })();
+  }
+
+  return presetInitPromiseForDecision;
+}
 
 function isReplyInterventionEnabled() {
   return getEnvBool('ENABLE_REPLY_INTERVENTION', true);
@@ -30,7 +79,7 @@ function getAgent() {
     const { model, maxTokens, maxRetries, timeout } = getDecisionConfig();
     sharedAgent = new Agent({
       // 复用主站点配置，避免单独维护一套 API_KEY/API_BASE_URL
-      apiKey: getEnv('API_KEY', process.env.OPENAI_API_KEY),
+      apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
       apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
       defaultModel: model,
       temperature: 0,
@@ -615,17 +664,19 @@ export async function planGroupReplyDecision(msg, options = {}) {
 
   try {
     const { model, maxTokens } = getDecisionConfig();
-    const raw = await agent.chat(
-      [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userContent }
-      ],
-      {
-        model,
-        temperature: 0.1,
-        maxTokens
-      }
-    );
+    const presetContext = await getDecisionAgentPresetContext();
+
+    const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+    if (presetContext) {
+      messages.push({ role: 'system', content: presetContext });
+    }
+    messages.push({ role: 'user', content: userContent });
+
+    const raw = await agent.chat(messages, {
+      model,
+      temperature: 0.1,
+      maxTokens
+    });
 
     const text = typeof raw === 'string' ? raw : String(raw ?? '');
     const parsed = parseReplyDecisionXml(text);

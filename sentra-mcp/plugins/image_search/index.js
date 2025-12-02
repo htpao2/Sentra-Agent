@@ -137,20 +137,15 @@ async function fetchJson(url, headers = {}, timeoutMs = 20000) {
 }
 
 // 搜图神器壁纸搜索 API（主要来源）
-async function searchWallpapers(query, count, timeoutMs = 10000) {
+async function searchWallpapers(query, count, timeoutMs = 18000) {
   try {
     const hashValue = crypto.randomBytes(32).toString('hex');
     const params = new URLSearchParams({
       product_id: '52',
-      version_code: '28103',
-      page: '0',
+      version_code: 29116,
+      page: 0,
       search_word: query,
-      maxWidth: '99999',
-      minWidth: '0',
-      maxHeight: '99999',
-      minHeight: '0',
       searchMode: 'ACCURATE_SEARCH',
-      sort: '0',
       sign: hashValue
     });
     

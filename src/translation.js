@@ -11,17 +11,21 @@ export class Translator {
     const defaultConfig = getConfigFromEnv();
     const finalConfig = { ...defaultConfig, ...config };
 
-    this.llm = new ChatOpenAI({
+    const maxTokensNum = Number(finalConfig.maxTokens);
+    const llmOptions = {
       openAIApiKey: finalConfig.apiKey,
       modelName: finalConfig.modelName,
       temperature: finalConfig.temperature,
-      maxTokens: finalConfig.maxTokens,
       timeout: finalConfig.timeout,
       maxRetries: finalConfig.maxRetries,
       configuration: {
         baseURL: finalConfig.apiBaseUrl
       }
-    });
+    };
+    if (Number.isFinite(maxTokensNum) && maxTokensNum > 0) {
+      llmOptions.maxTokens = maxTokensNum;
+    }
+    this.llm = new ChatOpenAI(llmOptions);
   }
 
   /**

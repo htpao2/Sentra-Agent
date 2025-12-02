@@ -160,6 +160,17 @@ export class ScriptRunner {
         proc.emitter.on('exit', callback);
         return () => proc.emitter.off('exit', callback);
     }
+
+    writeInput(id: string, data: string): boolean {
+        const proc = this.processes.get(id);
+        if (!proc || proc.exitCode !== null) return false;
+
+        if (proc.process.stdin && !proc.process.stdin.destroyed) {
+            proc.process.stdin.write(data);
+            return true;
+        }
+        return false;
+    }
 }
 
 export const scriptRunner = new ScriptRunner();

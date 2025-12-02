@@ -37,6 +37,8 @@ import { triggerPresetTeachingIfNeededCore } from './components/PresetTeachingTr
 import { handleOneMessageCore } from './components/MessagePipeline.js';
 import { setupSocketHandlers } from './components/SocketHandlers.js';
 import { initAgentPresetCore } from './components/AgentPresetInitializer.js';
+import DesireManager from './utils/desireManager.js';
+import { buildProactiveRootDirectiveXml } from './components/ProactiveDirectivePlanner.js';
 
 const ENV_PATH = process.env.ENV_FILE || '.env';
 loadEnv(ENV_PATH);
@@ -47,7 +49,6 @@ await sdk.init();
 await cleanupExpiredCache();
 const WS_HOST = getEnv('WS_HOST', 'localhost');
 const WS_PORT = getEnv('WS_PORT', '6702');
-const WS_TIMEOUT = getEnvInt('WS_TIMEOUT', 10000);
 const WS_RECONNECT_INTERVAL_MS = getEnvInt('WS_RECONNECT_INTERVAL_MS', 10000);
 const WS_MAX_RECONNECT_ATTEMPTS = getEnvInt('WS_MAX_RECONNECT_ATTEMPTS', 60);
 const WS_URL = `ws://${WS_HOST}:${WS_PORT}`;
@@ -60,6 +61,37 @@ const send = (obj) => socket.send(obj);
 
 const logger = createLogger('Main');
 logger.info(`连接到 WebSocket 服务: ${WS_URL}`);
+
+const proactiveQueue = [];
+let proactiveRunning = false;
+
+async function processProactiveQueue() {
+	if (proactiveRunning) return;
+	const next = proactiveQueue.shift();
+	if (!next) return;
+	proactiveRunning = true;
+	try {
+		await runProactiveReply(next);
+	} catch (e) {
+		logger.warn('主动回复队列执行失败', { err: String(e) });
+	} finally {
+		proactiveRunning = false;
+	}
+	if (proactiveQueue.length > 0) {
+		setTimeout(() => {
+			processProactiveQueue().catch((err) => {
+				logger.warn('主动回复队列后续执行失败', { err: String(err) });
+			});
+		}, 0);
+	}
+}
+
+function enqueueProactiveCandidate(candidate) {
+	proactiveQueue.push(candidate);
+	processProactiveQueue().catch((e) => {
+		logger.warn('主动回复入队执行失败', { err: String(e) });
+	});
+}
 
 // senderId -> Set<runId>：用于在“改主意”场景下通知 MCP 取消对应运行
 const runningRunsBySender = new Map();
@@ -189,6 +221,26 @@ if (!ENABLE_USER_PERSONA) {
   logger.info('用户画像功能已禁用（ENABLE_USER_PERSONA=false）');
 }
 
+// 主动欲望/主动回复管理器
+const DESIRE_ENABLED = getEnvBool('DESIRE_ENABLED', true);
+const desireManager = DESIRE_ENABLED
+  ? new DesireManager({
+      prefix: getEnv('REDIS_DESIRE_PREFIX', 'sentra:desire:'),
+      baseDecayPerMinute: getEnvInt('DESIRE_BASE_DECAY_PER_MIN', 5),
+      groupSilentSec: getEnvInt('DESIRE_GROUP_SILENT_SEC', 180),
+      privateSilentSec: getEnvInt('DESIRE_PRIVATE_SILENT_SEC', 120),
+      triggerThreshold: getEnvInt('DESIRE_TRIGGER_THRESHOLD', 60),
+      maxProactivePerHour: getEnvInt('DESIRE_MAX_PROACTIVE_PER_HOUR', 3),
+      msgWindowSec: getEnvInt('DESIRE_MSG_WINDOW_SEC', 120),
+      groupMaxMsgPerWindow: getEnvInt('DESIRE_GROUP_MAX_MSG_PER_WINDOW', 8),
+      privateMaxMsgPerWindow: getEnvInt('DESIRE_PRIVATE_MAX_MSG_PER_WINDOW', 12)
+    })
+  : null;
+
+if (!DESIRE_ENABLED) {
+  logger.info('主动欲望/主动回复功能已禁用（DESIRE_ENABLED=false）');
+}
+
 const MAIN_AI_MODEL = getEnv('MAIN_AI_MODEL', getEnv('MODEL_NAME', 'gpt-3.5-turbo'));
 const MCP_MAX_CONTEXT_PAIRS = getEnvInt('MCP_MAX_CONTEXT_PAIRS', getEnvInt('MAX_CONVERSATION_PAIRS', 20));
 const CONTEXT_MEMORY_ENABLED = getEnvBool('CONTEXT_MEMORY_ENABLED', true);
@@ -251,6 +303,115 @@ async function triggerContextSummarizationIfNeeded({ groupId, chatType, userId }
   });
 }
 
+async function runProactiveReply(candidate) {
+  if (!candidate || !candidate.lastMsg) return;
+
+  const lastMsg = candidate.lastMsg;
+  const userid = String(lastMsg?.sender_id ?? '');
+  const groupIdKey = lastMsg?.group_id ? `G:${lastMsg.group_id}` : `U:${userid}`;
+
+  try {
+	const activeCountAtRun = getActiveTaskCount(userid);
+	if (activeCountAtRun > 0) {
+		logger.info(
+		  `主动回复跳过: sender=${userid} 出队时检测到有被动任务在处理，放弃本轮主动`,
+		  {
+			conversationKey: candidate?.conversationKey || null,
+			chatType: candidate?.chatType || null
+		  }
+		);
+		return;
+	}
+
+	let conversationContext = null;
+	let topicHint = '';
+	try {
+	  const ctx = historyManager.getRecentMessagesForDecision(groupIdKey, userid);
+	  if (ctx && typeof ctx === 'object') {
+	    conversationContext = ctx;
+	    const senderMsgs = Array.isArray(ctx.sender_recent_messages) ? ctx.sender_recent_messages : [];
+	    const groupMsgs = Array.isArray(ctx.group_recent_messages) ? ctx.group_recent_messages : [];
+	
+	    const texts = [];
+	    const pickLastTexts = (arr, n) => {
+	      const slice = arr.slice(-n);
+	      return slice
+	        .map((m) => (m && typeof m.text === 'string' ? m.text.trim() : ''))
+	        .filter(Boolean);
+	    };
+	
+	    texts.push(...pickLastTexts(senderMsgs, 3));
+	    if (texts.length === 0) {
+	      texts.push(...pickLastTexts(groupMsgs, 3));
+	    }
+	
+	    if (texts.length > 0) {
+	      topicHint = texts.join(' / ');
+	    }
+	  }
+	} catch (e) {
+	  logger.debug('runProactiveReply: 获取最近话题上下文失败，将回退为最后一条消息', { err: String(e) });
+	}
+
+	if (!topicHint) {
+	  topicHint = (typeof lastMsg.text === 'string' ? lastMsg.text : '');
+	}
+
+	let personaXml = '';
+	if (personaManager && userid) {
+	  try {
+	    personaXml = personaManager.formatPersonaForContext(userid);
+	  } catch (e) {
+	    logger.debug('runProactiveReply: 加载用户画像失败，将忽略该块', { err: String(e) });
+	  }
+	}
+
+	let emoXml = '';
+	try {
+	  if (emo && userid) {
+	    const ua = await emo.userAnalytics(userid, { days: 7 });
+	    emoXml = buildSentraEmoSection(ua);
+	  }
+	} catch (e) {
+	  logger.debug('runProactiveReply: 加载情绪分析失败，将忽略该块', { err: String(e) });
+	}
+
+	let memoryXml = '';
+	if (CONTEXT_MEMORY_ENABLED) {
+	  try {
+	    memoryXml = await getDailyContextMemoryXml(groupIdKey);
+	  } catch (e) {
+	    logger.debug('runProactiveReply: 加载上下文记忆失败，将忽略该块', { err: String(e) });
+	  }
+	}
+
+	const rootXml = await buildProactiveRootDirectiveXml({
+	  chatType: lastMsg.type === 'private' ? 'private' : 'group',
+	  groupId: groupIdKey,
+	  userId: userid,
+	  desireScore: candidate.desireScore,
+	  topicHint,
+	  presetPlainText: AGENT_PRESET_PLAIN_TEXT,
+	  presetXml: AGENT_PRESET_XML,
+	  personaXml,
+	  emoXml,
+	  memoryXml,
+	  conversationContext
+	});
+
+    // 构造一条“虚拟”的用户消息，标记为主动触发，并通过主流程/MCP 处理
+    const proactiveMsg = {
+      ...lastMsg,
+      _proactive: true,
+      _sentraRootDirectiveXml: rootXml
+    };
+
+    await handleOneMessage(proactiveMsg, null);
+  } catch (e) {
+    logger.warn('主动回复流程异常', { err: String(e) });
+  }
+}
+
 // 处理一条（可能已聚合的）消息，并在完成后尝试拉起队列中的下一条
 async function handleOneMessage(msg, taskId) {
   return handleOneMessageCore(
@@ -288,7 +449,8 @@ async function handleOneMessage(msg, taskId) {
       shouldReply,
       sendAndWaitResult,
       randomUUID,
-      saveMessageCache
+      saveMessageCache,
+      desireManager
     },
     msg,
     taskId
@@ -298,36 +460,71 @@ async function handleOneMessage(msg, taskId) {
 const baseSystemText = "{{sandbox_system_prompt}}\n{{sentra_tools_rules}}\n\n{{qq_system_prompt}}";
 const baseSystem = await SentraPromptsSDK(baseSystemText);
 
-function sendAndWaitResult(message) {
-  return new Promise((resolve) => {
-    const msg = message || {};
-    if (!msg.requestId) {
-      try {
-        msg.requestId = randomUUID();
-      } catch {
-        msg.requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-      }
-    }
-    const requestId = msg.requestId;
-    const timeout = setTimeout(() => {
-      logger.warn(`请求超时: ${requestId}`);
-      resolve(null);
-    }, WS_TIMEOUT);
+async function sendAndWaitResult(message) {
+  const maxRetriesRaw = getEnvInt('SEND_RPC_MAX_RETRIES', 0);
+  const timeoutRaw = getEnvInt('SEND_RPC_TIMEOUT_MS', 120000);
 
-    const handler = (data) => {
-      try {
-        const payload = JSON.parse(data.toString());
-        if (payload.type === 'result' && payload.requestId === requestId) {
-          clearTimeout(timeout);
-          socket.off('message', handler);
-          resolve(payload.ok ? payload : null);
+  const maxRetries = Number.isFinite(maxRetriesRaw) && maxRetriesRaw >= 0
+    ? maxRetriesRaw
+    : 0;
+  const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0
+    ? timeoutRaw
+    : 120000;
+
+  const doOnce = () => {
+    return new Promise((resolve) => {
+      const msg = message || {};
+      if (!msg.requestId) {
+        try {
+          msg.requestId = randomUUID();
+        } catch {
+          msg.requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
         }
-      } catch (e) {}
-    };
+      }
+      const requestId = msg.requestId;
 
-    socket.on('message', handler);
-    send(msg);
-  });
+      let settled = false;
+      let timeout;
+      const handler = (data) => {
+        if (settled) return;
+        try {
+          const payload = JSON.parse(data.toString());
+          if (payload.type === 'result' && payload.requestId === requestId) {
+            settled = true;
+            clearTimeout(timeout);
+            socket.off('message', handler);
+            resolve(payload);
+          }
+        } catch (e) {}
+      };
+
+      timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        logger.warn(`请求超时: ${requestId}`);
+        socket.off('message', handler);
+        resolve(null);
+      }, timeoutMs);
+
+      socket.on('message', handler);
+      send(msg);
+    });
+  };
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const result = await doOnce();
+    if (result === null) {
+      if (attempt < maxRetries) {
+        logger.warn(`RPC请求超时，准备重试 (${attempt + 1}/${maxRetries})`);
+        continue;
+      }
+      return null;
+    }
+
+    return result.ok ? result : null;
+  }
+
+  return null;
 }
 
 setupSocketHandlers({
@@ -343,5 +540,51 @@ setupSocketHandlers({
   cancelRunsForSender,
   collectBundleForSender,
   shouldReply,
-  handleOneMessage
+  handleOneMessage,
+  desireManager
 });
+
+const DESIRE_TICK_INTERVAL_MS = getEnvInt('DESIRE_TICK_INTERVAL_MS', 60000);
+
+if (DESIRE_ENABLED && desireManager) {
+  setInterval(async () => {
+    try {
+      const now = Date.now();
+      await desireManager.tick(now);
+      const candidates = await desireManager.collectProactiveCandidates(now);
+      if (!Array.isArray(candidates) || candidates.length === 0) {
+        return;
+      }
+      for (const c of candidates) {
+        const lastMsg = c?.lastMsg;
+        const senderId =
+          lastMsg && lastMsg.sender_id != null
+            ? String(lastMsg.sender_id)
+            : (c?.userId ? String(c.userId) : '');
+
+        if (!senderId) {
+          logger.debug('主动回复候选跳过: 缺少 senderId', {
+            conversationKey: c?.conversationKey || null
+          });
+          continue;
+        }
+
+        const activeCount = getActiveTaskCount(senderId);
+        if (activeCount > 0) {
+          logger.info(
+            `主动回复跳过: sender=${senderId} 当前有 ${activeCount} 个被动任务在处理，暂不触发主动回复`,
+            {
+              conversationKey: c?.conversationKey || null,
+              chatType: c?.chatType || null
+            }
+          );
+          continue;
+        }
+
+        enqueueProactiveCandidate(c);
+      }
+    } catch (e) {
+      logger.warn('DesireManager tick failed', { err: String(e) });
+    }
+  }, DESIRE_TICK_INTERVAL_MS);
+}
