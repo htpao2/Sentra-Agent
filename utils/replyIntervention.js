@@ -80,7 +80,7 @@ function getAgent() {
     sharedAgent = new Agent({
       // 复用主站点配置，避免单独维护一套 API_KEY/API_BASE_URL
       apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
-      apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
+      apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
       defaultModel: model,
       temperature: 0,
       maxTokens,

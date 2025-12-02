@@ -41,7 +41,7 @@ function getPlannerAgent() {
     const { model, maxTokens, timeout, maxRetries } = getPlannerConfig();
     sharedAgent = new Agent({
       apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
-      apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
+      apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
       defaultModel: model,
       temperature: 0.2,
       maxTokens,
@@ -320,18 +320,18 @@ function buildPlannerRootDirectiveXml(options) {
   const objectiveLines = [];
   if (topicShort) {
     objectiveLines.push(
-      `围绕最近对话的大致主题「${topicShort}」，但把这些内容视为“背景信息”，为 自己规划本轮是否以及如何主动发言的高层目标（objective），避免继续机械解答当前问题。`
+      `围绕最近对话的大致主题「${topicShort}」，但把这些内容视为“已经基本回答完的背景”，你的任务不是继续解释这个问题，而是规划本轮是否以及如何主动发言。`
     );
   } else {
     objectiveLines.push(
-      '根据当前会话的整体氛围、节奏和情绪，将已有对话视为“背景信息”，为 自己规划本轮是否以及如何主动发言的高层目标（objective），而不是继续逐条答题。'
+      '根据当前会话的整体氛围、节奏和情绪，将已有对话视为“已经发生过的背景”，不要把它们当作仍需解答的问题，为 自己规划本轮是否以及如何主动发言的高层目标（objective）。'
     );
   }
   objectiveLines.push(
-    '请综合 <sentra-pending-messages> 中最近多轮对话（仅作背景）、当前时间/节假日信息、用户长期习惯/情绪，以及 <sentra-agent-preset> 中的 Bot 人设，主观判断本轮是否值得开口，并优先寻找“有新意的视角或子话题”，而非重复现有问题的解答。'
+    '请综合 <sentra-pending-messages> 中最近多轮对话（仅作背景）、当前时间/节假日信息、用户长期习惯/情绪，以及 <sentra-agent-preset> 中的 Bot 人设，主观判断本轮是否值得开口，并优先寻找“有新意的视角或子话题”（例如生活类联想、人设相关分享、情绪安抚、不同维度的背景补充），而不是继续从同一技术点/同一问题给出更多解释或注意事项。'
   );
   objectiveLines.push(
-    '你输出的 <sentra-response> 文本将仅作为内部“主动发言目标描述”，不会原样发送给用户；请在 1-3 句自然中文中说明本轮想围绕什么主题、采用怎样的语气和深度，是否需要轻度转场到一个新的相关话题，以及在什么情况下应保持安静或仅作陪伴。'
+    '你输出的 <sentra-response> 文本将仅作为内部“主动发言目标描述”，不会原样发送给用户；请在 1-3 句自然中文中说明本轮想围绕什么大致方向展开（必须是新视角/新子话题或轻度转场），采用怎样的语气和深度，以及在什么情况下应保持安静或仅作陪伴；如果你发现自己只是在思考“如何把当前问题讲得更详细”，请把 objective 规划为保持沉默。'
   );
 
   rdLines.push('<sentra-root-directive>');
@@ -368,6 +368,9 @@ function buildPlannerRootDirectiveXml(options) {
   );
   rdLines.push(
     '    <item>在做是否以及如何主动发言的规划时，优先遵循 <sentra-agent-preset> 中定义的长期人设与行为规则，用户画像、情绪和记忆等信息仅作为辅助参考。</item>'
+  );
+  rdLines.push(
+    '    <item>当你意识到自己只是想“再补充说明一下刚才的问题”或“换一种说法继续解释同一个知识点”时，应将本轮 objective 设定为保持沉默或轻度陪伴，而不是继续输出类似内容。</item>'
   );
   rdLines.push('  </constraints>');
   rdLines.push('  <meta>');

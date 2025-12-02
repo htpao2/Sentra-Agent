@@ -85,7 +85,7 @@ async function testOpenAIConnection() {
     
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
-      baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+      baseURL: process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1'
     });
 
     // 测试简单的嵌入调用

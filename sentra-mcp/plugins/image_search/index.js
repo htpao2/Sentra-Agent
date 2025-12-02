@@ -3,6 +3,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
+import qs from 'qs';
 import archiver from 'archiver';
 import logger from '../../src/logger/index.js';
 import { abs as toAbs } from '../../src/utils/path.js';
@@ -13,7 +14,102 @@ function toMarkdownPath(abs) {
   return `![${label}](${mdPath})`;
 }
 
-// Fisher-Yates 洗牌算法
+/**
+ * 判断字符串是否为空
+ */
+function isStrEmpty(x) {
+  return (!x && x !== 0 && x !== false) || x === "null";
+}
+
+/**
+ * 移除对象中的空值
+ */
+function removeEmptyObject(x) {
+  if (Array.isArray(x)) return x;
+  
+  return Object.keys(x)
+    .filter(key => {
+      const value = x[key];
+      return value || value === "" || value === 0 || value === false;
+    })
+    .reduce((acc, key) => {
+      return { ...acc, [key]: x[key] };
+    }, {});
+}
+
+/**
+ * 生成签名
+ * @param {Object} params - 要签名的参数对象
+ * @param {string} secretKey - 密钥（可选，默认使用内置密钥）
+ * @returns {Object} 包含原始参数和sign字段的对象
+ */
+function generateSign(params = {}, secretKey = "d9fd3ec394") {
+  try {
+    // 深拷贝并移除空值
+    const cleanedParams = JSON.parse(JSON.stringify(removeEmptyObject(params)));
+    
+    // 对键进行排序
+    const sortedKeys = Object.keys(cleanedParams).sort();
+    
+    // 构建只包含非对象类型值的对象
+    const processedParams = {};
+    sortedKeys.forEach(key => {
+      const value = cleanedParams[key];
+      // 只处理非对象类型的值
+      if (typeof value !== "object") {
+        const strValue = value?.toString()?.trim() || "";
+        processedParams[key] = strValue;
+      }
+    });
+    
+    // 转换为查询字符串（不进行URL编码）
+    let queryString = qs.stringify(processedParams, {
+      encode: false,
+      filter: (prefix, value) => {
+        // 过滤空值
+        if (!isStrEmpty(value)) {
+          return value;
+        }
+      }
+    });
+    
+    // 追加密钥
+    queryString += `&key=${secretKey}`;
+    
+    // 生成MD5哈希并转为大写
+    const sign = crypto.createHash('md5').update(queryString).digest('hex').toUpperCase();
+    
+    logger.debug?.('sign:generated', { 
+      label: 'PLUGIN',
+      queryString: queryString.substring(0, 100) + '...',
+      sign: sign.substring(0, 16) + '...'
+    });
+    
+    // 返回包含原始参数和sign的对象
+    return {
+      ...cleanedParams,
+      sign
+    };
+  } catch (e) {
+    logger.error?.('sign:generation_failed', { label: 'PLUGIN', error: String(e?.message || e) });
+    throw new Error(`签名生成失败: ${e.message}`);
+  }
+}
+
+/**
+ * 计算请求头中的timestamp
+ * 格式: ${秒级时间戳}${校验码}
+ * 校验码 = (时间戳 ^ 334) % 1000，补齐3位
+ */
+function computeTimestamp(overscan = 0) {
+  const timestamp = parseInt(((Date.now() + overscan) / 1000).toString(), 10);
+  const checksum = ((timestamp ^ 334) % 1000).toString().padStart(3, '0');
+  return `${timestamp}${checksum}`;
+}
+
+/**
+ * Fisher-Yates 洗牌算法（原地修改）
+ */
 function shuffleArray(array) {
   const arr = [...array];
   for (let i = arr.length - 1; i > 0; i--) {
@@ -23,76 +119,23 @@ function shuffleArray(array) {
   return arr;
 }
 
-function guessExtFromUrl(url) {
-  try {
-    const u = new URL(url);
-    const last = decodeURIComponent(u.pathname.split('/').pop() || '');
-    const m = last.match(/\.[a-zA-Z0-9]{2,5}$/);
-    return m ? m[0].toLowerCase() : '';
-  } catch {
-    return '';
-  }
-}
-
-function extFromContentType(ct) {
-  const map = {
-    'image/jpeg': '.jpg',
-    'image/jpg': '.jpg',
-    'image/png': '.png',
-    'image/webp': '.webp',
-    'image/gif': '.gif',
-    'image/avif': '.avif',
-    'image/svg+xml': '.svg',
-    'image/bmp': '.bmp',
-    'image/tiff': '.tiff',
-    'image/heic': '.heic',
-    'image/heif': '.heif',
-  };
-  return map[ct] || '';
-}
-
-// 智能筛选 + 深度随机打乱算法
-// 优先选择前60%高相关性图片，不足时补充后40%
-function smartShuffleWithRelevance(array, needCount) {
-  if (!array.length) return array;
-  
-  // 计算前60%的数量（高相关性区域）
-  const highRelevanceCount = Math.ceil(array.length * 0.6);
-  const highRelevance = array.slice(0, highRelevanceCount);
-  const lowRelevance = array.slice(highRelevanceCount);
-  
-  let selected = [];
-  
-  // 优先从高相关性区域选取
-  if (highRelevance.length >= needCount) {
-    // 高相关性图片足够，直接从中选取
-    selected = highRelevance.slice(0, needCount);
-  } else {
-    // 高相关性图片不够，全部加入
-    selected = [...highRelevance];
-    
-    // 从低相关性区域补充
-    const remaining = needCount - selected.length;
-    if (remaining > 0 && lowRelevance.length > 0) {
-      selected.push(...lowRelevance.slice(0, remaining));
-    }
-  }
-  
-  // 对选中的图片进行深度洗牌
-  return deepShuffle(selected);
-}
-
-// 深度随机打乱算法（多重随机策略）
+/**
+ * 深度随机打乱算法
+ * 策略：
+ * 1. 随机3-5次混合打乱
+ * 2. Fisher-Yates + 随机排序 + 随机反转 + 随机分段重组
+ * 3. 最后再进行一次 Fisher-Yates
+ */
 function deepShuffle(array) {
   if (!array.length) return array;
   
   const getRandomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-  const shuffleCount = getRandomInt(3, 5); // 随机进行3-5次打乱
+  const shuffleCount = getRandomInt(3, 5);
   let results = [...array];
   
   for (let i = 0; i < shuffleCount; i++) {
     // Fisher-Yates 洗牌
-    shuffleArray(results);
+    results = shuffleArray(results);
     
     // 随机排序
     results.sort(() => Math.random() - 0.5);
@@ -111,108 +154,158 @@ function deepShuffle(array) {
     }
   }
   
-  // 最后再进行一次 Fisher-Yates 洗牌
-  shuffleArray(results);
-  
-  return results;
+  // 最后再进行一次 Fisher-Yates
+  return shuffleArray(results);
 }
 
-// 基础超时请求封装
+/**
+ * 智能筛选 + 深度随机打乱
+ * 优先选择前60%高相关性图片，不足时补充后40%
+ * 然后进行深度洗牌确保随机性
+ */
+function smartShuffleWithRelevance(array, needCount) {
+  if (!array.length) return array;
+  
+  // 计算前60%的数量（高相关性区域）
+  const highRelevanceCount = Math.ceil(array.length * 0.6);
+  const highRelevance = array.slice(0, highRelevanceCount);
+  const lowRelevance = array.slice(highRelevanceCount);
+  
+  let selected = [];
+  
+  // 优先从高相关性区域选取
+  if (highRelevance.length >= needCount) {
+    selected = highRelevance.slice(0, needCount);
+  } else {
+    selected = [...highRelevance];
+    const remaining = needCount - selected.length;
+    if (remaining > 0 && lowRelevance.length > 0) {
+      selected.push(...lowRelevance.slice(0, remaining));
+    }
+  }
+  
+  // 对选中的图片进行深度洗牌
+  return deepShuffle(selected);
+}
+
+/**
+ * 带超时的 fetch 封装
+ */
 async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(new Error(`Abort by timeout ${timeoutMs}ms`)), timeoutMs);
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+  
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    return res;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function fetchJson(url, headers = {}, timeoutMs = 20000) {
-  const res = await fetchWithTimeout(url, { headers }, timeoutMs);
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  const json = await res.json();
-  return json;
-}
-
-// 搜图神器壁纸搜索 API（主要来源）
-async function searchWallpapers(query, count, timeoutMs = 18000) {
-  try {
-    const hashValue = crypto.randomBytes(32).toString('hex');
-    const params = new URLSearchParams({
-      product_id: '52',
-      version_code: 29116,
-      page: 0,
-      search_word: query,
-      searchMode: 'ACCURATE_SEARCH',
-      sign: hashValue
+    const res = await fetch(url, { 
+      ...options, 
+      signal: controller.signal 
     });
-    
-    const res = await fetchWithTimeout('https://wallpaper.soutushenqi.com/v1/wallpaper/list', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: params.toString()
-    }, timeoutMs);
-    
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    
-    const data = await res.json();
-    
-    if (!data.data || !Array.isArray(data.data)) return [];
-    
-    // 提取并过滤有效的图片URL
-    const imageUrls = data.data
-      .filter(item => item.largeUrl && !item.largeUrl.includes('fw480'))
-      .map(item => ({
-        url: item.largeUrl,
-        source: 'wallpaper',
-        id: item.id || crypto.randomUUID(),
-      }));
-    
-    // 去重
-    const uniqueUrls = Array.from(
-      new Map(imageUrls.map(item => [item.url, item])).values()
-    );
-    
-    return uniqueUrls.slice(0, count);
+    clearTimeout(timer);
+    return res;
   } catch (e) {
-    logger.warn?.('unsplash_search:wallpaper_failed', { label: 'PLUGIN', error: String(e?.message || e) });
-    return [];
+    clearTimeout(timer);
+    if (e.name === 'AbortError') {
+      throw new Error(`请求超时 (${timeoutMs}ms): ${url}`);
+    }
+    throw e;
   }
 }
 
-// 搜索图片
-async function searchPhotos({ query, count, orientation, accessKey, headers = {} }, timeoutMs = 20000) {
-  const params = new URLSearchParams({
-    query,
-    per_page: String(Math.min(count, 30)), // Unsplash API 限制单次最多30
-    client_id: accessKey,
-  });
-  if (orientation) params.append('orientation', orientation);
+/**
+ * 带重试的 fetch JSON
+ */
+async function fetchJsonWithRetry(url, options = {}, retries = 3, timeoutMs = 20000) {
+  let lastError;
   
-  const url = `https://api.unsplash.com/search/photos?${params.toString()}`;
-  const j = await fetchJson(url, headers, timeoutMs);
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetchWithTimeout(url, options, timeoutMs);
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+      
+      const json = await res.json();
+      return json;
+      
+    } catch (e) {
+      lastError = e;
+      logger.warn?.('fetch:retry', { 
+        label: 'PLUGIN', 
+        attempt: i + 1, 
+        maxRetries: retries,
+        error: String(e?.message || e),
+        url: url.substring(0, 100)
+      });
+      
+      if (i < retries - 1) {
+        // 指数退避：1s, 2s, 4s...
+        const delay = Math.pow(2, i) * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
   
-  if (!Array.isArray(j?.results)) throw new Error('Invalid Unsplash API response');
-  return j.results.slice(0, count); // 确保不超过请求数量
+  throw lastError;
 }
 
-// 流式下载（使用 pipeline + Transform 实现进度跟踪）
+/**
+ * 从URL猜测文件扩展名
+ */
+function guessExtFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const last = decodeURIComponent(u.pathname.split('/').pop() || '');
+    const m = last.match(/\.[a-zA-Z0-9]{2,5}$/);
+    return m ? m[0].toLowerCase() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 从Content-Type获取扩展名
+ */
+function extFromContentType(ct) {
+  const map = {
+    'image/jpeg': '.jpg',
+    'image/jpg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'image/avif': '.avif',
+    'image/svg+xml': '.svg',
+    'image/bmp': '.bmp',
+    'image/tiff': '.tiff',
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+  };
+  return map[ct] || '';
+}
+
+/**
+ * 流式下载文件（带进度跟踪）
+ */
 async function downloadToFile(url, absPath, headers = {}, timeoutMs = 120000) {
   const res = await fetchWithTimeout(url, { headers }, timeoutMs);
-  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+  
+  if (!res.ok) {
+    throw new Error(`下载失败: HTTP ${res.status} ${res.statusText}`);
+  }
+  
   const ct = (res.headers?.get?.('content-type') || '').split(';')[0].trim();
   
-  if (!res.body) throw new Error('no response body');
+  if (!res.body) {
+    throw new Error('响应体为空');
+  }
   
   await fs.mkdir(path.dirname(absPath), { recursive: true });
   
   // 进度跟踪 Transform Stream
   let downloaded = 0;
-  const logInterval = 2 * 1024 * 1024; // 2MB（图片较小，更频繁反馈）
+  const logInterval = 2 * 1024 * 1024; // 2MB
   let lastLog = 0;
   
   const { Transform } = await import('node:stream');
@@ -220,30 +313,29 @@ async function downloadToFile(url, absPath, headers = {}, timeoutMs = 120000) {
     transform(chunk, encoding, callback) {
       downloaded += chunk.length;
       if (downloaded - lastLog >= logInterval) {
-        logger.info?.('unsplash_search:download_progress', { label: 'PLUGIN', downloadedMB: (downloaded / 1024 / 1024).toFixed(2) });
+        logger.debug?.('download:progress', { 
+          label: 'PLUGIN', 
+          downloadedMB: (downloaded / 1024 / 1024).toFixed(2),
+          file: path.basename(absPath)
+        });
         lastLog = downloaded;
       }
       callback(null, chunk);
     }
   });
   
-  // 超时控制
-  const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(`Download timeout after ${timeoutMs}ms`)), timeoutMs);
-  });
-  
-  const downloadPromise = pipeline(
+  await pipeline(
     res.body,
     progressTransform,
     fssync.createWriteStream(absPath)
   );
   
-  await Promise.race([downloadPromise, timeoutPromise]);
-  
   return { size: downloaded, contentType: ct };
 }
 
-// 创建 zip 压缩包
+/**
+ * 创建 ZIP 压缩包
+ */
 async function createZip(files, zipPath) {
   await fs.mkdir(path.dirname(zipPath), { recursive: true });
   
@@ -251,12 +343,25 @@ async function createZip(files, zipPath) {
     const output = fssync.createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
     
+    let totalSize = 0;
+    
     output.on('close', () => {
       resolve({ size: archive.pointer(), path: zipPath });
     });
     
     archive.on('error', reject);
     output.on('error', reject);
+    
+    archive.on('progress', (progress) => {
+      if (progress.fs.totalBytes - totalSize > 5 * 1024 * 1024) { // 每5MB记录一次
+        totalSize = progress.fs.totalBytes;
+        logger.debug?.('zip:progress', { 
+          label: 'PLUGIN', 
+          processedMB: (progress.fs.processedBytes / 1024 / 1024).toFixed(2),
+          totalMB: (progress.fs.totalBytes / 1024 / 1024).toFixed(2)
+        });
+      }
+    });
     
     archive.pipe(output);
     
@@ -270,21 +375,225 @@ async function createZip(files, zipPath) {
   });
 }
 
+/**
+ * 搜图神器壁纸搜索 API
+ */
+async function searchWallpapers(query, count, options = {}) {
+  const {
+    timeoutMs = 15000,
+    retries = 3,
+    page = 0,
+    searchMode = 'ACCURATE_SEARCH',
+    sort = '0'
+  } = options;
+  
+  try {
+    logger.info?.('wallpaper:search_start', { 
+      label: 'PLUGIN', 
+      query, 
+      count, 
+      page,
+      searchMode 
+    });
+    
+    // 构建请求参数
+    const baseParams = {
+      product_id: '52',
+      version_code: '29116',
+      page: String(page),
+      search_word: query,
+      maxWidth: '99999',
+      minWidth: '0',
+      maxHeight: '99999',
+      minHeight: '0',
+      searchMode: searchMode,
+      sort: sort
+    };
+    
+    // 生成签名
+    const signedParams = generateSign(baseParams);
+    
+    // 构建表单数据
+    const formBody = Object.keys(signedParams)
+      .map(key => {
+        const value = signedParams[key];
+        return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+      })
+      .join('&');
+    
+    // 生成时间戳
+    const timestamp = computeTimestamp();
+    
+    // 发送请求
+    const data = await fetchJsonWithRetry(
+      'https://wallpaper.soutushenqi.com/v1/wallpaper/list',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'accept': 'application/json',
+          'timestamp': timestamp,
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        body: formBody
+      },
+      retries,
+      timeoutMs
+    );
+    
+    // 检查响应
+    if (!data || data.code !== 200) {
+      throw new Error(`API返回错误: ${data?.message || data?.error_msg || 'Unknown'}`);
+    }
+    
+    if (!data.data || !Array.isArray(data.data)) {
+      logger.warn?.('wallpaper:empty_result', { label: 'PLUGIN', query });
+      return [];
+    }
+    
+    // 提取并过滤有效的图片URL
+    const imageUrls = data.data
+      .filter(item => {
+        // 过滤掉低质量图片（fw480是缩略图标识）
+        return item.largeUrl && !item.largeUrl.includes('fw480');
+      })
+      .map(item => ({
+        url: item.largeUrl,
+        source: 'wallpaper',
+        id: item.id || crypto.randomUUID(),
+        title: item.title || query,
+        tags: item.tags || [],
+        width: item.width || 0,
+        height: item.height || 0,
+      }));
+    
+    const uniqueUrls = Array.from(
+      new Map(imageUrls.map(item => [item.url, item])).values()
+    );
+    
+    const result = uniqueUrls.slice(0, count);
+    
+    logger.info?.('wallpaper:search_success', { 
+      label: 'PLUGIN', 
+      query,
+      total: data.data.length,
+      filtered: imageUrls.length,
+      unique: uniqueUrls.length,
+      returned: result.length
+    });
+    
+    return result;
+    
+  } catch (e) {
+    logger.error?.('wallpaper:search_failed', { 
+      label: 'PLUGIN', 
+      query,
+      error: String(e?.message || e),
+      stack: e?.stack
+    });
+    return [];
+  }
+}
+
+/**
+ * Unsplash 搜索 API
+ */
+async function searchUnsplash(query, count, options = {}) {
+  const {
+    accessKey,
+    orientation = null,
+    timeoutMs = 20000,
+    retries = 3,
+    headers = {}
+  } = options;
+  
+  if (!accessKey || accessKey === 'YOUR_ACCESS_KEY_HERE') {
+    logger.warn?.('unsplash:no_key', { label: 'PLUGIN' });
+    return [];
+  }
+  
+  try {
+    logger.info?.('unsplash:search_start', { 
+      label: 'PLUGIN', 
+      query, 
+      count,
+      orientation: orientation || 'any'
+    });
+    
+    const params = new URLSearchParams({
+      query,
+      per_page: String(Math.min(count, 30)), // API限制
+      client_id: accessKey,
+    });
+    
+    if (orientation) {
+      params.append('orientation', orientation);
+    }
+    
+    const url = `https://api.unsplash.com/search/photos?${params.toString()}`;
+    
+    const data = await fetchJsonWithRetry(
+      url,
+      { headers: { ...headers, 'Accept-Version': 'v1' } },
+      retries,
+      timeoutMs
+    );
+    
+    if (!Array.isArray(data?.results)) {
+      throw new Error('Invalid Unsplash API response');
+    }
+    
+    const results = data.results.slice(0, count).map(photo => ({
+      ...photo,
+      source: 'unsplash',
+      url: photo.urls?.regular || photo.urls?.full,
+    }));
+    
+    logger.info?.('unsplash:search_success', { 
+      label: 'PLUGIN', 
+      query,
+      total: data.total,
+      returned: results.length
+    });
+    
+    return results;
+    
+  } catch (e) {
+    logger.error?.('unsplash:search_failed', { 
+      label: 'PLUGIN', 
+      query,
+      error: String(e?.message || e)
+    });
+    return [];
+  }
+}
+
 export default async function handler(args = {}, options = {}) {
   const query = String(args.query || '').trim();
   const count = Number(args.count || 0);
   const orientation = args.orientation || null;
   
-  if (!query) return { success: false, code: 'INVALID', error: 'query is required' };
-  if (!count || count < 1) return { success: false, code: 'INVALID', error: 'count is required and must be >= 1' };
+  // 参数验证
+  if (!query) {
+    return { 
+      success: false, 
+      code: 'INVALID_PARAM', 
+      error: 'query参数是必需的' 
+    };
+  }
   
+  if (!count || count < 1) {
+    return { 
+      success: false, 
+      code: 'INVALID_PARAM', 
+      error: 'count参数必须是大于0的整数' 
+    };
+  }
+  
+  // 环境配置
   const penv = options?.pluginEnv || {};
   const accessKey = String(penv.UNSPLASH_ACCESS_KEY || process.env.UNSPLASH_ACCESS_KEY || '');
   const hasUnsplashKey = accessKey && accessKey !== 'YOUR_ACCESS_KEY_HERE';
-  
-  if (!hasUnsplashKey) {
-    logger.info?.('unsplash_search:no_unsplash_key', { label: 'PLUGIN', message: 'Unsplash API key not configured, will only use wallpaper API' });
-  }
   
   const baseDir = String(penv.UNSPLASH_BASE_DIR || process.env.UNSPLASH_BASE_DIR || 'artifacts');
   const maxCount = Number(penv.UNSPLASH_MAX_COUNT || process.env.UNSPLASH_MAX_COUNT || 10);
@@ -292,13 +601,19 @@ export default async function handler(args = {}, options = {}) {
   const quality = String(penv.UNSPLASH_QUALITY || process.env.UNSPLASH_QUALITY || 'regular');
   const fetchTimeoutMs = Number(penv.UNSPLASH_FETCH_TIMEOUT_MS || process.env.UNSPLASH_FETCH_TIMEOUT_MS || 20000);
   const downloadTimeoutMs = Number(penv.UNSPLASH_DOWNLOAD_TIMEOUT_MS || process.env.UNSPLASH_DOWNLOAD_TIMEOUT_MS || 120000);
-  const concurrency = Math.max(1, Math.min(20, Number(penv.UNSPLASH_CONCURRENCY || process.env.UNSPLASH_CONCURRENCY || 5))); // 限制1-20
+  const concurrency = Math.max(1, Math.min(20, Number(penv.UNSPLASH_CONCURRENCY || process.env.UNSPLASH_CONCURRENCY || 5)));
   const userAgent = String(penv.UNSPLASH_USER_AGENT || process.env.UNSPLASH_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36');
+  const retries = Math.max(1, Number(penv.UNSPLASH_RETRIES || process.env.UNSPLASH_RETRIES || 3));
   
   const finalCount = Math.min(count, maxCount);
   
   if (count > maxCount) {
-    logger.info?.('unsplash_search:count_limited', { label: 'PLUGIN', requestedCount: count, maxCount, actualCount: finalCount });
+    logger.info?.('count_limited', { 
+      label: 'PLUGIN', 
+      requestedCount: count, 
+      maxCount, 
+      actualCount: finalCount 
+    });
   }
   
   const headers = {
@@ -307,58 +622,88 @@ export default async function handler(args = {}, options = {}) {
   };
   
   try {
-    logger.info?.('unsplash_search:start', { label: 'PLUGIN', query, requestedCount: count, actualCount: finalCount, orientation });
+    logger.info?.('handler:start', { 
+      label: 'PLUGIN', 
+      query, 
+      requestedCount: count, 
+      actualCount: finalCount, 
+      orientation,
+      hasUnsplashKey
+    });
     
-    // 多源搜索策略：优先壁纸API，不足时用Unsplash补充
     let allPhotos = [];
     
-    // 第一步：搜索壁纸API（主要来源）
-    logger.info?.('unsplash_search:step:search_wallpaper', { label: 'PLUGIN', query, count: finalCount, timeout: fetchTimeoutMs });
-    const wallpaperResults = await searchWallpapers(query, finalCount, fetchTimeoutMs);
-    logger.info?.('unsplash_search:step:search_wallpaper_done', { label: 'PLUGIN', found: wallpaperResults.length, source: 'wallpaper' });
+    const wallpaperResults = await searchWallpapers(query, finalCount, {
+      timeoutMs: fetchTimeoutMs,
+      retries
+    });
     
     allPhotos.push(...wallpaperResults);
     
-    // 第二步：如果壁纸结果不足且有Unsplash Key，用Unsplash补充
     const remaining = finalCount - allPhotos.length;
     if (remaining > 0 && hasUnsplashKey) {
-      logger.info?.('unsplash_search:step:search_unsplash', { label: 'PLUGIN', query, count: remaining, timeout: fetchTimeoutMs });
-      const unsplashPhotos = await searchPhotos({ query, count: remaining, orientation, accessKey, headers }, fetchTimeoutMs);
-      const unsplashResults = unsplashPhotos.map(photo => ({
-        ...photo,
-        source: 'unsplash',
-        url: photo.urls?.regular || photo.urls?.full,
-      }));
-      logger.info?.('unsplash_search:step:search_unsplash_done', { label: 'PLUGIN', found: unsplashResults.length, source: 'unsplash' });
+      const unsplashResults = await searchUnsplash(query, remaining, {
+        accessKey,
+        orientation,
+        timeoutMs: fetchTimeoutMs,
+        retries,
+        headers
+      });
       allPhotos.push(...unsplashResults);
-    } else if (remaining > 0 && !hasUnsplashKey) {
-      logger.warn?.('unsplash_search:skip_unsplash', { label: 'PLUGIN', message: 'Unsplash补充跳过（无API Key），返回已有结果', wallpaperCount: allPhotos.length, remaining });
+    } else if (remaining > 0) {
+      logger.info?.('skip_unsplash', { 
+        label: 'PLUGIN', 
+        message: 'Unsplash补充跳过（无API Key）',
+        wallpaperCount: allPhotos.length,
+        remaining 
+      });
     }
     
-    if (!allPhotos.length) return { success: false, code: 'NO_RESULT', error: `未找到与 "${query}" 相关的图片` };
+    // 检查是否有结果
+    if (!allPhotos.length) {
+      return { 
+        success: false, 
+        code: 'NO_RESULT', 
+        error: `未找到与 "${query}" 相关的图片` 
+      };
+    }
     
     // 统计来源
     const sourceStats = allPhotos.reduce((acc, p) => {
       acc[p.source] = (acc[p.source] || 0) + 1;
       return acc;
     }, {});
-    logger.info?.('unsplash_search:source_stats', { label: 'PLUGIN', total: allPhotos.length, sources: sourceStats });
     
-    // 智能筛选 + 深度洗牌：优先选择前60%高相关性图片
-    const highRelevanceCount = Math.ceil(allPhotos.length * 0.6);
-    logger.info?.('unsplash_search:step:smart_select', { label: 'PLUGIN', total: allPhotos.length, highRelevance: highRelevanceCount, needCount: finalCount });
+    logger.info?.('search:total_results', { 
+      label: 'PLUGIN', 
+      total: allPhotos.length, 
+      sources: sourceStats 
+    });
     
     const shuffledPhotos = smartShuffleWithRelevance(allPhotos, finalCount);
-    logger.info?.('unsplash_search:step:smart_shuffle_done', { label: 'PLUGIN', selected: shuffledPhotos.length });
     
-    // 保存目录
+    logger.info?.('shuffle:complete', { 
+      label: 'PLUGIN', 
+      original: allPhotos.length,
+      selected: shuffledPhotos.length 
+    });
+    
     const baseAbs = toAbs(baseDir);
     const sessionId = crypto.randomUUID().slice(0, 8);
     const sessionDir = path.join(baseAbs, `unsplash_${sessionId}`);
     await fs.mkdir(sessionDir, { recursive: true });
     
-    // 并发下载图片（并发数由env配置，默认5）
-    logger.info?.('unsplash_search:step:download_start', { label: 'PLUGIN', total: shuffledPhotos.length, concurrency });
+    logger.info?.('session:created', { 
+      label: 'PLUGIN', 
+      sessionId, 
+      sessionDir 
+    });
+    
+    logger.info?.('download:start', { 
+      label: 'PLUGIN', 
+      total: shuffledPhotos.length, 
+      concurrency 
+    });
     
     const downloadTasks = shuffledPhotos.map((photo, i) => {
       const photoId = photo.id || `photo_${i}`;
@@ -381,31 +726,67 @@ export default async function handler(args = {}, options = {}) {
       }
       
       if (!downloadUrl) {
-        logger.warn?.('unsplash_search:no_url', { label: 'PLUGIN', photoId, index: i, source: photoSource });
-        return Promise.resolve(null);
+        logger.warn?.('download:no_url', { 
+          label: 'PLUGIN', 
+          photoId, 
+          index: i + 1, 
+          source: photoSource 
+        });
+        return () => Promise.resolve(null);
       }
       
       let ext = guessExtFromUrl(downloadUrl) || '.jpg';
-      let fileName = `${sessionId}_${i + 1}_${photoSource}_${photoId}${ext}`;
+      let fileName = `${sessionId}_${String(i + 1).padStart(3, '0')}_${photoSource}_${photoId}${ext}`;
       let absPath = path.join(sessionDir, fileName);
       
       return async () => {
         try {
-          const { size, contentType } = await downloadToFile(downloadUrl, absPath, headers, downloadTimeoutMs);
+          logger.info?.('download:file_start', { 
+            label: 'PLUGIN', 
+            index: i + 1,
+            total: shuffledPhotos.length,
+            photoId, 
+            source: photoSource 
+          });
+          
+          const { size, contentType } = await downloadToFile(
+            downloadUrl, 
+            absPath, 
+            headers, 
+            downloadTimeoutMs
+          );
+          
           let finalPath = absPath;
+          
           const ctExt = extFromContentType(contentType);
           if (ctExt && ctExt !== ext) {
-            const newPath = path.join(sessionDir, `${sessionId}_${i + 1}_${photoSource}_${photoId}${ctExt}`);
+            const newFileName = `${sessionId}_${String(i + 1).padStart(3, '0')}_${photoSource}_${photoId}${ctExt}`;
+            const newPath = path.join(sessionDir, newFileName);
             try {
               await fs.rename(absPath, newPath);
               finalPath = newPath;
               ext = ctExt;
-              fileName = path.basename(newPath);
+              fileName = newFileName;
             } catch (err) {
-              logger.warn?.('unsplash_search:rename_failed', { label: 'PLUGIN', index: i + 1, photoId, source: photoSource, error: String(err?.message || err) });
+              logger.warn?.('download:rename_failed', { 
+                label: 'PLUGIN', 
+                index: i + 1, 
+                photoId, 
+                source: photoSource, 
+                error: String(err?.message || err) 
+              });
             }
           }
-          logger.info?.('unsplash_search:download_done', { label: 'PLUGIN', index: i + 1, photoId, source: photoSource, sizeMB: (size / 1024 / 1024).toFixed(2) });
+          
+          logger.info?.('download:file_success', { 
+            label: 'PLUGIN', 
+            index: i + 1,
+            total: shuffledPhotos.length,
+            photoId, 
+            source: photoSource, 
+            sizeMB: (size / 1024 / 1024).toFixed(2),
+            fileName
+          });
           
           return {
             path: finalPath,
@@ -417,38 +798,105 @@ export default async function handler(args = {}, options = {}) {
             author: photo.user?.name || 'Unknown',
             author_url: photo.user?.links?.html || '',
             download_location: photo.links?.download_location || '',
+            title: photo.title || photo.alt_description || query,
+            width: photo.width || 0,
+            height: photo.height || 0,
           };
         } catch (e) {
-          logger.warn?.('unsplash_search:download_failed', { label: 'PLUGIN', index: i + 1, photoId, source: photoSource, error: String(e?.message || e) });
+          logger.error?.('download:file_failed', { 
+            label: 'PLUGIN', 
+            index: i + 1,
+            total: shuffledPhotos.length,
+            photoId, 
+            source: photoSource, 
+            error: String(e?.message || e) 
+          });
           return null;
         }
       };
     });
     
-    // 并发执行下载任务（分批限流）
+    // 并发执行下载任务
     const files = [];
     for (let i = 0; i < downloadTasks.length; i += concurrency) {
       const batch = downloadTasks.slice(i, i + concurrency);
+      const batchNum = Math.floor(i / concurrency) + 1;
+      const totalBatches = Math.ceil(downloadTasks.length / concurrency);
+      
+      logger.info?.('download:batch_start', { 
+        label: 'PLUGIN', 
+        batch: batchNum,
+        totalBatches,
+        batchSize: batch.length 
+      });
+      
       const results = await Promise.all(batch.map(task => task()));
+      const successCount = results.filter(Boolean).length;
+      
+      logger.info?.('download:batch_complete', { 
+        label: 'PLUGIN', 
+        batch: batchNum,
+        totalBatches,
+        success: successCount,
+        failed: batch.length - successCount
+      });
+      
       files.push(...results.filter(Boolean));
     }
     
-    if (!files.length) return { success: false, code: 'DOWNLOAD_FAILED', error: '所有图片下载失败' };
+    // 检查下载结果
+    if (!files.length) {
+      return { 
+        success: false, 
+        code: 'DOWNLOAD_FAILED', 
+        error: '所有图片下载失败，请检查网络连接或稍后重试' 
+      };
+    }
     
-    // 触发 Unsplash 下载统计（API 要求）
-    for (const file of files) {
-      if (file.download_location) {
+    logger.info?.('download:complete', { 
+      label: 'PLUGIN', 
+      total: downloadTasks.length,
+      success: files.length,
+      failed: downloadTasks.length - files.length
+    });
+    
+    const unsplashFiles = files.filter(f => f.source === 'unsplash' && f.download_location);
+    if (unsplashFiles.length > 0) {
+      logger.info?.('unsplash:trigger_downloads', { 
+        label: 'PLUGIN', 
+        count: unsplashFiles.length 
+      });
+      
+      for (const file of unsplashFiles) {
         try {
-          await fetchWithTimeout(file.download_location, { headers: { ...headers, Authorization: `Client-ID ${accessKey}` } }, 5000);
-        } catch {}
+          await fetchWithTimeout(
+            file.download_location, 
+            { headers: { ...headers, Authorization: `Client-ID ${accessKey}` } }, 
+            5000
+          );
+        } catch (e) {
+          logger.warn?.('unsplash:trigger_failed', { 
+            label: 'PLUGIN', 
+            photoId: file.photoId,
+            error: String(e?.message || e)
+          });
+        }
       }
     }
     
-    // 统计下载文件的来源
     const downloadedSourceStats = files.reduce((acc, f) => {
       acc[f.source] = (acc[f.source] || 0) + 1;
       return acc;
     }, {});
+    
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    
+    logger.info?.('stats:final', { 
+      label: 'PLUGIN', 
+      totalFiles: files.length,
+      totalSizeMB: (totalSize / 1024 / 1024).toFixed(2),
+      sources: downloadedSourceStats
+    });
     
     const data = {
       action: 'unsplash_search',
@@ -456,49 +904,102 @@ export default async function handler(args = {}, options = {}) {
       requested_count: count,
       actual_count: finalCount,
       downloaded: files.length,
+      failed: shuffledPhotos.length - files.length,
       sources: downloadedSourceStats,
       orientation: orientation || 'any',
       timestamp: new Date().toISOString(),
+      session_id: sessionId,
+      total_size: totalSize,
+      total_size_mb: (totalSize / 1024 / 1024).toFixed(2),
     };
     
-    // 判断是否需要打包 zip
     if (files.length > zipThreshold) {
-      logger.info?.('unsplash_search:step:create_zip', { label: 'PLUGIN', fileCount: files.length, threshold: zipThreshold });
-      const zipName = `images_${query.replace(/\s+/g, '_')}_${sessionId}.zip`;
+      logger.info?.('zip:start', { 
+        label: 'PLUGIN', 
+        fileCount: files.length, 
+        threshold: zipThreshold 
+      });
+      
+      const zipName = `images_${query.replace(/[^\w\u4e00-\u9fa5]+/g, '_')}_${sessionId}.zip`;
       const zipPath = path.join(baseAbs, zipName);
+      
       const { size: zipSize } = await createZip(files, zipPath);
-      logger.info?.('unsplash_search:step:create_zip_done', { label: 'PLUGIN', zipSizeMB: (zipSize / 1024 / 1024).toFixed(2) });
       
-      const sourceInfo = Object.entries(downloadedSourceStats).map(([k, v]) => `${k}:${v}张`).join(', ');
+      logger.info?.('zip:complete', { 
+        label: 'PLUGIN', 
+        zipSizeMB: (zipSize / 1024 / 1024).toFixed(2),
+        compressionRatio: ((1 - zipSize / totalSize) * 100).toFixed(1) + '%'
+      });
       
-      // zip 模式：只返回 zip 信息，不返回单个文件（避免误导）
+      const sourceInfo = Object.entries(downloadedSourceStats)
+        .map(([k, v]) => `${k}:${v}张`)
+        .join(', ');
+      
       data.zip_path = zipPath;
       data.zip_path_markdown = toMarkdownPath(zipPath);
       data.zip_size = zipSize;
+      data.zip_size_mb = (zipSize / 1024 / 1024).toFixed(2);
+      data.compression_ratio = ((1 - zipSize / totalSize) * 100).toFixed(1) + '%';
       data.status = 'OK_ZIPPED';
-      data.summary = `成功搜索并下载 ${files.length} 张关于 "${query}" 的图片（${sourceInfo}），已打包为 zip 文件（${(zipSize / 1024 / 1024).toFixed(2)}MB）。`;
-      data.notice = `图片已打包为 zip，请解压查看。不单独提供图片路径以避免误导。`;
+      data.summary = `✅ 成功搜索并下载 ${files.length} 张关于 "${query}" 的图片（${sourceInfo}），已打包为 ZIP 文件（${(zipSize / 1024 / 1024).toFixed(2)}MB，压缩率 ${data.compression_ratio}）。`;
+      data.notice = `📦 图片已打包为 ZIP，请解压查看。文件列表见 file_list 字段。`;
+      data.file_list = files.map((f, i) => ({
+        index: i + 1,
+        filename: path.basename(f.path),
+        source: f.source,
+        size_mb: (f.size / 1024 / 1024).toFixed(2),
+        title: f.title,
+      }));
+      
     } else {
       // 直接模式：返回每个文件的详细信息
-      data.files = files.map(f => ({
+      data.files = files.map((f, i) => ({
+        index: i + 1,
         path: f.path,
         path_markdown: f.path_markdown,
+        filename: path.basename(f.path),
         size: f.size,
+        size_mb: (f.size / 1024 / 1024).toFixed(2),
         contentType: f.contentType,
         source: f.source,
         author: f.author,
         author_url: f.author_url,
+        title: f.title,
+        width: f.width,
+        height: f.height,
       }));
+      
       data.status = 'OK_DIRECT';
-      const sourceInfo = Object.entries(downloadedSourceStats).map(([k, v]) => `${k}:${v}张`).join(', ');
-      data.summary = `成功搜索并下载 ${files.length} 张关于 "${query}" 的图片（${sourceInfo}），已保存至本地。`;
+      
+      const sourceInfo = Object.entries(downloadedSourceStats)
+        .map(([k, v]) => `${k}:${v}张`)
+        .join(', ');
+      
+      data.summary = `✅ 成功搜索并下载 ${files.length} 张关于 "${query}" 的图片（${sourceInfo}），已保存至本地。总大小：${(totalSize / 1024 / 1024).toFixed(2)}MB。`;
     }
     
-    logger.info?.('unsplash_search:complete', { label: 'PLUGIN', status: data.status, fileCount: files.length });
+    logger.info?.('handler:complete', { 
+      label: 'PLUGIN', 
+      status: data.status, 
+      fileCount: files.length,
+      query
+    });
+    
     return { success: true, data };
     
   } catch (e) {
-    logger.error?.('unsplash_search:error', { label: 'PLUGIN', error: String(e?.message || e), stack: e?.stack });
-    return { success: false, code: 'ERR', error: String(e?.message || e) };
+    logger.error?.('handler:error', { 
+      label: 'PLUGIN', 
+      query,
+      error: String(e?.message || e), 
+      stack: e?.stack 
+    });
+    
+    return { 
+      success: false, 
+      code: 'INTERNAL_ERROR', 
+      error: String(e?.message || e),
+      details: e?.stack 
+    };
   }
 }

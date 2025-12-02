@@ -25,7 +25,7 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=your_password
 
 OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_BASE_URL=https://yuanplus.chat/v1
  
 # 可选：消息库（OpenAI 风格消息）单独 Neo4j 数据库
 # 不配置则默认与主库共用连接，数据库名默认为 messages（需要在 Neo4j 中预先创建）
@@ -386,7 +386,7 @@ NEO4J_PASSWORD=your_password
 
 # AI 模型配置（用于图片处理）
 OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_BASE_URL=https://yuanplus.chat/v1
 
 # 服务配置
 PORT=3000

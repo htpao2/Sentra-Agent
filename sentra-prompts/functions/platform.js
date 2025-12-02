@@ -314,7 +314,8 @@ export async function getSandboxSystemPrompt() {
       '#### 0. `<sentra-root-directive>` - Root-Level Directive (HIGHEST PRIORITY)\n' +
       '**Purpose**: Root-level directive from the Sentra platform, specifying a higher-level objective and constraints for this turn.\n' +
       '**Priority**: HIGHEST - when present, you must follow it first before any other input blocks.\n' +
-      '**Action**: Use it to guide your overall behavior in this turn (for example, deciding whether to proactively speak or to keep silent, or how to shape your reply style).\n\n' +
+      '**Action**: Use it to guide your overall behavior in this turn (for example, deciding whether to proactively speak or to keep silent, or how to shape your reply style).\n' +
+      '**Special Case (type="proactive")**: When `<sentra-root-directive>` has `<type>proactive</type>`, your primary goal is to decide whether to proactively say something from a **new angle or sub-topic** (or to keep silent). In this case, treat `<sentra-user-question>` and `<sentra-pending-messages>` mainly as background and time anchors, NOT as a question that must be further explained over and over again.\n\n' +
       
       'Structure (proactive speaking example):\n' +
       '\n' +
@@ -366,7 +367,7 @@ export async function getSandboxSystemPrompt() {
       '</sentra-user-question>\n' +
       '\n\n' +
       
-      'CRITICAL: Focus on this content. This is what you must respond to.\n\n' +
+      'CRITICAL: In normal (non-proactive) turns, focus on this content as the message you must respond to. When `<sentra-root-directive>` has `<type>proactive</type>`, your first duty is to follow the root directive; in that proactive mode, `<sentra-user-question>` is often just the latest message for context and you should NOT keep extending or re-explaining the same question.\n\n' +
       
       '#### 2. `<sentra-pending-messages>` - Conversation Context (REFERENCE)\n' +
       '**Purpose**: Recent conversation history for context\n' +
@@ -374,10 +375,10 @@ export async function getSandboxSystemPrompt() {
       '**Action**: Use as background context, do NOT respond to each message individually\n\n' +
       
       '**Core Principle:**\n' +
-      '- `<sentra-user-question>` is PRIMARY FOCUS (message requiring response)\n' +
-      '- `<sentra-pending-messages>` is REFERENCE CONTEXT (background)\n' +
-      '- Use to understand context and adjust your response\n' +
-      '- Do NOT mechanically respond to each historical message\n\n' +
+      '- In normal turns, `<sentra-user-question>` is PRIMARY FOCUS (message requiring response)\n' +
+      '- In proactive turns (`<sentra-root-directive><type>proactive</type></sentra-root-directive>`), the ROOT DIRECTIVE is PRIMARY; `<sentra-user-question>` and `<sentra-pending-messages>` are mainly BACKGROUND to help you judge whether to proactively speak with a new angle or keep silent.\n' +
+      '- `<sentra-pending-messages>` is always REFERENCE CONTEXT (background)\n' +
+      '- Use them to understand context and adjust your behavior, but do NOT mechanically respond to each historical message or keep extending the same explanation.\n\n' +
       
       'Structure:\n' +
       '\n' +

@@ -25,7 +25,7 @@ const config = {
   // OpenAI API 配置
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
-    baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+    baseURL: process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
     model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
     embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small',
     embeddingDimensions: process.env.OPENAI_EMBEDDING_DIM ? parseInt(process.env.OPENAI_EMBEDDING_DIM) : undefined,

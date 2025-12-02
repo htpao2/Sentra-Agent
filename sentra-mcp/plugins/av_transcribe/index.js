@@ -171,7 +171,7 @@ export default async function handler(args = {}, options = {}) {
   }
   
   const penv = options?.pluginEnv || {};
-  const baseUrl = String(penv.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1');
+  const baseUrl = String(penv.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1');
   const model = String(penv.WHISPER_MODEL || process.env.WHISPER_MODEL || 'whisper-1');
   const timeoutMs = Number(penv.WHISPER_TIMEOUT_MS || process.env.WHISPER_TIMEOUT_MS || 300000);
   // Chunking config (env)

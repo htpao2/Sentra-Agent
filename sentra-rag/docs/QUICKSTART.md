@@ -72,7 +72,7 @@ NEO4J_PASSWORD=your_password  # 改为你的密码
 
 # OpenAI API 配置
 OPENAI_API_KEY=sk-xxx  # 改为你的 API Key
-OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_BASE_URL=https://yuanplus.chat/v1
 OPENAI_MODEL=gpt-4o
 OPENAI_VISION_MODEL=gpt-4o
 OPENAI_EMBEDDING_MODEL=text-embedding-3-large
@@ -299,12 +299,12 @@ Error: OpenAI API error: 401 Unauthorized
 2. 检查 `.env` 配置：
    ```env
    OPENAI_API_KEY=sk-xxx  # 确保 key 正确
-   OPENAI_BASE_URL=https://api.openai.com/v1  # 或其他代理
+   OPENAI_BASE_URL=https://yuanplus.chat/v1  # 或其他代理
    ```
 
 3. 测试 API：
    ```bash
-   curl https://api.openai.com/v1/models \
+   curl https://yuanplus.chat/v1/models \
      -H "Authorization: Bearer $OPENAI_API_KEY"
    ```
 

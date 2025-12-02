@@ -205,7 +205,7 @@ export default async function handler(args = {}, options = {}) {
   });
   
   // 配置读取
-  const apiBaseUrl = String(penv.SUNO_API_BASE_URL || process.env.SUNO_API_BASE_URL || 'https://api.openai.com/v1');
+  const apiBaseUrl = String(penv.SUNO_API_BASE_URL || process.env.SUNO_API_BASE_URL || 'https://yuanplus.chat/v1');
   const apiKey = String(penv.SUNO_API_KEY || process.env.SUNO_API_KEY || '');
   const model = String(penv.SUNO_MODEL || process.env.SUNO_MODEL || 'suno-v3.5');
   const timeoutMs = Number(penv.SUNO_TIMEOUT_MS || process.env.SUNO_TIMEOUT_MS || 300000);

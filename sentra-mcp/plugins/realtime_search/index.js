@@ -42,7 +42,7 @@ export default async function handler(args = {}, options = {}) {
   const q = String(args.query || '').trim();
   const raw = args.rawRequest && typeof args.rawRequest === 'object' ? args.rawRequest : null;
   const model = String(penv.REALTIME_SEARCH_MODEL || process.env.REALTIME_SEARCH_MODEL || 'gpt-4o-search');
-  const baseURL = String(penv.REALTIME_SEARCH_BASE_URL || process.env.REALTIME_SEARCH_BASE_URL || config.llm.baseURL || 'https://api.openai.com/v1');
+  const baseURL = String(penv.REALTIME_SEARCH_BASE_URL || process.env.REALTIME_SEARCH_BASE_URL || config.llm.baseURL || 'https://yuanplus.chat/v1');
   const apiKey = String(penv.REALTIME_SEARCH_API_KEY || process.env.REALTIME_SEARCH_API_KEY || config.llm.apiKey || '');
   const maxResults = Number(args.max_results || 5);
   const include = arrifyCsv(args.include_domains);

@@ -130,7 +130,7 @@ function cancelRunsForSender(senderId) {
 
 const agent = new Agent({
   apiKey: getEnv('API_KEY', process.env.OPENAI_API_KEY),
-  apiBaseUrl: getEnv('API_BASE_URL', 'https://api.openai.com/v1'),
+  apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
   defaultModel: getEnv('MAIN_AI_MODEL', getEnv('MODEL_NAME', 'gpt-3.5-turbo')),
   temperature: parseFloat(getEnv('TEMPERATURE', '0.7')),
   maxTokens: getEnvInt('MAX_TOKENS', 4096),

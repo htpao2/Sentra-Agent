@@ -73,10 +73,33 @@ export async function loadPlugins(pluginsDir) {
     const idxPath = path.join(base, 'index.js');
     const envPath = path.join(base, '.env');
     const envAltPath = path.join(base, 'config.env');
+    const envExamplePath = path.join(base, '.env.example');
     try {
       let cfg = {};
       if (fs.existsSync(cfgPath)) {
         try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')); } catch (e) { logger.error(`Invalid JSON in ${dir}/config.json`, { error: String(e) }); }
+      }
+
+      // Auto-bootstrap per-plugin .env from .env.example when missing, so plugins can work out-of-the-box
+      try {
+        if (!fs.existsSync(envPath) && fs.existsSync(envExamplePath)) {
+          fs.copyFileSync(envExamplePath, envPath);
+          try {
+            logger.info('插件缺少 .env，已从 .env.example 自动生成', {
+              label: 'PLUGIN',
+              dir,
+              envPath
+            });
+          } catch {}
+        }
+      } catch (e) {
+        try {
+          logger.warn('自动生成插件 .env 失败，将继续尝试使用备选配置或默认值', {
+            label: 'PLUGIN',
+            dir,
+            error: String(e)
+          });
+        } catch {}
       }
 
       // Per-plugin env overrides (parse BEFORE importing handler so we can decide to skip disabled plugins)
@@ -105,7 +128,7 @@ export async function loadPlugins(pluginsDir) {
 
       if (!enabled) {
         const name = cfg.name || dir;
-        try { logger.info('跳过插件（.env 关闭）', { label: 'PLUGIN', name, dir, reason: 'PLUGIN_ENABLED=false' }); } catch {}
+        try { logger.info('跳过插件（.env 关闭）', { label: 'PLUGIN', name, dir, reason: 'PLUGIN_ENABLED=true' }); } catch {}
         continue; // do not import handler, do not expose in SDK
       }
 
