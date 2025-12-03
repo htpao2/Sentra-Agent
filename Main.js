@@ -221,18 +221,16 @@ if (!ENABLE_USER_PERSONA) {
   logger.info('用户画像功能已禁用（ENABLE_USER_PERSONA=false）');
 }
 
-// 主动欲望/主动回复管理器
+// 主动回复调度器（基于时间衰减概率 + 每小时上限）
 const DESIRE_ENABLED = getEnvBool('DESIRE_ENABLED', true);
 const desireManager = DESIRE_ENABLED
   ? new DesireManager({
       prefix: getEnv('REDIS_DESIRE_PREFIX', 'sentra:desire:'),
-      baseDecayPerMinute: getEnvInt('DESIRE_BASE_DECAY_PER_MIN', 5),
       groupSilentSec: getEnvInt('DESIRE_GROUP_SILENT_SEC', 180),
       privateSilentSec: getEnvInt('DESIRE_PRIVATE_SILENT_SEC', 120),
-      triggerThreshold: getEnvInt('DESIRE_TRIGGER_THRESHOLD', 60),
-      maxProactivePerHour: getEnvInt('DESIRE_MAX_PROACTIVE_PER_HOUR', 3),
-      msgWindowSec: getEnvInt('DESIRE_MSG_WINDOW_SEC', 120),
-      groupMaxMsgPerWindow: getEnvInt('DESIRE_GROUP_MAX_MSG_PER_WINDOW', 8),
+      maxProactivePerHour: getEnvInt('DESIRE_MAX_PROACTIVE_PER_HOUR', 2),
+      msgWindowSec: getEnvInt('DESIRE_MSG_WINDOW_SEC', 180),
+      groupMaxMsgPerWindow: getEnvInt('DESIRE_GROUP_MAX_MSG_PER_WINDOW', 12),
       privateMaxMsgPerWindow: getEnvInt('DESIRE_PRIVATE_MAX_MSG_PER_WINDOW', 12)
     })
   : null;
@@ -309,6 +307,7 @@ async function runProactiveReply(candidate) {
   const lastMsg = candidate.lastMsg;
   const userid = String(lastMsg?.sender_id ?? '');
   const groupIdKey = lastMsg?.group_id ? `G:${lastMsg.group_id}` : `U:${userid}`;
+  const isFirstAfterUser = !!candidate.isFirstAfterUser;
 
   try {
 	const activeCountAtRun = getActiveTaskCount(userid);
@@ -357,6 +356,8 @@ async function runProactiveReply(candidate) {
 	  topicHint = (typeof lastMsg.text === 'string' ? lastMsg.text : '');
 	}
 
+	let plannerTopicHint = topicHint;
+
 	let personaXml = '';
 	if (personaManager && userid) {
 	  try {
@@ -385,24 +386,40 @@ async function runProactiveReply(candidate) {
 	  }
 	}
 
+	if (memoryXml) {
+	  try {
+	    const matches = Array.from(memoryXml.matchAll(/<summary>([\s\S]*?)<\/summary>/g));
+	    const summaries = matches
+	      .map((m) => (m[1] || '').trim())
+	      .filter(Boolean);
+	    if (summaries.length > 0) {
+	      const joined = summaries.join(' / ');
+	      plannerTopicHint = joined.slice(0, 200);
+	    }
+	  } catch (e) {
+	    logger.debug('runProactiveReply: 从上下文记忆提取高层话题失败，将继续使用原有 topicHint', { err: String(e) });
+	  }
+	}
+	
 	const rootXml = await buildProactiveRootDirectiveXml({
 	  chatType: lastMsg.type === 'private' ? 'private' : 'group',
 	  groupId: groupIdKey,
 	  userId: userid,
 	  desireScore: candidate.desireScore,
-	  topicHint,
+	  topicHint: plannerTopicHint,
 	  presetPlainText: AGENT_PRESET_PLAIN_TEXT,
 	  presetXml: AGENT_PRESET_XML,
 	  personaXml,
 	  emoXml,
 	  memoryXml,
-	  conversationContext
+	  conversationContext: null
 	});
 
     // 构造一条“虚拟”的用户消息，标记为主动触发，并通过主流程/MCP 处理
     const proactiveMsg = {
       ...lastMsg,
       _proactive: true,
+      _proactiveFirst: isFirstAfterUser,
       _sentraRootDirectiveXml: rootXml
     };
 
@@ -550,7 +567,6 @@ if (DESIRE_ENABLED && desireManager) {
   setInterval(async () => {
     try {
       const now = Date.now();
-      await desireManager.tick(now);
       const candidates = await desireManager.collectProactiveCandidates(now);
       if (!Array.isArray(candidates) || candidates.length === 0) {
         return;
@@ -584,7 +600,7 @@ if (DESIRE_ENABLED && desireManager) {
         enqueueProactiveCandidate(c);
       }
     } catch (e) {
-      logger.warn('DesireManager tick failed', { err: String(e) });
+      logger.warn('DesireManager proactive scheduler failed', { err: String(e) });
     }
   }, DESIRE_TICK_INTERVAL_MS);
 }

@@ -366,6 +366,7 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
   // 预解析一次用于去重的文本和资源信息
   let textForDedup = '';
   let resourceKeys = [];
+  let emojiKey = '';
   try {
     if (typeof response === 'string') {
       const parsed = parseSentraResponse(response);
@@ -390,6 +391,30 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
           return t && src ? `${t}|${src}` : '';
         })
         .filter(Boolean);
+
+      if (parsed?.emoji?.source) {
+        emojiKey = `emoji|${parsed.emoji.source}`;
+      }
+
+      if (resourceKeys.length > 0) {
+        resourceKeys = Array.from(new Set(resourceKeys));
+      }
+
+      const signatureParts = [];
+      const trimmedText = textForDedup.trim();
+      if (trimmedText) {
+        signatureParts.push(trimmedText);
+      }
+      if (resourceKeys.length > 0) {
+        signatureParts.push(`RES:${resourceKeys.slice().sort().join(',')}`);
+      }
+      if (emojiKey) {
+        signatureParts.push(`EMOJI:${emojiKey}`);
+      }
+
+      if (!trimmedText && signatureParts.length > 0) {
+        textForDedup = signatureParts.join('\n');
+      }
     }
   } catch (e) {
     logger.warn('smartSend: 预解析用于去重的 sentra-response 失败，将回退为基于完整响应字符串的去重', { err: String(e) });
@@ -400,7 +425,7 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
     groupId,
     response: typeof response === 'string' ? response : String(response ?? ''),
     textForDedup,
-    resourceKeys
+    resourceKeys: emojiKey ? [...resourceKeys, emojiKey] : resourceKeys
   };
 
   if (typeof options.hasTool === 'boolean') {

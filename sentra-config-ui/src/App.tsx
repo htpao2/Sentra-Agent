@@ -21,6 +21,7 @@ import { useDockFavorites } from './hooks/useDockFavorites';
 import { useDesktopWindows } from './hooks/useDesktopWindows';
 import { loader } from '@monaco-editor/react';
 import { usePresetsEditor } from './hooks/usePresetsEditor';
+import { useRedisEditor } from './hooks/useRedisEditor';
 import * as monaco from 'monaco-editor';
 
 // Configure Monaco to use local instance (bundled) instead of CDN
@@ -139,6 +140,7 @@ function App() {
     handleRunNapcatStart,
     handleRunUpdate,
     handleRunForceUpdate,
+    handleRunSentiment,
     handleCloseTerminal,
     handleMinimizeTerminal,
   } = useTerminals({ addToast, allocateZ });
@@ -164,6 +166,9 @@ function App() {
   const [fileManagerOpen, setFileManagerOpen] = useState(false);
   const [iosFileManagerOpen, setIosFileManagerOpen] = useState(false);
 
+  // Redis Editor State via hook
+  const redisState = useRedisEditor(addToast);
+
   const handleOpenPresets = () => {
     if (isMobile || isTablet) {
       setIosPresetsEditorOpen(true);
@@ -180,6 +185,11 @@ function App() {
       setFileManagerOpen(true);
       bringToFront('file-manager');
     }
+  };
+
+  const handleOpenRedis = () => {
+    redisState.setRedisEditorOpen(true);
+    bringToFront('redis-editor'); // We'll need to handle z-index for this manually or via hook
   };
 
   // terminal run handlers now provided by useTerminals
@@ -199,8 +209,10 @@ function App() {
     handleRunNapcatStart,
     handleRunUpdate,
     handleRunForceUpdate,
+    handleRunSentiment,
     handleOpenPresets,
     handleOpenFileManager,
+    handleOpenRedis,
   );
 
   // Desktop folders (for desktop view)
@@ -212,6 +224,7 @@ function App() {
     handleRunNapcatStart,
     handleRunUpdate,
     handleRunForceUpdate,
+    handleRunSentiment,
   );
 
   // rotation handled by useWallpaper
@@ -358,6 +371,14 @@ function App() {
       onClick: handleOpenPresets,
       onClose: () => setPresetsEditorOpen(false)
     },
+    {
+      id: 'redis-app',
+      name: 'Redis编辑器',
+      icon: getIconForType('redis', 'module'),
+      isOpen: redisState.redisEditorOpen,
+      onClick: handleOpenRedis,
+      onClose: () => redisState.setRedisEditorOpen(false)
+    },
     ...dockFavorites.map(favId => {
       const item = allItems.find(i => `${i.type}-${i.name}` === favId);
       if (!item) return null;
@@ -474,6 +495,7 @@ function App() {
         setIosFileManagerOpen={setIosFileManagerOpen}
         addToast={addToast}
         presetsState={presetsState}
+        redisState={redisState}
       />
     );
   }
@@ -538,6 +560,7 @@ function App() {
       fileManagerOpen={fileManagerOpen}
       setFileManagerOpen={setFileManagerOpen}
       presetsState={presetsState}
+      redisState={redisState}
       addToast={addToast}
     />
   );

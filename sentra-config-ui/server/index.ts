@@ -5,6 +5,7 @@ import { configRoutes } from './routes/config';
 import { scriptRoutes } from './routes/scripts';
 import { presetRoutes } from './routes/presets';
 import { fileRoutes } from './routes/files';
+import { redisRoutes } from './routes/redis';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import dotenv from 'dotenv';
@@ -79,6 +80,7 @@ async function start() {
   await fastify.register(scriptRoutes);
   await fastify.register(presetRoutes);
   await fastify.register(fileRoutes);
+  await fastify.register(redisRoutes);
 
   // 生产环境提供静态文件
   if (process.env.NODE_ENV === 'production') {

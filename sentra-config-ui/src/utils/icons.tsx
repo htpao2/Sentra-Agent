@@ -25,7 +25,8 @@ import {
   IoChatbubbles,
   IoPeople,
   IoPerson,
-  IoApps
+  IoApps,
+  IoServer
 } from 'react-icons/io5';
 import { BsRobot } from 'react-icons/bs';
 
@@ -138,6 +139,7 @@ export const getIconForType = (name: string, type: 'module' | 'plugin'): React.R
   if (n.includes('sentra-emo')) return <AppIconWrapper bg="linear-gradient(135deg, #f093fb 0%, #f5576c 100%)"><FcStart /></AppIconWrapper>;
   if (n.includes('sentra-adapter')) return <AppIconWrapper bg="linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)"><FcSettings /></AppIconWrapper>;
   if (n.includes('sentra-rag')) return <AppIconWrapper bg="linear-gradient(135deg, #fa709a 0%, #fee140 100%)"><FcMindMap /></AppIconWrapper>;
+  if (n.includes('redis') || n.includes('agent-redis')) return <AppIconWrapper bg="linear-gradient(135deg, #ff512f 0%, #dd2476 100%)"><IoServer color="white" /></AppIconWrapper>;
 
   // Search & Web - Different shades of blue/green
   if (n.includes('bilibili')) return <AppIconWrapper bg="linear-gradient(135deg, #00c6ff 0%, #0072ff 100%)"><IoLogoYoutube color="white" /></AppIconWrapper>;

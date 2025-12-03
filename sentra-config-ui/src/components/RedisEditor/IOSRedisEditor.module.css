@@ -1,0 +1,462 @@
+.container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: #000;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Connections View */
+.connectionsList {
+    padding: 20px;
+}
+
+.sectionTitle {
+    font-size: 14px;
+    font-weight: 600;
+    color: #888;
+    margin-bottom: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.connectionCard {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px;
+    background: #1c1c1e;
+    border-radius: 12px;
+    margin-bottom: 12px;
+    cursor: pointer;
+}
+
+.connectionInfo {
+    flex: 1;
+}
+
+.connectionName {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.connectionHost {
+    font-size: 13px;
+    color: #888;
+}
+
+.connectForm {
+    padding: 20px;
+    flex: 1;
+}
+
+.formTitle {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 24px;
+}
+
+.formGroup {
+    margin-bottom: 20px;
+}
+
+.formLabel {
+    display: block;
+    font-size: 14px;
+    font-weight: 500;
+    color: #888;
+    margin-bottom: 8px;
+}
+
+.formInput {
+    width: 100%;
+    padding: 14px;
+    background: #1c1c1e;
+    border: 1px solid #333;
+    border-radius: 10px;
+    color: #fff;
+    font-size: 16px;
+    outline: none;
+}
+
+.formInput:focus {
+    border-color: #dd2476;
+}
+
+.connectBtn {
+    width: 100%;
+    padding: 16px;
+    background: linear-gradient(135deg, #ff512f 0%, #dd2476 100%);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+    margin-top: 8px;
+}
+
+/* Toolbar */
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    background: #1c1c1e;
+    border-bottom: 1px solid #333;
+}
+
+.backBtn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    color: #0a84ff;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+.tabs {
+    flex: 1;
+    display: flex;
+    gap: 16px;
+}
+
+.tab {
+    padding: 8px 0;
+    font-size: 14px;
+    font-weight: 500;
+    color: #888;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+}
+
+.tab.active {
+    color: #fff;
+    border-bottom-color: #dd2476;
+}
+
+.disconnectBtn {
+    padding: 8px 16px;
+    background: #ff453a;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+/* Search Bar */
+.searchBar {
+    padding: 16px 20px;
+    display: flex;
+    gap: 12px;
+    background: #000;
+}
+
+.searchInput {
+    flex: 1;
+    padding: 12px;
+    background: #1c1c1e;
+    border: 1px solid #333;
+    border-radius: 10px;
+    color: #fff;
+    font-size: 16px;
+    outline: none;
+}
+
+.searchInput:focus {
+    border-color: #dd2476;
+}
+
+.refreshBtn {
+    padding: 12px 16px;
+    background: #dd2476;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Keys List */
+.keysList {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 20px 20px;
+}
+
+.keyCard {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    background: #1c1c1e;
+    border-radius: 12px;
+    margin-bottom: 10px;
+    cursor: pointer;
+}
+
+.keyName {
+    flex: 1;
+    font-size: 15px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    word-break: break-all;
+}
+
+/* Value View */
+.valueHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    background: #1c1c1e;
+    border-bottom: 1px solid #333;
+}
+
+.valueActions {
+    display: flex;
+    gap: 12px;
+}
+
+.editBtn {
+    padding: 8px 16px;
+    background: #dd2476;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.deleteBtn {
+    padding: 8px 12px;
+    background: #ff453a;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+}
+
+.keyInfo {
+    padding: 20px;
+    background: #000;
+}
+
+.keyInfo .keyName {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    word-break: break-all;
+}
+
+.typeBadge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    background: #333;
+    color: #888;
+    padding: 4px 12px;
+    border-radius: 6px;
+    text-transform: uppercase;
+}
+
+.valueContainer {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 20px 20px;
+}
+
+/* Hash View */
+.hashView {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.hashItem {
+    background: #1c1c1e;
+    border-radius: 10px;
+    padding: 16px;
+}
+
+.fieldName {
+    font-size: 13px;
+    font-weight: 600;
+    color: #dd2476;
+    margin-bottom: 8px;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.fieldValue {
+    font-size: 15px;
+    color: #fff;
+    word-break: break-all;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+/* List View */
+.listView {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.listItem {
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    background: #1c1c1e;
+    border-radius: 10px;
+}
+
+.listIndex {
+    color: #888;
+    font-weight: 600;
+    min-width: 40px;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.listValue {
+    flex: 1;
+    color: #fff;
+    word-break: break-all;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+/* JSON/Editor View */
+.jsonView {
+    background: #1c1c1e;
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.editorContainer {
+    background: #1c1c1e;
+    border-radius: 12px;
+    overflow: hidden;
+    padding-bottom: 16px;
+}
+
+.editActions {
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+}
+
+.saveBtn {
+    flex: 1;
+    padding: 14px;
+    background: #dd2476;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.cancelBtn {
+    flex: 1;
+    padding: 14px;
+    background: #333;
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+.valueContent {
+    width: 100%;
+    min-height: 300px;
+    padding: 16px;
+    background: #1c1c1e;
+    border: 1px solid #333;
+    border-radius: 12px;
+    color: #fff;
+    font-size: 15px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    resize: vertical;
+    outline: none;
+}
+
+.emptyState {
+    color: #888;
+    text-align: center;
+    padding: 60px 20px;
+    font-size: 16px;
+}
+
+/* Terminal */
+.terminal {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #000;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', monospace;
+    padding: 20px;
+}
+
+.terminalOutput {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.terminalLine {
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.terminalLine.input {
+    color: #888;
+}
+
+.terminalLine.output {
+    color: #d4d4d4;
+}
+
+.terminalLine.error {
+    color: #ff453a;
+}
+
+.terminalInputArea {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    padding: 14px;
+    background: #1c1c1e;
+    border-radius: 10px;
+}
+
+.terminalPrompt {
+    color: #30d158;
+    font-weight: 600;
+}
+
+.terminalInput {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: #d4d4d4;
+    outline: none;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 15px;
+}

@@ -10,10 +10,11 @@ import { ToastContainer, ToastMessage } from '../components/Toast';
 import { Dialog } from '../components/Dialog';
 import { Menu, Item, Submenu, useContextMenu } from 'react-contexify';
 import { getDisplayName, getIconForType } from '../utils/icons';
-import { IoCubeOutline, IoTerminalOutline, IoFolderOpen } from 'react-icons/io5';
+import { IoCubeOutline, IoTerminalOutline, IoFolderOpen, IoServer } from 'react-icons/io5';
 import { FileManager } from '../components/FileManager';
 import type { DeskWindow, DesktopIcon, FileItem, TerminalWin, AppFolder } from '../types/ui';
 import { AppFolderModal } from '../components/AppFolderModal';
+import { RedisEditor } from '../components/RedisEditor/RedisEditor';
 
 export type DesktopViewProps = {
   isSolidColor: boolean;
@@ -93,6 +94,7 @@ export type DesktopViewProps = {
   setFileManagerOpen: (open: boolean) => void;
   addToast: (type: 'success' | 'error' | 'info', title: string, message?: string) => void;
   presetsState: any; // Type will be refined in component
+  redisState: any;
 };
 
 export function DesktopView(props: DesktopViewProps) {
@@ -155,6 +157,7 @@ export function DesktopView(props: DesktopViewProps) {
     setFileManagerOpen,
     presetsState,
     addToast,
+    redisState,
   } = props;
 
   // Folder state
@@ -307,6 +310,26 @@ export function DesktopView(props: DesktopViewProps) {
         </MacWindow>
       )}
 
+      {redisState.redisEditorOpen && (
+        <MacWindow
+          id="redis-editor"
+          title="Redis 连接编辑器"
+          icon={<IoServer style={{ color: '#dd2476' }} />}
+          zIndex={102}
+          isActive={true}
+          isMinimized={false}
+          initialPos={{ x: 120, y: 60 }}
+          initialSize={{ width: 1000, height: 650 }}
+          onClose={() => redisState.setRedisEditorOpen(false)}
+          onMinimize={() => redisState.setRedisEditorOpen(false)}
+          onMaximize={() => { }}
+          onFocus={() => bringToFront('redis-editor')}
+          onMove={() => { }}
+        >
+          <RedisEditor theme={theme} state={redisState} />
+        </MacWindow>
+      )}
+
       {/* Desktop Folders or Icons */}
       {desktopFolders ? (
         <>
@@ -359,6 +382,55 @@ export function DesktopView(props: DesktopViewProps) {
               // startX = 30, gap = 120, startY = 80 (from buildDesktopIcons.tsx)
               const folderCount = desktopFolders.length;
               const leftPos = 30 + (folderCount * 120);
+
+              return (
+                <div
+                  key={icon.id}
+                  style={{
+                    position: 'absolute',
+                    left: leftPos,
+                    top: 80,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    cursor: 'pointer',
+                    padding: '8px',
+                    borderRadius: '12px',
+                    transition: 'all 0.2s',
+                    width: 90,
+                  }}
+                  onClick={icon.onClick}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)';
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.transform = 'translateY(0)';
+                  }}
+                >
+                  <div style={{ marginBottom: 8 }}>{icon.icon}</div>
+                  <div style={{
+                    fontSize: 12,
+                    color: 'white',
+                    textShadow: '0 1px 3px rgba(0,0,0,0.8)',
+                    fontWeight: 500,
+                    textAlign: 'center',
+                    lineHeight: 1.2,
+                  }}>
+                    {icon.name}
+                  </div>
+                </div>
+              );
+            })()
+          )}
+
+          {/* Redis Editor Icon */}
+          {desktopIcons?.find(i => i.id === 'desktop-redis') && (
+            (() => {
+              const icon = desktopIcons.find(i => i.id === 'desktop-redis')!;
+              const folderCount = desktopFolders.length;
+              const leftPos = 30 + (folderCount * 120) + 120; // After File Manager
 
               return (
                 <div

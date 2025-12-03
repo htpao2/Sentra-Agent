@@ -41,6 +41,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
   const currentTaskId = taskId;
 
   const isProactive = !!msg?._proactive;
+  const isProactiveFirst = !!msg?._proactiveFirst;
   const proactiveRootXml =
     typeof msg?._sentraRootDirectiveXml === 'string' && msg._sentraRootDirectiveXml.trim()
       ? msg._sentraRootDirectiveXml.trim()
@@ -172,27 +173,36 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
       logger.warn(`时间解析或历史筛选失败: ${groupId}`, { err: String(e) });
     }
 
-    const mcpHistory = convertHistoryToMCPFormat(historyConversations);
+    // 主动回合的后续自我延展：仅依赖 root 指令 + 系统摘要，不再注入逐条对话历史，避免过度黏着用户最近话题
+    const effectiveHistoryConversations = isProactive && !isProactiveFirst ? [] : historyConversations;
+
+    const mcpHistory = convertHistoryToMCPFormat(effectiveHistoryConversations);
 
     // 复用构建逻辑：pending-messages（如果有） + sentra-user-question（当前消息）
     const latestMsg = senderMessages[senderMessages.length - 1] || msg;
-    const pendingContextXml = historyManager.getPendingMessagesContext(groupId, userid);
-    const userQuestionXml = buildSentraUserQuestionBlock(latestMsg);
-    const combinedUserContent = pendingContextXml
-      ? pendingContextXml + '\n\n' + userQuestionXml
-      : userQuestionXml;
-    currentUserContent = proactiveRootXml
-      ? `${proactiveRootXml}\n\n${combinedUserContent}`
-      : combinedUserContent;
+
+    if (isProactive && !isProactiveFirst) {
+      // 后续主动回合：仅依赖 root 指令和系统上下文，不再重新注入用户问题
+      currentUserContent = proactiveRootXml || '';
+    } else {
+      const pendingContextXml = historyManager.getPendingMessagesContext(groupId, userid);
+      const userQuestionXml = buildSentraUserQuestionBlock(latestMsg);
+      const combinedUserContent = pendingContextXml
+        ? pendingContextXml + '\n\n' + userQuestionXml
+        : userQuestionXml;
+      currentUserContent = proactiveRootXml
+        ? `${proactiveRootXml}\n\n${combinedUserContent}`
+        : combinedUserContent;
+    }
 
     const conversation = [
-      ...mcpHistory, // 历史上下文（user 的 sentra-user-question + assistant 的 sentra-tools）
+      ...mcpHistory, // 历史上下文（user 的 sentra-user-question + assistant 的 sentra-tools），仅在需要时保留
       { role: 'user', content: currentUserContent } // 当前任务（XML 块）
     ];
 
     //console.log(JSON.stringify(conversation, null, 2))
     logger.debug(
-      `MCP上下文: ${groupId} 使用历史${historyConversations.length}条 (limit=${contextPairsLimit}) → 转换后${mcpHistory.length}条 + 当前1条 = 总计${conversation.length}条`
+      `MCP上下文: ${groupId} 使用历史${effectiveHistoryConversations.length}条 (limit=${contextPairsLimit}) → 转换后${mcpHistory.length}条 + 当前1条 = 总计${conversation.length}条`
     );
 
     // 获取用户画像（如果启用）
@@ -320,22 +330,28 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
 
           const latestMsgJudge = senderMessages[senderMessages.length - 1] || msg;
 
-          // 获取历史上下文（仅供参考，只包含该 sender 的历史消息）
-          const contextXml = historyManager.getPendingMessagesContext(groupId, userid);
-          // 构建当前需要回复的消息（主要内容）- 使用最新的消息
-          const userQuestion = buildSentraUserQuestionBlock(latestMsgJudge);
-
-          // 组合上下文：历史上下文 + 当前消息
           let judgeBaseContent;
-          if (contextXml) {
-            judgeBaseContent = contextXml + '\n\n' + userQuestion;
+          if (isProactive && !isProactiveFirst) {
+            // 后续主动回合：不再围绕最近用户消息构造 user-question，仅使用 root 指令
+            judgeBaseContent = '';
+            currentUserContent = proactiveRootXml || '';
           } else {
-            judgeBaseContent = userQuestion;
-          }
+            // 获取历史上下文（仅供参考，只包含该 sender 的历史消息）
+            const contextXml = historyManager.getPendingMessagesContext(groupId, userid);
+            // 构建当前需要回复的消息（主要内容）- 使用最新的消息
+            const userQuestion = buildSentraUserQuestionBlock(latestMsgJudge);
 
-          currentUserContent = proactiveRootXml
-            ? `${proactiveRootXml}\n\n${judgeBaseContent}`
-            : judgeBaseContent;
+            // 组合上下文：历史上下文 + 当前消息
+            if (contextXml) {
+              judgeBaseContent = contextXml + '\n\n' + userQuestion;
+            } else {
+              judgeBaseContent = userQuestion;
+            }
+
+            currentUserContent = proactiveRootXml
+              ? `${proactiveRootXml}\n\n${judgeBaseContent}`
+              : judgeBaseContent;
+          }
 
           // Judge 判定无需工具：为当前对话显式注入占位工具与结果，便于后续模型判断
           try {
@@ -480,20 +496,25 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
 
           const latestMsgTool = senderMessages[senderMessages.length - 1] || msg;
 
-          // 获取该 sender 的历史上下文
-          const contextXml = historyManager.getPendingMessagesContext(groupId, userid);
-          const userQuestion = buildSentraUserQuestionBlock(latestMsgTool);
-
-          let toolBaseContent;
-          if (contextXml) {
-            toolBaseContent = contextXml + '\n\n' + userQuestion;
+          if (isProactive && !isProactiveFirst) {
+            // 后续主动回合：仅基于 root 指令和工具结果做总结，不重新注入用户问题
+            currentUserContent = proactiveRootXml || '';
           } else {
-            toolBaseContent = userQuestion;
-          }
+            // 获取该 sender 的历史上下文
+            const contextXml = historyManager.getPendingMessagesContext(groupId, userid);
+            const userQuestion = buildSentraUserQuestionBlock(latestMsgTool);
 
-          currentUserContent = proactiveRootXml
-            ? `${proactiveRootXml}\n\n${toolBaseContent}`
-            : toolBaseContent;
+            let toolBaseContent;
+            if (contextXml) {
+              toolBaseContent = contextXml + '\n\n' + userQuestion;
+            } else {
+              toolBaseContent = userQuestion;
+            }
+
+            currentUserContent = proactiveRootXml
+              ? `${proactiveRootXml}\n\n${toolBaseContent}`
+              : toolBaseContent;
+          }
         }
 
         // 构建结果观测块

@@ -1,5 +1,5 @@
 import { getRedis, isRedisReady } from './redisClient.js';
-import { getEnv, getEnvInt } from './envHotReloader.js';
+import { getEnv, getEnvInt, getEnvBool } from './envHotReloader.js';
 import { createLogger } from './logger.js';
 
 const logger = createLogger('DesireManager');
@@ -13,9 +13,7 @@ const PRIVATE_SILENT_SEC = getEnvInt('DESIRE_PRIVATE_SILENT_SEC', 120);
 const GROUP_MIN_SINCE_USER_SEC = getEnvInt('DESIRE_GROUP_MIN_SINCE_USER_SEC', 60);
 const PRIVATE_MIN_SINCE_USER_SEC = getEnvInt('DESIRE_PRIVATE_MIN_SINCE_USER_SEC', 30);
 
-const TRIGGER_THRESHOLD = getEnvInt('DESIRE_TRIGGER_THRESHOLD', 60);
 const MAX_PROACTIVE_PER_HOUR = getEnvInt('DESIRE_MAX_PROACTIVE_PER_HOUR', 3);
-const BASE_DECAY_PER_MIN = getEnvInt('DESIRE_BASE_DECAY_PER_MIN', 5);
 
 const MSG_WINDOW_SEC = getEnvInt('DESIRE_MSG_WINDOW_SEC', 120);
 const GROUP_MAX_MSG_PER_WINDOW = getEnvInt('DESIRE_GROUP_MAX_MSG_PER_WINDOW', 8);
@@ -24,6 +22,21 @@ const PRIVATE_MAX_MSG_PER_WINDOW = getEnvInt('DESIRE_PRIVATE_MAX_MSG_PER_WINDOW'
 // 主动回复活跃时间段（本地小时 0-23）
 const ACTIVE_HOUR_START = getEnvInt('DESIRE_ACTIVE_HOUR_START', 8);
 const ACTIVE_HOUR_END = getEnvInt('DESIRE_ACTIVE_HOUR_END', 23);
+
+const PROACTIVE_INTENSITY = Number.parseFloat(getEnv('DESIRE_PROACTIVE_INTENSITY', '1'));
+
+const USER_FATIGUE_ENABLED = getEnvBool('DESIRE_USER_FATIGUE_ENABLED', true);
+const USER_FATIGUE_RESPONSE_WINDOW_SEC = getEnvInt('DESIRE_USER_FATIGUE_RESPONSE_WINDOW_SEC', 300);
+const USER_FATIGUE_MAX_STRIKES = getEnvInt('DESIRE_USER_FATIGUE_MAX_STRIKES', 3);
+const USER_FATIGUE_PENALTY_FACTOR = Number.parseFloat(
+  getEnv('DESIRE_USER_FATIGUE_PENALTY_FACTOR', '0.2')
+);
+const USER_FATIGUE_PENALTY_DURATION_SEC = getEnvInt(
+  'DESIRE_USER_FATIGUE_PENALTY_DURATION_SEC',
+  3600
+);
+const USER_FATIGUE_TTL_SECONDS = getEnvInt('DESIRE_USER_FATIGUE_TTL_SECONDS', 86400);
+const USER_FATIGUE_PREFIX = getEnv('REDIS_DESIRE_USER_FATIGUE_PREFIX', 'sentra:desire:user:');
 
 function getRedisSafe() {
   const r = getRedis();
@@ -40,7 +53,6 @@ function getBaseState() {
     lastUserAt: 0,
     lastBotAt: 0,
     lastProactiveAt: 0,
-    desire: 0,
     lastUpdateAt: now,
     msgWindowStart: now,
     msgCount: 0,
@@ -59,18 +71,12 @@ function clamp(value, min, max) {
 export default class DesireManager {
   constructor(options = {}) {
     this.prefix = options.prefix || DEFAULT_PREFIX;
-    this.baseDecayPerMinute = Number.isFinite(options.baseDecayPerMinute)
-      ? options.baseDecayPerMinute
-      : BASE_DECAY_PER_MIN;
     this.groupSilentSec = Number.isFinite(options.groupSilentSec)
       ? options.groupSilentSec
       : GROUP_SILENT_SEC;
     this.privateSilentSec = Number.isFinite(options.privateSilentSec)
       ? options.privateSilentSec
       : PRIVATE_SILENT_SEC;
-    this.triggerThreshold = Number.isFinite(options.triggerThreshold)
-      ? options.triggerThreshold
-      : TRIGGER_THRESHOLD;
     this.maxProactivePerHour = Number.isFinite(options.maxProactivePerHour)
       ? options.maxProactivePerHour
       : MAX_PROACTIVE_PER_HOUR;
@@ -160,89 +166,166 @@ export default class DesireManager {
     }
   }
 
-  _computeScore(state, now) {
-    const chatType = state.chatType || 'group';
-    const lastUserAt = state.lastUserAt || 0;
-    const lastBotAt = state.lastBotAt || 0;
-    const lastProactiveAt = state.lastProactiveAt || 0;
+  _makeUserFatigueKey(userId) {
+    if (!userId) return null;
+    return `${USER_FATIGUE_PREFIX}${userId}`;
+  }
 
-    const sinceUserSec = lastUserAt ? (now - lastUserAt) / 1000 : Infinity;
-    const sinceBotSec = lastBotAt ? (now - lastBotAt) / 1000 : Infinity;
-    const sinceProactiveSec = lastProactiveAt ? (now - lastProactiveAt) / 1000 : Infinity;
+  async _loadUserFatigue(userId) {
+    const key = this._makeUserFatigueKey(userId);
+    const base = { strikes: 0, lastProactiveAt: 0, lastUserReplyAt: 0, penaltyUntil: 0 };
 
-    const msgCount = state.msgCount || 0;
-    const hourNow = new Date(now).getHours();
-
-    let score = 0;
-
-    // 1. 冷场程度：用户与机器人的静默时长
-    const baseMinSinceUser =
-      chatType === 'group' ? GROUP_MIN_SINCE_USER_SEC : PRIVATE_MIN_SINCE_USER_SEC;
-    const baseSilentSec =
-      chatType === 'group'
-        ? this.groupSilentSec || GROUP_SILENT_SEC
-        : this.privateSilentSec || PRIVATE_SILENT_SEC;
-
-    if (sinceUserSec >= baseMinSinceUser && Number.isFinite(sinceUserSec)) {
-      const upper = baseSilentSec * 2 || baseMinSinceUser * 2 || 1;
-      const norm = clamp(
-        (sinceUserSec - baseMinSinceUser) / Math.max(upper - baseMinSinceUser, 1),
-        0,
-        1
-      );
-      score += norm * 40; // 0-40 分：越久没人说话越容易触发
+    if (!key) {
+      return { ...base };
     }
 
-    if (sinceBotSec >= baseSilentSec && Number.isFinite(sinceBotSec)) {
-      const denom = baseSilentSec * 4 || 1;
-      const norm = clamp((sinceBotSec - baseSilentSec) / denom, 0, 1);
-      score += 10 + norm * 10; // 10-20 分：机器人越久没说话，越有理由主动
+    const redis = getRedisSafe();
+    if (!redis) {
+      return { ...base };
     }
 
-    // 2. 最近一小段时间的消息频率：适度活跃更适合主动插话
-    const maxMsg =
-      chatType === 'group'
-        ? this.groupMaxMsgPerWindow || GROUP_MAX_MSG_PER_WINDOW
-        : this.privateMaxMsgPerWindow || PRIVATE_MAX_MSG_PER_WINDOW;
+    try {
+      const raw = await redis.get(key);
+      if (!raw) {
+        return { ...base };
+      }
+      const parsed = JSON.parse(raw);
+      const merged = { ...base, ...(parsed && typeof parsed === 'object' ? parsed : {}) };
+      return {
+        strikes: Number.isFinite(merged.strikes) ? merged.strikes : 0,
+        lastProactiveAt: Number.isFinite(merged.lastProactiveAt) ? merged.lastProactiveAt : 0,
+        lastUserReplyAt: Number.isFinite(merged.lastUserReplyAt) ? merged.lastUserReplyAt : 0,
+        penaltyUntil: Number.isFinite(merged.penaltyUntil) ? merged.penaltyUntil : 0
+      };
+    } catch (e) {
+      logger.debug('DesireManager: load user fatigue failed, fallback to base', {
+        userId,
+        err: String(e)
+      });
+      return { ...base };
+    }
+  }
 
-    if (msgCount === 0) {
-      // 完全无历史互动：不额外加分，交给其他因素
-    } else if (msgCount <= maxMsg / 2) {
-      score += 15; // 轻度活跃后冷场：比较适合来一句
-    } else if (msgCount <= maxMsg) {
-      score += 5; // 稍微热闹，但还没到高频刷屏
+  async _saveUserFatigue(userId, state) {
+    const key = this._makeUserFatigueKey(userId);
+    if (!key) return;
+
+    const redis = getRedisSafe();
+    if (!redis) return;
+
+    const base = { strikes: 0, lastProactiveAt: 0, lastUserReplyAt: 0, penaltyUntil: 0 };
+    const normalized = { ...base, ...(state || {}) };
+
+    try {
+      const payload = JSON.stringify(normalized);
+      const ttl = Number.isFinite(USER_FATIGUE_TTL_SECONDS) && USER_FATIGUE_TTL_SECONDS > 0
+        ? USER_FATIGUE_TTL_SECONDS
+        : 0;
+      if (ttl > 0) {
+        await redis.set(key, payload, 'EX', ttl);
+      } else {
+        await redis.set(key, payload);
+      }
+    } catch (e) {
+      logger.debug('DesireManager: save user fatigue failed (ignored)', {
+        userId,
+        err: String(e)
+      });
+    }
+  }
+
+  async _updateUserFatigueOnUserMessage(userId, now) {
+    if (!USER_FATIGUE_ENABLED || !userId) return;
+
+    const windowSec = Math.max(0, USER_FATIGUE_RESPONSE_WINDOW_SEC || 0);
+    const windowMs = windowSec * 1000;
+    const nowMs = now;
+
+    const state = await this._loadUserFatigue(userId);
+    const lastProactiveAt = Number.isFinite(state.lastProactiveAt) ? state.lastProactiveAt : 0;
+
+    state.lastUserReplyAt = nowMs;
+
+    if (lastProactiveAt > 0 && windowMs > 0) {
+      const delta = nowMs - lastProactiveAt;
+      if (delta >= 0 && delta <= windowMs) {
+        state.strikes = 0;
+        state.penaltyUntil = 0;
+      }
     }
 
-    // 3. 时间段：避免深夜打扰，非活跃时间整体降权
-    let activeStart = ACTIVE_HOUR_START;
-    let activeEnd = ACTIVE_HOUR_END;
-    if (!Number.isFinite(activeStart)) activeStart = 8;
-    if (!Number.isFinite(activeEnd)) activeEnd = 23;
+    await this._saveUserFatigue(userId, state);
+  }
 
-    let isActiveHour;
-    if (activeStart === activeEnd) {
-      // 等于表示全天都视为活跃
-      isActiveHour = true;
-    } else if (activeStart < activeEnd) {
-      isActiveHour = hourNow >= activeStart && hourNow < activeEnd;
-    } else {
-      // 处理例如 22-6 这种跨午夜区间
-      isActiveHour = hourNow >= activeStart || hourNow < activeEnd;
+  async _updateUserFatigueOnProactive(userId, now) {
+    if (!USER_FATIGUE_ENABLED || !userId) return;
+
+    const windowSec = Math.max(0, USER_FATIGUE_RESPONSE_WINDOW_SEC || 0);
+    const windowMs = windowSec * 1000;
+    const nowMs = now;
+    const maxStrikes = Math.max(1, USER_FATIGUE_MAX_STRIKES || 1);
+
+    const state = await this._loadUserFatigue(userId);
+    const lastProactiveAt = Number.isFinite(state.lastProactiveAt) ? state.lastProactiveAt : 0;
+    const lastUserReplyAt = Number.isFinite(state.lastUserReplyAt) ? state.lastUserReplyAt : 0;
+
+    if (lastProactiveAt > 0 && windowMs > 0) {
+      const repliedInWindow =
+        lastUserReplyAt >= lastProactiveAt && lastUserReplyAt - lastProactiveAt <= windowMs;
+      const episodeFinished = nowMs - lastProactiveAt >= windowMs;
+
+      if (repliedInWindow) {
+        state.strikes = 0;
+        state.penaltyUntil = 0;
+      } else if (episodeFinished) {
+        state.strikes = (state.strikes || 0) + 1;
+      }
     }
 
-    if (isActiveHour) {
-      score += 10;
-    } else {
-      score -= 20;
+    if (state.strikes >= maxStrikes) {
+      const penaltyDurationSec = Math.max(0, USER_FATIGUE_PENALTY_DURATION_SEC || 0);
+      const penaltyDurationMs = penaltyDurationSec * 1000;
+      if (penaltyDurationMs > 0) {
+        const candidateUntil = nowMs + penaltyDurationMs;
+        const currentUntil = Number.isFinite(state.penaltyUntil) ? state.penaltyUntil : 0;
+        state.penaltyUntil = Math.max(currentUntil, candidateUntil);
+      }
     }
 
-    // 4. 最近主动频率惩罚：一小时内刚主动过则明显降权
-    if (Number.isFinite(sinceProactiveSec) && sinceProactiveSec < 3600) {
-      const norm = clamp((3600 - sinceProactiveSec) / 3600, 0, 1);
-      score -= norm * 30;
+    state.strikes = Math.max(0, state.strikes || 0);
+    state.lastProactiveAt = nowMs;
+
+    await this._saveUserFatigue(userId, state);
+  }
+
+  async _getUserFatigueFactor(userId, now, cache) {
+    if (!USER_FATIGUE_ENABLED || !userId) {
+      return 1;
     }
 
-    return score;
+    if (cache && cache.has(userId)) {
+      return cache.get(userId);
+    }
+
+    const state = await this._loadUserFatigue(userId);
+    const nowMs = now;
+    const penaltyUntil = Number.isFinite(state.penaltyUntil) ? state.penaltyUntil : 0;
+    const strikes = Number.isFinite(state.strikes) ? state.strikes : 0;
+    const maxStrikes = Math.max(1, USER_FATIGUE_MAX_STRIKES || 1);
+
+    let factor = 1;
+    if (penaltyUntil > nowMs && strikes >= maxStrikes) {
+      const base = Number.isFinite(USER_FATIGUE_PENALTY_FACTOR)
+        ? USER_FATIGUE_PENALTY_FACTOR
+        : 0.2;
+      factor = clamp(base, 0, 1);
+    }
+
+    if (cache) {
+      cache.set(userId, factor);
+    }
+
+    return factor;
   }
 
   async onUserMessage(msg) {
@@ -279,6 +362,18 @@ export default class DesireManager {
     state.lastUpdateAt = now;
 
     await this._saveState(conversationKey, state);
+
+    const userId = state.userId || (msg.sender_id != null ? String(msg.sender_id) : '');
+    if (userId) {
+      try {
+        await this._updateUserFatigueOnUserMessage(userId, now);
+      } catch (e) {
+        logger.debug('DesireManager: update user fatigue on user message failed', {
+          userId,
+          err: String(e)
+        });
+      }
+    }
   }
 
   async onBotMessage(msg, options = {}) {
@@ -300,63 +395,23 @@ export default class DesireManager {
       } else {
         state.proactiveCount = (state.proactiveCount || 0) + 1;
       }
-      // 主动触发后，当前会话的欲望值直接清零，由后续时间衰减/增强重新累积
-      state.desire = 0;
     }
 
     state.lastUpdateAt = now;
     await this._saveState(conversationKey, state);
-  }
 
-  async tick(now = Date.now()) {
-    const updates = [];
-    for (const [conversationKey, stateRaw] of this.localCache.entries()) {
-      const state = { ...getBaseState(), ...(stateRaw || {}) };
-      const lastUpdate = Number.isFinite(state.lastUpdateAt) ? state.lastUpdateAt : now;
-      const deltaMs = now - lastUpdate;
-      if (!Number.isFinite(deltaMs) || deltaMs <= 0) continue;
-
-      const minutes = deltaMs / 60000;
-      const decayPerMin = this.baseDecayPerMinute || BASE_DECAY_PER_MIN;
-      let changed = false;
-
-      const currentDesire = Number.isFinite(state.desire) ? state.desire : 0;
-      let nextDesire = currentDesire;
-
-      // 1. 时间衰减：长时间未更新时，逐步降低欲望值
-      if (decayPerMin > 0 && currentDesire > 0 && minutes > 0) {
-        const decayed = currentDesire - decayPerMin * minutes;
-        nextDesire = decayed < 0 ? 0 : decayed;
-        changed = true;
-      }
-
-      // 2. 时间增强：在符合冷场等条件且综合得分较高时，缓慢积累欲望
-      //    这样不会因为单次瞬时状态就立刻触发，而是需要一段时间持续冷场
-      const scoreNow = this._computeScore(state, now);
-      const thresholdBase = this.triggerThreshold || TRIGGER_THRESHOLD;
-      if (scoreNow > thresholdBase / 2 && minutes > 0) {
-        const rawGain = (scoreNow - thresholdBase / 2) * minutes;
-        const difficulty = 1 + (state.proactiveCount || 0); // 主动次数越多，后续越难再次积累
-        const gain = rawGain > 0 && difficulty > 0 ? rawGain / difficulty : 0;
-        if (gain > 0) {
-          const maxDesire = thresholdBase * 3; // 上限做个保护，避免无限增长
-          nextDesire = nextDesire + gain;
-          if (nextDesire > maxDesire) {
-            nextDesire = maxDesire;
-          }
-          changed = true;
+    if (proactive) {
+      const userId = state.userId || (msg.sender_id != null ? String(msg.sender_id) : '');
+      if (userId) {
+        try {
+          await this._updateUserFatigueOnProactive(userId, now);
+        } catch (e) {
+          logger.debug('DesireManager: update user fatigue on proactive failed', {
+            userId,
+            err: String(e)
+          });
         }
       }
-
-      if (changed) {
-        state.desire = nextDesire;
-        state.lastUpdateAt = now;
-        updates.push(this._saveState(conversationKey, state));
-      }
-    }
-
-    if (updates.length > 0) {
-      await Promise.allSettled(updates);
     }
   }
 
@@ -364,15 +419,61 @@ export default class DesireManager {
     const result = [];
     const hourMs = 60 * 60 * 1000;
 
+    // 在非活跃时间段内，直接禁止产生任何主动候选
+    let activeStart = ACTIVE_HOUR_START;
+    let activeEnd = ACTIVE_HOUR_END;
+    if (!Number.isFinite(activeStart)) activeStart = 8;
+    if (!Number.isFinite(activeEnd)) activeEnd = 23;
+
+    const hourNow = new Date(now).getHours();
+    let isActiveHour;
+    if (activeStart === activeEnd) {
+      isActiveHour = true;
+    } else if (activeStart < activeEnd) {
+      isActiveHour = hourNow >= activeStart && hourNow < activeEnd;
+    } else {
+      isActiveHour = hourNow >= activeStart || hourNow < activeEnd;
+    }
+
+    if (!isActiveHour) {
+      return result;
+    }
+
+    // 计算每 tick 的基础触发概率，使一小时内期望最多发送 maxProactivePerHour 条
+    const tickMs = getEnvInt('DESIRE_TICK_INTERVAL_MS', 60000);
+    const safeTickMs = tickMs > 0 ? tickMs : 60000;
+    const ticksPerHour = Math.max(1, Math.round(hourMs / safeTickMs));
+    const rawBaseProbPerTick = this.maxProactivePerHour > 0
+      ? this.maxProactivePerHour / ticksPerHour
+      : 0;
+
+    const intensity = Number.isFinite(PROACTIVE_INTENSITY) && PROACTIVE_INTENSITY > 0
+      ? PROACTIVE_INTENSITY
+      : 1;
+
+    const baseProbPerTick = rawBaseProbPerTick * intensity;
+
+    if (baseProbPerTick <= 0) {
+      return result;
+    }
+
+    const userFatigueCache = new Map();
+
     for (const [conversationKey, stateRaw] of this.localCache.entries()) {
       const state = { ...getBaseState(), ...(stateRaw || {}) };
 
       const chatType = state.chatType || 'group';
       const lastUserAt = state.lastUserAt || 0;
       const lastBotAt = state.lastBotAt || 0;
+      const lastProactiveAt = state.lastProactiveAt || 0;
 
-      const sinceUser = lastUserAt ? now - lastUserAt : Infinity;
-      const sinceBot = lastBotAt ? now - lastBotAt : Infinity;
+      const sinceUserMs = lastUserAt ? now - lastUserAt : Infinity;
+      const sinceBotMs = lastBotAt ? now - lastBotAt : Infinity;
+      const sinceProactiveMs = lastProactiveAt ? now - lastProactiveAt : Infinity;
+
+      const sinceUserSec = Number.isFinite(sinceUserMs) ? sinceUserMs / 1000 : Infinity;
+      const sinceBotSec = Number.isFinite(sinceBotMs) ? sinceBotMs / 1000 : Infinity;
+      const sinceProactiveSec = Number.isFinite(sinceProactiveMs) ? sinceProactiveMs / 1000 : Infinity;
 
       // 频率窗口
       const windowMs = (this.msgWindowSec || MSG_WINDOW_SEC) * 1000;
@@ -385,58 +486,111 @@ export default class DesireManager {
       const windowStart = state.proactiveWindowStart || 0;
       const withinHour = windowStart && now - windowStart < hourMs;
       const proactiveCount = state.proactiveCount || 0;
-      if (withinHour && proactiveCount >= this.maxProactivePerHour) {
+      if (withinHour && this.maxProactivePerHour > 0 && proactiveCount >= this.maxProactivePerHour) {
         continue;
       }
 
-      if (chatType === 'group') {
-        const silentSec = this.groupSilentSec || GROUP_SILENT_SEC;
-        const minSinceUser = GROUP_MIN_SINCE_USER_SEC;
-        const maxMsg = this.groupMaxMsgPerWindow || GROUP_MAX_MSG_PER_WINDOW;
+      const maxMsg = chatType === 'group'
+        ? this.groupMaxMsgPerWindow || GROUP_MAX_MSG_PER_WINDOW
+        : this.privateMaxMsgPerWindow || PRIVATE_MAX_MSG_PER_WINDOW;
 
-        if (sinceBot < silentSec * 1000) continue;
-        if (sinceUser < minSinceUser * 1000) continue;
-        if (msgCount > maxMsg) continue; // 频率过高，不主动插话
-      } else {
-        const silentSec = this.privateSilentSec || PRIVATE_SILENT_SEC;
-        const minSinceUser = PRIVATE_MIN_SINCE_USER_SEC;
-        const maxMsg = this.privateMaxMsgPerWindow || PRIVATE_MAX_MSG_PER_WINDOW;
-
-        if (sinceBot < silentSec * 1000) continue;
-        if (sinceUser < minSinceUser * 1000) continue;
-        if (msgCount > maxMsg) continue;
+      if (maxMsg > 0 && msgCount > maxMsg) {
+        // 频率过高，不主动插话
+        continue;
       }
 
       if (!state.lastMsg) {
         continue;
       }
 
-      // 经过上述硬性约束后，根据冷场程度 / 时间段 / 频率等综合打分，再结合时间累计的 desire 决定是否入队
-      const score = this._computeScore(state, now);
-      const desire = Number.isFinite(state.desire) ? state.desire : 0;
-      const thresholdBase = this.triggerThreshold || TRIGGER_THRESHOLD;
+      // --- 概率模型：基于空闲时间 / 频率 / 配额的时间衰减触发 ---
 
-      // 要求：
-      //  - 当前综合得分不能太低（仍需满足冷场/时间段等即时条件）
-      //  - 时间累计后的欲望值必须超过触发阈值
-      if (score < thresholdBase / 2) {
+      // 用户与机器人平均空闲时间（秒）
+      const idleSec = Number.isFinite(sinceUserSec) && Number.isFinite(sinceBotSec)
+        ? (sinceUserSec + sinceBotSec) / 2
+        : (Number.isFinite(sinceUserSec) ? sinceUserSec : sinceBotSec);
+
+      const minUserSec = chatType === 'group'
+        ? GROUP_MIN_SINCE_USER_SEC
+        : PRIVATE_MIN_SINCE_USER_SEC;
+      const baseSilentSec = chatType === 'group'
+        ? (this.groupSilentSec || GROUP_SILENT_SEC)
+        : (this.privateSilentSec || PRIVATE_SILENT_SEC);
+      const idleScale = Math.max(60, (minUserSec + baseSilentSec) / 2 || 300); // 约在该尺度附近达到 ~63% 饱和
+      const idleFactor = idleSec > 0 && Number.isFinite(idleSec)
+        ? 1 - Math.exp(-idleSec / idleScale)
+        : 0;
+
+      // 最近主动冷却：10 分钟内快速从 0→1
+      let coolFactor = 1;
+      if (Number.isFinite(sinceProactiveSec) && sinceProactiveSec >= 0 && sinceProactiveSec < 600) {
+        coolFactor = sinceProactiveSec / 600;
+      }
+
+      // 消息频率因子：无互动 / 过度刷屏时削弱概率
+      let trafficFactor = 1;
+      if (!msgCount) {
+        trafficFactor = 0;
+      } else if (maxMsg > 0 && msgCount > maxMsg) {
+        trafficFactor = 0;
+      } else if (maxMsg > 0 && msgCount > maxMsg / 2) {
+        trafficFactor = 0.5;
+      }
+
+      // 配额因子：接近当小时上限时指数下降
+      let quotaFactor = 1;
+      if (this.maxProactivePerHour > 0) {
+        const usedRatio = proactiveCount / this.maxProactivePerHour;
+        const exp = 1.5;
+        quotaFactor = usedRatio >= 1 ? 0 : Math.pow(1 - clamp(usedRatio, 0, 1), exp);
+      }
+
+      const userIdForFatigue = state.userId
+        || (state.lastMsg && state.lastMsg.sender_id != null
+          ? String(state.lastMsg.sender_id)
+          : '');
+      const fatigueFactor = await this._getUserFatigueFactor(
+        userIdForFatigue,
+        now,
+        userFatigueCache
+      );
+
+      let p = baseProbPerTick
+        * idleFactor
+        * coolFactor
+        * trafficFactor
+        * quotaFactor
+        * fatigueFactor;
+
+      if (!Number.isFinite(p) || p <= 0) {
         continue;
       }
-      if (desire < thresholdBase) {
+
+      p = clamp(p, 0, 0.9);
+
+      if (Math.random() >= p) {
         continue;
       }
+
+      // 标记本次是否为「自上次用户消息以来的第一次主动回合」
+      const isFirstAfterUser =
+        lastUserAt > 0 && (!lastProactiveAt || lastUserAt >= lastProactiveAt);
 
       this.localCache.set(conversationKey, state);
 
       logger.debug('DesireManager: proactive candidate selected', {
         conversationKey,
         chatType,
-        score,
-        desire,
         msgCount,
-        sinceUser,
-        sinceBot,
-        proactiveCount
+        idleSec,
+        sinceUserSec,
+        sinceBotSec,
+        sinceProactiveSec,
+        proactiveCount,
+        userId: userIdForFatigue,
+        fatigueFactor,
+        prob: Number(p.toFixed(4)),
+        isFirstAfterUser
       });
 
       result.push({
@@ -445,7 +599,8 @@ export default class DesireManager {
         groupId: state.groupId,
         userId: state.userId,
         lastMsg: state.lastMsg,
-        desireScore: desire
+        desireScore: Math.round(p * 100),
+        isFirstAfterUser
       });
     }
 

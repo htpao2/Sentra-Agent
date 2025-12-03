@@ -70,6 +70,23 @@ export async function scriptRoutes(fastify: FastifyInstance) {
         }
     });
 
+    // Execute sentiment analysis script
+    fastify.post<{
+        Body: { args?: string[] };
+    }>('/api/scripts/sentiment', async (request, reply) => {
+        try {
+            const { args = [] } = request.body || {};
+            const processId = scriptRunner.executeScript('sentiment', args);
+
+            return { success: true, processId };
+        } catch (error) {
+            reply.code(500).send({
+                error: 'Failed to execute sentiment script',
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    });
+
     // Get script status
     fastify.get<{
         Params: { id: string };

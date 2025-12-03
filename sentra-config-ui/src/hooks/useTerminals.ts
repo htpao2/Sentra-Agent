@@ -65,6 +65,7 @@ export function useTerminals({ addToast, allocateZ }: UseTerminalsParams) {
   const handleRunNapcatStart = async () => runScript('/api/scripts/napcat', 'Napcat Start', 'napcat-start', ['start']);
   const handleRunUpdate = async () => runScript('/api/scripts/update', 'Update Project', 'update', []);
   const handleRunForceUpdate = async () => runScript('/api/scripts/update', 'Force Update Project', 'force-update', ['force']);
+  const handleRunSentiment = async () => runScript('/api/scripts/sentiment', '情感分析服务', 'sentiment', []);
 
   const handleCloseTerminal = async (id: string) => {
     const terminal = terminalWindows.find(t => t.id === id);
@@ -99,6 +100,7 @@ export function useTerminals({ addToast, allocateZ }: UseTerminalsParams) {
     handleRunNapcatStart,
     handleRunUpdate,
     handleRunForceUpdate,
+    handleRunSentiment,
     handleCloseTerminal,
     handleMinimizeTerminal,
   } as const;

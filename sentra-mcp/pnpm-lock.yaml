@@ -110,6 +110,9 @@ importers:
       puppeteer:
         specifier: ^24.23.0
         version: 24.31.0
+      qs:
+        specifier: ^6.13.0
+        version: 6.13.0
       uuid:
         specifier: ^9.0.1
         version: 9.0.1

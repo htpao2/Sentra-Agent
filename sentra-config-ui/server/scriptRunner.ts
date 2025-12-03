@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 
 interface ScriptProcess {
     id: string;
-    name: 'bootstrap' | 'start' | 'napcat' | 'update';
+    name: 'bootstrap' | 'start' | 'napcat' | 'update' | 'sentiment';
     process: ReturnType<typeof spawn>;
     output: string[];
     exitCode: number | null;
@@ -27,7 +27,7 @@ export class ScriptRunner {
         return undefined;
     }
 
-    executeScript(scriptName: 'bootstrap' | 'start' | 'napcat' | 'update', args: string[] = []): string {
+    executeScript(scriptName: 'bootstrap' | 'start' | 'napcat' | 'update' | 'sentiment', args: string[] = []): string {
         // Enforce single instance per script
         const running = this.findRunningByName(scriptName);
         if (running) {
@@ -36,8 +36,6 @@ export class ScriptRunner {
 
         const id = `${scriptName}-${Date.now()}`;
         const emitter = new EventEmitter();
-
-        const scriptPath = path.join(process.cwd(), 'scripts', `${scriptName}.mjs`);
 
         // Load latest .env from UI project to reflect runtime changes without server restart
         let runtimeEnv: Record<string, string> = {};
@@ -49,16 +47,38 @@ export class ScriptRunner {
             }
         } catch { }
 
-        const proc = spawn('node', [scriptPath, ...args], {
-            cwd: process.cwd(),
-            env: {
-                ...process.env,
-                ...runtimeEnv,
-                FORCE_COLOR: '3',
-                TERM: 'xterm-256color',
-                COLORTERM: 'truecolor',
-            },
-        });
+        let proc;
+        if (scriptName === 'sentiment') {
+            // Special handling for python script
+            const scriptPath = 'run.py';
+            // Assuming sentra-config-ui is in the root, so sentra-emo is a sibling
+            const cwd = path.join(process.cwd(), '..', 'sentra-emo');
+
+            proc = spawn('python', [scriptPath, ...args], {
+                cwd,
+                env: {
+                    ...process.env,
+                    ...runtimeEnv,
+                    FORCE_COLOR: '3',
+                    TERM: 'xterm-256color',
+                    COLORTERM: 'truecolor',
+                    PYTHONUNBUFFERED: '1'
+                },
+            });
+        } else {
+            // Standard node scripts
+            const scriptPath = path.join(process.cwd(), 'scripts', `${scriptName}.mjs`);
+            proc = spawn('node', [scriptPath, ...args], {
+                cwd: process.cwd(),
+                env: {
+                    ...process.env,
+                    ...runtimeEnv,
+                    FORCE_COLOR: '3',
+                    TERM: 'xterm-256color',
+                    COLORTERM: 'truecolor',
+                },
+            });
+        }
 
         const scriptProcess: ScriptProcess = {
             id,
@@ -94,6 +114,17 @@ export class ScriptRunner {
             setTimeout(() => {
                 this.processes.delete(id);
             }, 5 * 60 * 1000);
+        });
+
+        // Handle spawn errors (e.g. bad cwd, command not found)
+        proc.on('error', (err) => {
+            const errorMsg = `Failed to start process: ${err.message}`;
+            scriptProcess.output.push(errorMsg);
+            emitter.emit('output', { type: 'stderr', data: errorMsg });
+            scriptProcess.exitCode = 1;
+            scriptProcess.endTime = new Date();
+            emitter.emit('exit', { code: 1 });
+            console.error(`[ScriptRunner] Error spawning ${scriptName}:`, err);
         });
 
         return id;

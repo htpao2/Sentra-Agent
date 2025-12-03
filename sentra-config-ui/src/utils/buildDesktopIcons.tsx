@@ -7,7 +7,9 @@ import {
     IoRefreshCircle,
     IoSettings,
     IoPlay,
-    IoDocumentText
+    IoDocumentText,
+    IoHappy,
+    IoServer
 } from 'react-icons/io5';
 import { IoFolderOpen } from 'react-icons/io5';
 
@@ -59,6 +61,7 @@ export function buildDesktopFolders(
     handleRunNapcatStart: () => void,
     handleRunUpdate: () => void,
     handleRunForceUpdate: () => void,
+    handleRunSentiment: () => void,
 ): AppFolder[] {
     const iconSize = 56;
     const gap = 120;
@@ -114,6 +117,22 @@ export function buildDesktopFolders(
         }
     };
 
+    const sentimentApp: DesktopIcon = {
+        id: 'desktop-sentiment',
+        name: '情感分析',
+        icon: <AppIconWrapper
+            bg="linear-gradient(135deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%)"
+            shadow="0 8px 16px rgba(255, 154, 158, 0.4), inset 0 1px 2px rgba(255,255,255,0.3)"
+        >
+            <IoHappy color="white" size={iconSize} />
+        </AppIconWrapper>,
+        position: { x: 0, y: 0 },
+        onClick: () => {
+            recordUsage('script:sentiment');
+            handleRunSentiment();
+        }
+    };
+
     const napcatStartApp: DesktopIcon = {
         id: 'desktop-napcat-start',
         name: '启动NC流服务',
@@ -163,7 +182,7 @@ export function buildDesktopFolders(
     };
 
     const buildApps = [bootstrapApp, napcatBuildApp];
-    const startApps = [startApp, napcatStartApp];
+    const startApps = [startApp, napcatStartApp, sentimentApp];
     const updateApps = [updateApp, forceUpdateApp];
 
     // Create folders with thumbnail previews
@@ -200,8 +219,10 @@ export function buildDesktopIcons(
     handleRunNapcatStart: () => void,
     handleRunUpdate: () => void,
     handleRunForceUpdate: () => void,
+    handleRunSentiment: () => void,
     handleOpenPresets: () => void,
     handleOpenFileManager: () => void,
+    handleOpenRedis: () => void,
 ): DesktopIcon[] {
     const iconSize = 56;
     const gap = 100;
@@ -222,6 +243,21 @@ export function buildDesktopIcons(
             onClick: () => {
                 recordUsage('app:filemanager');
                 handleOpenFileManager();
+            }
+        },
+        {
+            id: 'desktop-redis',
+            name: 'Redis编辑器',
+            icon: <AppIconWrapper
+                bg="linear-gradient(135deg, #ff512f 0%, #dd2476 100%)"
+                shadow="0 8px 16px rgba(221, 36, 118, 0.4), inset 0 1px 2px rgba(255,255,255,0.3)"
+            >
+                <IoServer color="white" size={iconSize} />
+            </AppIconWrapper>,
+            position: { x: startX + gap, y: startY },
+            onClick: () => {
+                recordUsage('app:redis');
+                handleOpenRedis();
             }
         },
         {
@@ -297,6 +333,21 @@ export function buildDesktopIcons(
             onClick: () => {
                 recordUsage('script:force-update');
                 handleRunForceUpdate();
+            }
+        },
+        {
+            id: 'desktop-sentiment',
+            name: '情感分析',
+            icon: <AppIconWrapper
+                bg="linear-gradient(135deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%)"
+                shadow="0 8px 16px rgba(255, 154, 158, 0.4), inset 0 1px 2px rgba(255,255,255,0.3)"
+            >
+                <IoHappy color="white" size={iconSize} />
+            </AppIconWrapper>,
+            position: { x: startX + gap * 4, y: startY },
+            onClick: () => {
+                recordUsage('script:sentiment');
+                handleRunSentiment();
             }
         },
         {
