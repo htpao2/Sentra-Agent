@@ -42,7 +42,7 @@ import DesireManager from './utils/desireManager.js';
 import { buildProactiveRootDirectiveXml } from './components/ProactiveDirectivePlanner.js';
 import { handleGroupReplyCandidate } from './utils/groupReplyMerger.js';
 
-const ENV_PATH = process.env.ENV_FILE || '.env';
+const ENV_PATH = '.env';
 loadEnv(ENV_PATH);
 initEnvWatcher(ENV_PATH);
 
@@ -131,9 +131,9 @@ function cancelRunsForSender(senderId) {
 }
 
 const agent = new Agent({
-  apiKey: getEnv('API_KEY', process.env.OPENAI_API_KEY),
+  apiKey: getEnv('API_KEY'),
   apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
-  defaultModel: getEnv('MAIN_AI_MODEL', getEnv('MODEL_NAME', 'gpt-3.5-turbo')),
+  defaultModel: getEnv('MAIN_AI_MODEL', 'gpt-3.5-turbo'),
   temperature: parseFloat(getEnv('TEMPERATURE', '0.7')),
   maxTokens: getEnvInt('MAX_TOKENS', 4096),
   maxRetries: getEnvInt('MAX_RETRIES', 3),
@@ -237,11 +237,11 @@ const desireManager = DESIRE_ENABLED
     })
   : null;
 
-if (!DESIRE_ENABLED) {
+if (!DESIRE_ENABLED || !desireManager) {
   logger.info('主动欲望/主动回复功能已禁用（DESIRE_ENABLED=false）');
 }
 
-const MAIN_AI_MODEL = getEnv('MAIN_AI_MODEL', getEnv('MODEL_NAME', 'gpt-3.5-turbo'));
+const MAIN_AI_MODEL = getEnv('MAIN_AI_MODEL', 'gpt-3.5-turbo');
 const MCP_MAX_CONTEXT_PAIRS = getEnvInt('MCP_MAX_CONTEXT_PAIRS', getEnvInt('MAX_CONVERSATION_PAIRS', 20));
 const CONTEXT_MEMORY_ENABLED = getEnvBool('CONTEXT_MEMORY_ENABLED', true);
 const CONTEXT_MEMORY_MODEL = getEnv('CONTEXT_MEMORY_MODEL', MAIN_AI_MODEL);
@@ -361,6 +361,15 @@ async function runProactiveReply(candidate) {
 
 	let plannerTopicHint = topicHint;
 
+	let lastBotMessage = null;
+	try {
+	  if (historyManager && typeof historyManager.getLastAssistantMessageContent === 'function') {
+		lastBotMessage = historyManager.getLastAssistantMessageContent(groupIdKey);
+	  }
+	} catch (e) {
+	  logger.debug('runProactiveReply: 获取最近一次 Bot 回复失败，将忽略该块', { err: String(e) });
+	}
+
 	let personaXml = '';
 	if (personaManager && userid) {
 	  try {
@@ -415,7 +424,8 @@ async function runProactiveReply(candidate) {
 	  personaXml,
 	  emoXml,
 	  memoryXml,
-	  conversationContext: null
+	  conversationContext,
+	  lastBotMessage
 	});
 
     // 构造一条“虚拟”的用户消息，标记为主动触发，并通过主流程/MCP 处理

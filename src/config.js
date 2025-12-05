@@ -16,7 +16,7 @@ export const getConfigFromEnv = () => {
 	return {
 		apiBaseUrl: process.env.API_BASE_URL || 'https://yuanplus.chat/v1/',
 		apiKey: process.env.API_KEY || 'sk-ZsC6m89ewvSfx29HqOIEVBPCZOCrhjO0dv3ZhYEmCBl9ijzz',
-		modelName: process.env.MODEL_NAME || 'gpt-4.1-mini',
+		modelName: process.env.MAIN_AI_MODEL || 'gpt-4.1-mini',
 		temperature: Number.isFinite(rawTemp) ? rawTemp : 0.7,
 		// MAX_TOKENS 支持设置为 -1，表示不限制，由服务端决定（不会在请求中发送 max_tokens）
 		maxTokens: Number.isFinite(rawMaxTokens) ? rawMaxTokens : 1000,

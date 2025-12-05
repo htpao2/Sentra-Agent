@@ -40,7 +40,7 @@ function getPlannerAgent() {
   try {
     const { model, maxTokens, timeout, maxRetries } = getPlannerConfig();
     sharedAgent = new Agent({
-      apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+      apiKey: getEnv('API_KEY'),
       apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
       defaultModel: model,
       temperature: 0.2,
@@ -305,7 +305,8 @@ function buildPlannerRootDirectiveXml(options) {
     personaXml,
     emoXml,
     memoryXml,
-    time
+    time,
+    lastBotMessage
   } = options || {};
 
   const safeChatType = chatType === 'private' ? 'private' : 'group';
@@ -314,6 +315,10 @@ function buildPlannerRootDirectiveXml(options) {
   const scoreText = Number.isFinite(desireScore) ? String(Math.round(desireScore)) : '0';
   const topicShort = String(topicHint || '').slice(0, 200).trim();
   const presetSummary = String(presetPlainText || '').slice(0, 800);
+  const lastBotMessagePreview =
+    typeof lastBotMessage === 'string'
+      ? lastBotMessage.replace(/\s+/g, ' ').trim().slice(0, 120)
+      : '';
 
   const rdLines = [];
 
@@ -325,6 +330,11 @@ function buildPlannerRootDirectiveXml(options) {
   } else {
     objectiveLines.push(
       '根据当前会话的整体氛围、节奏和情绪，将已有对话视为“已经发生过的背景”，从 自己 的视角和长期人设出发规划本轮是否以及如何主动发言，可以结合当日摘要与用户长期兴趣引出新的话题，而不是去寻找还没回答完的问题。'
+    );
+  }
+  if (lastBotMessagePreview) {
+    objectiveLines.push(
+      `上一轮你已经向用户发送过一条回复，其大致内容是「${lastBotMessagePreview}」。本轮在考虑是否以及如何主动开口时，必须显式避免重复该回复的核心意思或仅做同义改写；如果要继续相关话题，应换一个明显不同的新角度或子话题，否则请选择保持沉默。`
     );
   }
   objectiveLines.push(
@@ -420,7 +430,8 @@ function buildPlannerSystemContextXml(options) {
     personaXml,
     emoXml,
     memoryXml,
-    conversationContext
+    conversationContext,
+    lastBotMessage
   } = options || {};
 
   const pieces = [];
@@ -439,6 +450,18 @@ function buildPlannerSystemContextXml(options) {
 
   if (memoryXml && typeof memoryXml === 'string' && memoryXml.trim()) {
     pieces.push(memoryXml.trim());
+  }
+
+  const lastBot = typeof lastBotMessage === 'string' ? lastBotMessage.trim() : '';
+  if (lastBot) {
+    const preview = lastBot.slice(0, 800);
+    const block = [
+      '<sentra-last-bot-message>',
+      '  <note>以下是最近一次 Bot 已发送给用户的回复内容，用于帮助你避免重复或语义等价，只作对比参考，不需要逐句复述。</note>',
+      `  <content>${escapeXml(preview)}</content>`,
+      '</sentra-last-bot-message>'
+    ].join('\n');
+    pieces.push(block);
   }
 
   const pendingXml = buildPendingMessagesXmlFromContext(conversationContext);
@@ -472,7 +495,8 @@ export async function planProactiveObjective(payload = {}) {
     personaXml = '',
     emoXml = '',
     memoryXml = '',
-    conversationContext = null
+    conversationContext = null,
+    lastBotMessage = ''
   } = payload || {};
 
   let effectivePresetXml = typeof presetXml === 'string' ? presetXml : '';
@@ -501,7 +525,8 @@ export async function planProactiveObjective(payload = {}) {
     personaXml,
     emoXml,
     memoryXml,
-    time
+    time,
+    lastBotMessage
   });
 
   const systemContextXml = buildPlannerSystemContextXml({
@@ -509,7 +534,8 @@ export async function planProactiveObjective(payload = {}) {
     personaXml,
     emoXml,
     memoryXml,
-    conversationContext: safeContext
+    conversationContext: safeContext,
+    lastBotMessage
   });
 
   const systemContent = [baseSystemPrompt?.trim(), systemContextXml]
@@ -570,7 +596,8 @@ export async function buildProactiveRootDirectiveXml(payload = {}) {
     personaXml = '',
     emoXml = '',
     memoryXml = '',
-    conversationContext = null
+    conversationContext = null,
+    lastBotMessage = ''
   } = payload || {};
 
   const chatType = rawChatType === 'private' ? 'private' : 'group';
@@ -579,6 +606,10 @@ export async function buildProactiveRootDirectiveXml(payload = {}) {
   const score = Number.isFinite(desireScore) ? Math.round(desireScore) : 0;
   const topicHintText = typeof topicHint === 'string' ? topicHint : '';
   const presetPlainTextSafe = typeof presetPlainText === 'string' ? presetPlainText : '';
+  const lastBotMessageSafe = typeof lastBotMessage === 'string' ? lastBotMessage.trim() : '';
+  const lastBotMessagePreview = lastBotMessageSafe
+    ? lastBotMessageSafe.replace(/\s+/g, ' ').slice(0, 200)
+    : '';
 
   const lines = [];
   lines.push('<sentra-root-directive>');
@@ -608,7 +639,8 @@ export async function buildProactiveRootDirectiveXml(payload = {}) {
       personaXml,
       emoXml,
       memoryXml,
-      conversationContext
+      conversationContext,
+      lastBotMessage
     });
   } catch (e) {
     logger.warn('主动 root 指令规划失败，将回退为默认 objective', { err: String(e) });
@@ -659,6 +691,11 @@ export async function buildProactiveRootDirectiveXml(payload = {}) {
   lines.push('  </constraints>');
   lines.push('  <meta>');
   lines.push(`    <desire_score>${score}</desire_score>`);
+  if (lastBotMessagePreview) {
+    lines.push(
+      `    <last_bot_message_preview>${escapeXml(lastBotMessagePreview)}</last_bot_message_preview>`
+    );
+  }
   lines.push('  </meta>');
   lines.push('</sentra-root-directive>');
   return lines.join('\n');

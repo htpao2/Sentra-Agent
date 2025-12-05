@@ -58,7 +58,7 @@ function isReplyInterventionEnabled() {
 }
 
 function getDecisionConfig() {
-  const mainModel = getEnv('MAIN_AI_MODEL', getEnv('MODEL_NAME', 'gpt-3.5-turbo'));
+  const mainModel = getEnv('MAIN_AI_MODEL', 'gpt-3.5-turbo');
   const model = getEnv('REPLY_DECISION_MODEL', mainModel || 'gpt-4o-mini');
   const maxTokens = getEnvInt('REPLY_DECISION_MAX_TOKENS', 128);
   const maxRetries = getEnvInt('REPLY_DECISION_MAX_RETRIES', getEnvInt('MAX_RETRIES', 3));
@@ -79,7 +79,7 @@ function getAgent() {
     const { model, maxTokens, maxRetries, timeout } = getDecisionConfig();
     sharedAgent = new Agent({
       // 复用主站点配置，避免单独维护一套 API_KEY/API_BASE_URL
-      apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+      apiKey: getEnv('API_KEY'),
       apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
       defaultModel: model,
       temperature: 0,

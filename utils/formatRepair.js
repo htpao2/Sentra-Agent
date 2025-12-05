@@ -21,7 +21,7 @@ export async function repairSentraResponse(rawText, opts = {}) {
   }
 
   const agent = opts.agent || new Agent({
-    apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+    apiKey: getEnv('API_KEY'),
     apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
     defaultModel: getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL')),
     temperature: parseFloat(getEnv('TEMPERATURE', '0.7')),
@@ -171,7 +171,7 @@ export async function repairSentraDecision(rawText, opts = {}) {
   if (!rawText || typeof rawText !== 'string') throw new Error('repairSentraDecision: rawText 无效');
 
   const agent = opts.agent || new Agent({
-    apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+    apiKey: getEnv('API_KEY'),
     apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
     defaultModel: getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL')),
     temperature: 0.2,
@@ -242,7 +242,7 @@ export async function repairSentraPersona(rawText, opts = {}) {
   if (!rawText || typeof rawText !== 'string') throw new Error('repairSentraPersona: rawText 无效');
 
   const agent = opts.agent || new Agent({
-    apiKey: getEnv('API_KEY', getEnv('OPENAI_API_KEY')),
+    apiKey: getEnv('API_KEY'),
     apiBaseUrl: getEnv('API_BASE_URL', 'https://yuanplus.chat/v1'),
     defaultModel: getEnv('REPAIR_AI_MODEL', getEnv('MAIN_AI_MODEL')),
     temperature: 0.2,

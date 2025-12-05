@@ -1170,6 +1170,29 @@ class GroupHistoryManager {
     return conversationsForContext;
   }
 
+  getLastAssistantMessageContent(groupId) {
+    const history = this.histories.get(groupId);
+    if (
+      !history ||
+      !Array.isArray(history.conversations) ||
+      history.conversations.length === 0
+    ) {
+      return null;
+    }
+
+    for (let i = history.conversations.length - 1; i >= 0; i--) {
+      const msg = history.conversations[i];
+      if (msg && msg.role === 'assistant' && typeof msg.content === 'string') {
+        const trimmed = msg.content.trim();
+        if (trimmed) {
+          return trimmed;
+        }
+      }
+    }
+
+    return null;
+  }
+
   /**
    * 获取待回复消息数量
    * @param {string} groupId - 群ID
