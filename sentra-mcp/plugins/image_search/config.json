@@ -6,7 +6,9 @@
     "properties": {
       "queries": {
         "type": "array",
-        "items": { "type": "string" },
+        "items": {
+          "type": "string"
+        },
         "minItems": 1,
         "description": "搜索关键词数组，例如：[ '动漫 少女 高清 壁纸 4k', '风景 高清 壁纸' ]，支持中文/英文及风格、分辨率等组合提示词。"
       },
@@ -17,60 +19,118 @@
       },
       "bingImageType": {
         "type": "string",
-        "enum": ["photo", "clipart", "linedrawing", "animated", "transparent"],
+        "enum": [
+          "photo",
+          "clipart",
+          "linedrawing",
+          "animated",
+          "transparent"
+        ],
         "default": "photo",
         "description": "仅对 Bing 搜索源有效：图片类型（photo 照片、clipart 剪贴画、linedrawing 素描、animated 动画 GIF、transparent 透明背景）。未提供时默认使用 photo（照片）。"
       },
       "bingSize": {
         "type": "string",
-        "enum": ["small", "medium", "large", "wallpaper", "all"],
+        "enum": [
+          "small",
+          "medium",
+          "large",
+          "wallpaper",
+          "all"
+        ],
         "default": "wallpaper",
         "description": "仅对 Bing 搜索源有效：图片尺寸（small 小、medium 中、large 大、wallpaper 壁纸、all 全部）。未提供或非法取值时自动回退为 wallpaper。"
       },
       "bingColor": {
         "type": "string",
-        "enum": ["all", "coloronly", "bw", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "white", "gray", "black", "brown"],
+        "enum": [
+          "all",
+          "coloronly",
+          "bw",
+          "red",
+          "orange",
+          "yellow",
+          "green",
+          "teal",
+          "blue",
+          "purple",
+          "pink",
+          "white",
+          "gray",
+          "black",
+          "brown"
+        ],
         "default": "all",
         "description": "仅对 Bing 搜索源有效：颜色过滤（all 不限制，coloronly 彩色，bw 黑白，red 红色，orange 橙色，yellow 黄色，green 绿色，teal 青色，blue 蓝色，purple 紫色，pink 粉色，white 白色，gray 灰色，black 黑色，brown 棕色）。模型未指定时默认 all。"
       },
       "bingLayout": {
         "type": "string",
-        "enum": ["all", "square", "wide", "tall"],
+        "enum": [
+          "all",
+          "square",
+          "wide",
+          "tall"
+        ],
         "default": "all",
         "description": "仅对 Bing 搜索源有效：布局/长宽比（all 不限制，square 方图，wide 横向，tall 竖向）。模型未指定时默认 all。"
       },
       "bingFreshness": {
         "type": "string",
-        "enum": ["all", "day", "week", "month"],
+        "enum": [
+          "all",
+          "day",
+          "week",
+          "month"
+        ],
         "default": "all",
         "description": "仅对 Bing 搜索源有效：时间范围（all 不限制，day 最近24小时，week 最近7天，month 最近30天）。模型未指定时默认 all。"
       },
       "bingLicense": {
         "type": "string",
-        "enum": ["all", "share", "sharecommercially", "modify", "modifycommercially", "public"],
+        "enum": [
+          "all",
+          "share",
+          "sharecommercially",
+          "modify",
+          "modifycommercially",
+          "public"
+        ],
         "default": "all",
         "description": "仅对 Bing 搜索源有效：版权许可（all 不限制，share 允许共享，sharecommercially 允许商业共享，modify 允许修改，modifycommercially 允许商业修改，public 公共领域/免费使用）。模型未指定时默认 all。"
       },
       "schedule": {
-        "oneOf": [
-          {
+        "type": "object",
+        "properties": {
+          "when": {
             "type": "string",
-            "description": "延迟反馈：'5分钟后'、'30秒后'、'明天09:00' 或 ISO。"
+            "description": "时间表达：如 '5分钟后' / '30秒后' / '明天09:00' / '2025-12-16 21:30' / ISO 字符串。请使用清晰、可解析的时间表达，避免使用『稍后』『改天』『有空的时候』『尽快』『5分钟之后』等模糊说法。"
           },
-          {
-            "type": "object",
-            "properties": {
-              "when": { "type": "string" },
-              "language": { "type": "string" },
-              "timezone": { "type": "string" }
-            },
-            "additionalProperties": true
+          "language": {
+            "type": "string",
+            "description": "语言标识，例如 zh|en（默认 zh）"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA 时区名称，例如 Asia/Shanghai"
+          },
+          "targetISO": {
+            "type": "string",
+            "description": "预解析好的绝对时间（ISO 字符串），例如 '2025-12-16T21:30:00+08:00'；如提供，将被上游优先用作目标时间。"
           }
+        },
+        "required": [
+          "when",
+          "targetISO"
         ],
-        "description": "可选：延迟反馈时间。仅控制反馈时间，不延迟执行。如超时则先反馈进行中状态。"
+        "additionalProperties": true,
+        "description": "可选：当用户需要延迟处理或延迟反馈时使用。具体是仅延迟反馈还是到点再执行，由上层调度策略（例如 immediate_exec / delayed_exec）决定；若到点未完成，将先反馈进行中状态。"
       }
     },
-    "required": ["queries", "count", "bingImageType"],
+    "required": [
+      "queries",
+      "count",
+      "bingImageType"
+    ],
     "additionalProperties": true
   },
   "timeoutMs": 180000,

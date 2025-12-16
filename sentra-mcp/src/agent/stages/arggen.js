@@ -133,7 +133,17 @@ export async function generateToolArgs(params) {
 
     // FC 模式：不提前包装 objective（新模板已在整体结构外层使用 <sentra-user-question>）
     const objectiveText = objective;
-    
+
+    // Schedule / timing 提示完全由提示词 JSON 提供，避免在代码层硬编码复杂规则。
+    // - FC 模式：优先使用 arggen_fc.json 中的 schedule_hint_en（英文说明）；
+    // - 非 FC 模式：使用 arggen.json 中的 timing_hint（中文说明）。
+    let timingHint = '';
+    if (useFC) {
+      timingHint = ap.schedule_hint_en || '';
+    } else {
+      timingHint = ap.timing_hint || '';
+    }
+
     // FC 模式：也保留原始对话，确保能看到用户上下文（如 QQ 群消息），与 Plan 阶段保持一致
     // 历史工具调用通过 buildToolDialogueMessages 提供（XML 格式）
     const convWrapped = conv;
@@ -147,7 +157,8 @@ export async function generateToolArgs(params) {
       description: currentToolFull?.description || '',
       draftArgs: draftArgs ? JSON.stringify(draftArgs, null, 2) : '(无)',
       requiredList: Array.isArray(requiredList) && requiredList.length ? requiredList.join(', ') : '(无)',
-      requiredDetail: requiredDetail || '(无)'
+      requiredDetail: requiredDetail || '(无)',
+      timingHint
     });
 
     // FC 模式：baseMessages 不包含最终 user 消息（会在后面统一构建）

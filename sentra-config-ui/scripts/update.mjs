@@ -184,6 +184,41 @@ function resolveNpmRegistry() {
     );
 }
 
+function hasPuppeteerDependency(projectDir) {
+    const pkgPath = path.join(projectDir, 'package.json');
+    if (!exists(pkgPath)) return false;
+    try {
+        const raw = fs.readFileSync(pkgPath, 'utf-8');
+        const pkg = JSON.parse(raw);
+        return !!(pkg?.dependencies?.puppeteer || pkg?.devDependencies?.puppeteer);
+    } catch {
+        return false;
+    }
+}
+
+async function ensurePuppeteerBrowserForMcp(pm) {
+    const mcpDir = path.join(ROOT_DIR, 'sentra-mcp');
+    if (!exists(mcpDir) || !isNodeProject(mcpDir) || !hasPuppeteerDependency(mcpDir)) {
+        return;
+    }
+
+    const label = path.relative(ROOT_DIR, mcpDir) || 'sentra-mcp';
+    const spinner = ora(`[Node] Ensuring Puppeteer Chrome browser for ${label}...`).start();
+
+    const cmd = pm === 'pnpm' ? 'pnpm' : 'npx';
+    const args = pm === 'pnpm'
+        ? ['exec', 'puppeteer', 'browsers', 'install', 'chrome']
+        : ['puppeteer', 'browsers', 'install', 'chrome'];
+
+    try {
+        await execCommand(cmd, args, mcpDir);
+        spinner.succeed(`[Node] Puppeteer Chrome browser ready for ${label}`);
+    } catch (error) {
+        spinner.fail(`[Node] Failed to install Puppeteer Chrome browser for ${label}`);
+        console.warn(chalk.yellow(`You may need to run "${cmd} ${args.join(' ')}" manually in ${mcpDir}`));
+    }
+}
+
 function commandExists(cmd, checkArgs = ['--version']) {
     try {
         const r = spawn(cmd, checkArgs, { stdio: 'ignore', shell: true });
@@ -461,6 +496,8 @@ async function update() {
                     }
                 }
             }
+            // After Node dependencies are ensured, make sure Puppeteer-managed Chrome is installed for sentra-mcp if applicable
+            await ensurePuppeteerBrowserForMcp(pm);
         } else {
             console.log(chalk.green('\n✨ No dependency changes detected, skipping installation\n'));
         }

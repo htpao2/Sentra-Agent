@@ -6,9 +6,10 @@ import fs from 'fs';
 import { createWebSocketClient } from './components/WebSocketClient.js';
 import { buildSentraResultBlock, buildSentraUserQuestionBlock, convertHistoryToMCPFormat } from './utils/protocolUtils.js';
 import { smartSend } from './utils/sendUtils.js';
-import { cleanupExpiredCache, saveMessageCache } from './utils/messageCache.js';
+import { cleanupExpiredCache, saveMessageCache, loadMessageCache } from './utils/messageCache.js';
 import SentraEmo from './sentra-emo/sdk/index.js';
 import { timeParser } from './src/time-parser.js';
+import { HistoryStore } from './sentra-mcp/src/history/store.js';
 import { buildSentraEmoSection } from './utils/emoXml.js';
 import {
   shouldReply,
@@ -41,6 +42,8 @@ import { initAgentPresetCore } from './components/AgentPresetInitializer.js';
 import DesireManager from './utils/desireManager.js';
 import { buildProactiveRootDirectiveXml } from './components/ProactiveDirectivePlanner.js';
 import { handleGroupReplyCandidate } from './utils/groupReplyMerger.js';
+import { startDelayJobWorker, enqueueDelayedJob } from './utils/delayJobQueue.js';
+import { createDelayJobRunJob } from './components/DelayJobWorker.js';
 
 const ENV_PATH = '.env';
 loadEnv(ENV_PATH);
@@ -263,6 +266,7 @@ if (!ENABLE_USER_PERSONA) {
 
 // 主动回复调度器（基于时间衰减概率 + 每小时上限）
 const DESIRE_ENABLED = getEnvBool('DESIRE_ENABLED', true);
+const DESIRE_GROUP_TOPIC_STALE_SEC = getEnvInt('DESIRE_GROUP_TOPIC_STALE_SEC', 180);
 const desireManager = DESIRE_ENABLED
   ? new DesireManager({
       prefix: getEnv('REDIS_DESIRE_PREFIX', 'sentra:desire:'),
@@ -398,6 +402,7 @@ async function runProactiveReply(candidate) {
 	}
 
 	let plannerTopicHint = topicHint;
+	let plannerTopicFromMemory = false;
 
 	let lastBotMessage = null;
 	try {
@@ -445,6 +450,7 @@ async function runProactiveReply(candidate) {
 	    if (summaries.length > 0) {
 	      const joined = summaries.join(' / ');
 	      plannerTopicHint = joined.slice(0, 200);
+	      plannerTopicFromMemory = true;
 	    }
 	  } catch (e) {
 	    logger.debug('runProactiveReply: 从上下文记忆提取高层话题失败，将继续使用原有 topicHint', { err: String(e) });
@@ -460,7 +466,35 @@ async function runProactiveReply(candidate) {
 	    logger.debug('runProactiveReply: 获取用户主动参与度摘要失败，将忽略该块', { err: String(e) });
 	  }
 	}
+
+	const isGroupChat = lastMsg.type === 'private' ? false : true;
+	if (isGroupChat && !plannerTopicFromMemory && plannerTopicHint) {
+	  try {
+	    const staleThresholdSec = DESIRE_GROUP_TOPIC_STALE_SEC;
+	    const timeSinceLastUserSec =
+	      userEngagement && typeof userEngagement.timeSinceLastUserSec === 'number'
+	        ? userEngagement.timeSinceLastUserSec
+	        : null;
 	
+	    if (
+	      Number.isFinite(staleThresholdSec) &&
+	      staleThresholdSec > 0 &&
+	      Number.isFinite(timeSinceLastUserSec) &&
+	      timeSinceLastUserSec >= staleThresholdSec
+	    ) {
+	      logger.debug('runProactiveReply: 群聊话题已过期，将清空 topicHint，仅使用长期记忆/人设', {
+	        groupIdKey,
+	        userId: userid,
+	        timeSinceLastUserSec,
+	        staleThresholdSec
+	      });
+	      plannerTopicHint = '';
+	    }
+	  } catch (e) {
+	    logger.debug('runProactiveReply: 计算话题过期状态失败，将继续使用原有 topicHint', { err: String(e) });
+	  }
+	}
+
 	const rootXml = await buildProactiveRootDirectiveXml({
 	  chatType: lastMsg.type === 'private' ? 'private' : 'group',
 	  groupId: groupIdKey,
@@ -529,6 +563,7 @@ async function handleOneMessage(msg, taskId) {
       sendAndWaitResult,
       randomUUID,
       saveMessageCache,
+      enqueueDelayedJob,
       desireManager
     },
     msg,
@@ -605,6 +640,36 @@ async function sendAndWaitResult(message) {
 
   return null;
 }
+
+const delayJobRunJob = createDelayJobRunJob({
+  HistoryStore,
+  loadMessageCache,
+  enqueueDelayedJob,
+  sdk,
+  historyManager,
+  buildSentraResultBlock,
+  buildSentraUserQuestionBlock,
+  getDailyContextMemoryXml,
+  personaManager,
+  emo,
+  buildSentraEmoSection,
+  AGENT_PRESET_XML,
+  baseSystem,
+  CONTEXT_MEMORY_ENABLED,
+  MAIN_AI_MODEL,
+  triggerContextSummarizationIfNeeded,
+  triggerPresetTeachingIfNeeded,
+  chatWithRetry,
+  smartSend,
+  sendAndWaitResult,
+  randomUUID
+});
+
+startDelayJobWorker({
+  intervalMs: getEnvInt('DELAY_QUEUE_POLL_INTERVAL_MS', 1000),
+  maxLagMs: getEnvInt('DELAY_QUEUE_MAX_LAG_MS', 0),
+  runJob: delayJobRunJob
+});
 
 setupSocketHandlers({
   socket,

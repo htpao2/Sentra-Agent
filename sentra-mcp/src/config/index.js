@@ -57,6 +57,19 @@ function parseConcurrencyOverrides(prefix) {
 }
 
 function buildConfigFromEnv() {
+  // Judge 模型列表（支持逗号分隔的多模型配置）
+  const judgeModelEnv = process.env.JUDGE_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini';
+  const judgeModels = parseCsv(judgeModelEnv);
+  const primaryJudgeModel = judgeModels[0] || 'gpt-4.1-mini';
+
+  // FC Judge 模型列表（仅在 TOOL_STRATEGY=fc 时使用，留空则回退到 FC_MODEL / JUDGE_MODEL）
+  const judgeFcModels = parseCsv(process.env.JUDGE_FC_MODEL || '');
+  const primaryJudgeFcModel = judgeFcModels[0] || '';
+
+  // FC Plan 阶段模型列表（支持逗号分隔多模型；多个模型时按模型维度生成候选计划）
+  const planFcModels = parseCsv(process.env.PLAN_FC_MODEL || '');
+  const primaryPlanFcModel = planFcModels[0] || '';
+
   return {
   llm: {
     baseURL: process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
@@ -86,8 +99,12 @@ function buildConfigFromEnv() {
     evalMaxRetries: int(process.env.FC_EVAL_MAX_RETRIES, 3),
     summaryMaxRetries: int(process.env.FC_SUMMARY_MAX_RETRIES, 1),  // 默认 1 次，避免浪费
     // Stage-specific models (optional; fall back to FC_MODEL)
-    judgeModel: process.env.JUDGE_FC_MODEL || '',
-    planModel: process.env.PLAN_FC_MODEL || '',
+    // judgeModel: 主 FC Judge 模型；judgeModels: 多模型列表（按优先级从前到后）
+    judgeModel: primaryJudgeFcModel,
+    judgeModels: judgeFcModels,
+    // planModel: 主 FC 规划模型；planModels: 规划模型列表（逗号分隔，多模型用于多计划候选）
+    planModel: primaryPlanFcModel,
+    planModels: planFcModels,
     argModel: process.env.ARG_FC_MODEL || '',
     evalModel: process.env.EVAL_FC_MODEL || '',
     summaryModel: process.env.SUMMARY_FC_MODEL || '',
@@ -164,7 +181,9 @@ function buildConfigFromEnv() {
   judge: {
     baseURL: process.env.JUDGE_BASE_URL || process.env.OPENAI_BASE_URL || 'https://yuanplus.chat/v1',
     apiKey: process.env.JUDGE_API_KEY || process.env.OPENAI_API_KEY || '',
-    model: process.env.JUDGE_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+    // model: 主 Judge 模型；models: 多模型列表（按优先级从前到后）
+    model: primaryJudgeModel,
+    models: judgeModels,
     temperature: Number(process.env.JUDGE_TEMPERATURE || 0.1),
     maxTokens: int(process.env.JUDGE_MAX_TOKENS, -1),
     raceTimeoutMs: int(process.env.JUDGE_RACE_TIMEOUT_MS, 12000),
@@ -184,14 +203,6 @@ function buildConfigFromEnv() {
     totalTimeBudgetMs: int(process.env.PLAN_TOTAL_TIME_BUDGET_MS, 60000),
     toolTimeoutMs: int(process.env.TOOL_TIMEOUT_MS, 15000),
     cooldownDefaultMs: int(process.env.TOOL_COOLDOWN_DEFAULT_MS, 2000),
-    // Multi-plan generation controls
-    multiEnable: bool(process.env.PLAN_MULTI_ENABLE, false),
-    multiCandidates: int(process.env.PLAN_MULTI_CANDIDATES, 1),
-    // Multi-plan early-stop (50% completion threshold + dynamic wait window)
-    // waitMs = clamp(mean(firstHalfDurations) * factor * extra, minTimeoutMs, maxTimeoutMs)
-    candidateMinTimeoutMs: int(process.env.PLAN_CANDIDATE_MIN_TIMEOUT_MS, 3000),
-    candidateMaxTimeoutMs: int(process.env.PLAN_CANDIDATE_MAX_TIMEOUT_MS, 25000),
-    candidateTimeFactor: Number(process.env.PLAN_CANDIDATE_TIME_FACTOR || 1.25),
     // Plan audit controls
     auditEnable: bool(process.env.PLAN_AUDIT_ENABLE, true),
     auditVoters: int(process.env.PLAN_AUDIT_VOTERS, 1),
@@ -209,6 +220,11 @@ function buildConfigFromEnv() {
       allowlist: parseCsv(process.env.TOOL_CACHE_ALLOWLIST), // empty means no restriction
       denylist: parseCsv(process.env.TOOL_CACHE_DENYLIST),
     },
+  },
+  schedule: {
+    // 工具级 schedule 策略：哪些 aiName 可以“立即执行 + 延迟发送”，哪些必须“到点再执行”
+    immediateAllowlist: parseCsv(process.env.SCHEDULE_IMMEDIATE_AI_ALLOWLIST),
+    immediateDenylist: parseCsv(process.env.SCHEDULE_IMMEDIATE_AI_DENYLIST),
   },
   governance: {
     defaultScope: process.env.DEFAULT_SCOPE || 'global',

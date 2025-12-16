@@ -314,8 +314,9 @@ export async function getSandboxSystemPrompt() {
       '#### 0. `<sentra-root-directive>` - Root-Level Directive (HIGHEST PRIORITY)\n' +
       '**Purpose**: Root-level directive from the Sentra platform, specifying a higher-level objective and constraints for this turn.\n' +
       '**Priority**: HIGHEST - when present, you must follow it first before any other input blocks.\n' +
-      '**Action**: Use it to guide your overall behavior in this turn (for example, deciding whether to proactively speak or to keep silent, or how to shape your reply style).\n' +
-      '**Special Case (type="proactive")**: When `<sentra-root-directive>` has `<type>proactive</type>`, your primary goal is to decide whether to proactively say something from a **new angle or sub-topic** (or to keep silent). In this case, treat `<sentra-user-question>` and `<sentra-pending-messages>` mainly as background and time anchors, NOT as a question that must be further explained over and over again.\n\n' +
+      '**Action**: Use it to guide your overall behavior in this turn (for example, deciding whether to proactively speak or to keep silent, how to shape your reply style, or how to rewrite a candidate response).\n' +
+      '**Special Case (type="proactive")**: When `<sentra-root-directive>` has `<type>proactive</type>`, your primary goal is to decide whether to proactively say something from a **new angle or sub-topic** (or to keep silent). In this case, treat `<sentra-user-question>` and `<sentra-pending-messages>` mainly as background and time anchors, NOT as a question that must be further explained over and over again.\n' +
+      '**Special Case (type="rewrite")**: When `<sentra-root-directive>` has `<type>rewrite</type>`, your task is NOT to answer a brand new user question, but to REWRITE an existing `<sentra-response>` candidate so that it keeps the same facts and conclusions while avoiding near-duplicate phrasing compared to a previous assistant reply. You must focus on rephrasing, restructuring, and condensing/expanding the text while preserving meaning, tone, and resource usage.\n\n' +
       
       'Structure (proactive speaking example):\n' +
       '\n' +
@@ -340,6 +341,32 @@ export async function getSandboxSystemPrompt() {
       '    <item>主动发言内容必须与最近的话题相关，可以是提问、补充信息、总结或轻度转场，但不要机械重复你最近几条发言。</item>\n' +
       '    <item>如果主动发言的内容与上一轮或最近几轮你的发言高度相似（仅是改写或同义复述），应选择保持沉默。</item>\n' +
       '    <item>如无明显价值或可能打扰用户，应选择保持沉默。</item>\n' +
+      '  </constraints>\n' +
+      '</sentra-root-directive>\n' +
+      '\n\n' +
+      'Structure (rewrite response example):\n' +
+      '\n' +
+      '<sentra-root-directive>\n' +
+      '  <id>rewrite_response_v1</id>\n' +
+      '  <type>rewrite</type>\n' +
+      '  <scope>conversation</scope>\n' +
+      '  <objective>在保持事实、数字和结论不变的前提下，对 candidate_response 中的 `<sentra-response>` 做自然语言改写，避免与 original_response 在句子和段落上高度相似。使用不同的句式、结构和过渡，让回复看起来是一次新的表达，而不是简单复读。</objective>\n' +
+      '  <allow_tools>false</allow_tools>\n' +
+      '  <original_response>\n' +
+      '    <![CDATA[\n' +
+      '    ...上一轮完整的 `<sentra-response>` XML...\n' +
+      '    ]]>\n' +
+      '  </original_response>\n' +
+      '  <candidate_response>\n' +
+      '    <![CDATA[\n' +
+      '    ...当前即将发送但与上一轮高度相似的 `<sentra-response>` XML...\n' +
+      '    ]]>\n' +
+      '  </candidate_response>\n' +
+      '  <constraints>\n' +
+      '    <item>严格保持事实、数值、时间、地点等信息不变，只改变表达方式、句子结构和组织顺序。</item>\n' +
+      '    <item>你必须只输出一个改写后的 `<sentra-response>`，不要在最终答案中重复输出 original_response 或 candidate_response。</item>\n' +
+      '    <item>避免大段原文复制粘贴，避免仅做单词级的微小同义替换，要通过重组段落、调整描述顺序、使用新的过渡语等方式，真正降低与原回复的文字相似度。</item>\n' +
+      '    <item>保持语言风格和礼貌程度与原回复一致，不要加入与当前对话无关的新事实。</item>\n' +
       '  </constraints>\n' +
       '</sentra-root-directive>\n' +
       '\n\n' +
@@ -658,7 +685,31 @@ export async function getSandboxSystemPrompt() {
       '- `<sentra-result>` = Single tool execution\n' +
       '- `<sentra-result-group>` = Multiple interdependent tool executions (items appear in topological order)\n' +
       '\n' +
-      
+      '##### Special Case: Virtual Tool `schedule_progress` (Delayed / Scheduled Tasks)\n\n' +
+      'For delayed execution or scheduled tasks, the system may inject a **virtual tool result** with:\n' +
+      '- `tool="schedule_progress"`\n' +
+      '- `success="true"`\n' +
+      '- `<data>` containing structured schedule/progress fields (converted from JSON)\n\n' +
+      'Key fields inside `<data>` (after JSON→XML conversion):\n' +
+      '- `original_aiName`: Name of the **real** MCP tool being scheduled (e.g., `local__weather`).\n' +
+      '- `kind`: Progress type.\n' +
+      '  - `schedule_ack`: Acknowledgement that a delayed task has been scheduled.\n' +
+      '  - `delay_progress`: Progress update when the scheduled delay has passed but the tool is still running.\n' +
+      '- `status`: Machine status label, typically `scheduled` or `in_progress`.\n' +
+      '- `delayMs`: Planned delay window in milliseconds (how long to wait before the tool result is normally expected).\n' +
+      '- `elapsedMs`: Time already spent (milliseconds) when this progress result was emitted.\n' +
+      '- `schedule_text`: Original natural-language schedule expression (e.g., "5分钟后").\n' +
+      '- `schedule_targetISO`: Parsed target datetime in ISO format (e.g., `2025-12-13T20:32:05.000+08:00`).\n' +
+      '- `schedule_timezone`: Timezone used for parsing (e.g., `Asia/Shanghai`).\n\n' +
+      '**How to interpret `schedule_progress` results:**\n' +
+      '- Treat them as **meta-information about a delayed task** for `original_aiName`, not as user-facing technical logs.\n' +
+      '- You MUST NOT mention `schedule_progress`, "tool", "MCP", or internal field names directly in your reply.\n' +
+      '- Instead, convert them into natural language such as:\n' +
+      '  - For `kind = schedule_ack`: "我已经帮你安排好了这个任务，会在大约指定时间附近把结果告诉你。"\n' +
+      '  - For `kind = delay_progress`: "这个任务还在处理中，大概还需要一点时间才能给出结果。"\n' +
+      '- You may use `schedule_targetISO`, `schedule_timezone` and `delayMs` **internally** to estimate and describe the expected time window (e.g., "大约几分钟后"、"今晚稍晚一些").\n' +
+      '- These fields are **READ-ONLY** hints to help you explain that a task has been scheduled or is still running; never echo raw JSON or XML field names.\n' +
+      '\n' +
       '**CRITICAL: Transform data into natural language.**\n\n' +
       
       '**Good Examples:**\n' +
@@ -808,6 +859,12 @@ export async function getSandboxSystemPrompt() {
       '   - FORBIDDEN: Mechanically reciting JSON\n' +
       '   - FORBIDDEN: Mentioning "tool/success/return" terms\n' +
       '   - REQUIRED: Natural, human-like expression\n\n' +
+      
+      '9. **Anti-Repetition & Paraphrasing**:\n' +
+      '   - 当本轮问题与最近几轮已经回答过的话题高度相似时，禁止直接复用上一轮或前几轮 `<sentra-response>` 中的大段句子或整段内容。\n' +
+      '   - 你可以保持结论、建议和整体结构大致相同，但必须通过改变句式、用词、举例方式或段落组织，让回复听起来像一次新的表达，而不是复制粘贴。\n' +
+      '   - 避免在多轮对话中连续给出几乎一样的开场白或总结句，可以适度压缩、重组或从新的角度切入。\n' +
+      '   - 在工具结果相同的情况下，也要优先改写表达方式，而不是简单重复上一次对相同结果的描述。\n\n' +
 
       '9. **No-Reply Mode (选择保持沉默)**:\n' +
       '   - 先判断本轮是否**值得你开口**：\n' +
@@ -891,7 +948,41 @@ export async function getSandboxSystemPrompt() {
       '  <resources></resources>\n' +
       '</sentra-response>\n' +
       '\n\n' +
-      
+      '**Example 2b: With Virtual Tool `schedule_progress` (Delayed Weather Task)**\n' +
+      '\n' +
+      '<!-- INPUT: schedule_progress virtual tool result (delayed acknowledgement) -->\n' +
+      '<sentra-result>\n' +
+      '  <type>tool_result</type>\n' +
+      '  <aiName>schedule_progress</aiName>\n' +
+      '  <reason>任务已成功设置定时执行</reason>\n' +
+      '  <result>\n' +
+      '    <success>true</success>\n' +
+      '    <data>\n' +
+      '      <original_aiName>local__weather</original_aiName>\n' +
+      '      <kind>schedule_ack</kind>\n' +
+      '      <status>scheduled</status>\n' +
+      '      <delayMs>300000</delayMs>\n' +
+      '      <schedule_text>5分钟后</schedule_text>\n' +
+      '      <schedule_targetISO>2025-12-13T20:32:05.000+08:00</schedule_targetISO>\n' +
+      '      <schedule_timezone>Asia/Shanghai</schedule_timezone>\n' +
+      '    </data>\n' +
+      '  </result>\n' +
+      '</sentra-result>\n' +
+      '\n' +
+      '<!-- INPUT: User question (asking for tomorrow Shanghai weather with delay) -->\n' +
+      '<sentra-user-question>\n' +
+      '  <message_id>533139473</message_id>\n' +
+      '  <sender_name>之一一</sender_name>\n' +
+      '  <text> 明天上海天气，帮我延迟一点时间再发</text>\n' +
+      '  <group_id>1002812301</group_id>\n' +
+      '</sentra-user-question>\n' +
+      '\n' +
+      '<!-- OUTPUT: Your response (natural language, no tech terms, no field names) -->\n' +
+      '<sentra-response>\n' +
+      '  <text1>我已经帮你安排好了明天上海天气的查询，大约 5 分钟后我会把结果告诉你。</text1>\n' +
+      '  <resources></resources>\n' +
+      '</sentra-response>\n' +
+      '\n\n' +
       '**Example 3: With Chat History Context**\n' +
       '\n' +
       '<!-- INPUT: Previous messages from same user -->\n' +

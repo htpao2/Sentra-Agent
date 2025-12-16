@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
@@ -10,6 +11,15 @@ const __dirname = path.dirname(__filename);
 // Repo root is one level above sentra-config-ui
 const repoRoot = path.resolve(__dirname, '..', '..');
 const napcatDir = path.join(repoRoot, 'sentra-adapter', 'napcat');
+
+function exists(p) {
+  try {
+    fs.accessSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function commandExists(cmd, checkArgs = ['--version']) {
   try {
@@ -49,9 +59,45 @@ function parseArgs() {
   return out;
 }
 
+function needsNapcatInstall() {
+  const nmDir = path.join(napcatDir, 'node_modules');
+  if (!exists(nmDir)) return true;
+
+  // Key dev/runtime deps required for build/start
+  const tscPath = path.join(nmDir, 'typescript', 'bin', 'tsc');
+  const uuidPkg = path.join(nmDir, 'uuid', 'package.json');
+  if (!exists(tscPath)) return true;
+  if (!exists(uuidPkg)) return true;
+
+  return false;
+}
+
+async function ensureNapcatDeps(pm) {
+  console.log(boxen(chalk.bold.blue(`Napcat: Node.js dependencies (using ${pm})`), { padding: 1, borderStyle: 'round' }));
+
+  if (!needsNapcatInstall()) {
+    console.log(chalk.gray('[Napcat] node_modules looks OK, skipping install'));
+    return;
+  }
+
+  const args = ['install'];
+  if (pm === 'pnpm') args.push('--prod=false');
+  else if (pm === 'npm' || pm === 'cnpm') args.push('--production=false');
+
+  const env = { ...process.env };
+  if (pm === 'pnpm' || pm === 'npm' || pm === 'cnpm') {
+    env.npm_config_production = 'false';
+  }
+
+  await run(pm, args, { cwd: napcatDir, env });
+}
+
 async function main() {
   const { cmd } = parseArgs();
   const pm = choosePM(process.env.PACKAGE_MANAGER || 'auto');
+
+   // Ensure dependencies for sentra-adapter/napcat before build/start
+   await ensureNapcatDeps(pm);
 
   if (cmd === 'build') {
     console.log(boxen(chalk.bold.cyan(`Napcat: build (using ${pm})`), { padding: 1, borderStyle: 'round' }));

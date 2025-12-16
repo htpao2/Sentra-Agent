@@ -4,39 +4,41 @@
   "inputSchema": {
     "type": "object",
     "properties": {
-      "prompt": { 
-        "type": "string", 
+      "prompt": {
+        "type": "string",
         "description": "绘图指令/主题描述，英文描述的编辑/生成指令（必须为英文）。重要规则：如果描述中包含男性角色，必须在开头添加 '1boy'（一个男性）或 'xboy'（x个男性，如 2boy）；如果包含女性角色，必须添加 '1girl' 或 'xgirl'。例如：'1boy, a handsome man' 或 '1girl, beautiful woman' 或 '2boy 1girl, group photo'。"
       },
       "schedule": {
-        "oneOf": [
-          {
+        "type": "object",
+        "properties": {
+          "when": {
             "type": "string",
-            "description": "当用户需要延迟处理/延迟反馈时使用：例如 '5分钟后'、'30秒后'、'明天09:00'、ISO 字符串。"
+            "description": "时间表达：如 '5分钟后' / '30秒后' / '明天09:00' / '2025-12-16 21:30' / ISO 字符串。请使用清晰、可解析的时间表达，避免使用『稍后』『改天』『有空的时候』『尽快』『5分钟之后』等模糊说法。"
           },
-          {
-            "type": "object",
-            "properties": {
-              "when": {
-                "type": "string",
-                "description": "时间表达：如 '5分钟后' / '明天09:00' / ISO 字符串"
-              },
-              "language": {
-                "type": "string",
-                "description": "语言标识，例如 zh|en（默认 zh）"
-              },
-              "timezone": {
-                "type": "string",
-                "description": "IANA 时区名称，例如 Asia/Shanghai"
-              }
-            },
-            "additionalProperties": true
+          "language": {
+            "type": "string",
+            "description": "语言标识，例如 zh|en（默认 zh）"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA 时区名称，例如 Asia/Shanghai"
+          },
+          "targetISO": {
+            "type": "string",
+            "description": "预解析好的绝对时间（ISO 字符串），例如 '2025-12-16T21:30:00+08:00'；如提供，将被上游优先用作目标时间。"
           }
+        },
+        "required": [
+          "when",
+          "targetISO"
         ],
-        "description": "可选：当用户需要延迟处理/延迟反馈时使用；仅控制反馈时间，不延迟执行。若到点未完成，将先反馈进行中状态。"
+        "additionalProperties": true,
+        "description": "可选：当用户需要延迟处理或延迟反馈时使用。具体是仅延迟反馈还是到点再执行，由上层调度策略（例如 immediate_exec / delayed_exec）决定；若到点未完成，将先反馈进行中状态。"
       }
     },
-    "required": ["prompt"],
+    "required": [
+      "prompt"
+    ],
     "additionalProperties": true
   },
   "timeoutMs": 120000,

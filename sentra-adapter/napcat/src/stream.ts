@@ -20,6 +20,8 @@ export interface FormattedMessage {
   self_id?: number;
   /** 消息摘要（Markdown格式，可视化描述，包含 message_id） */
   summary: string;
+  /** 事件自然语言描述（Markdown，自然语言 + 多媒体md） */
+  objective?: string;
   /** 发送者QQ号 */
   sender_id: number;
   /** 发送者昵称 */
@@ -51,10 +53,10 @@ export interface FormattedMessage {
     sender_id?: number;
     /** 被引用消息的多媒体 */
     media: {
-      images: Array<{ file?: string; url?: string; size?: string | number; filename?: string }>;
-      videos: Array<{ file?: string; url?: string; size?: string | number }>;
-      files: Array<{ name?: string; url?: string; size?: string | number }>;
-      records: Array<{ file?: string; format?: string }>;
+      images: Array<{ file?: string; url?: string; size?: string | number; filename?: string; path?: string }>;
+      videos: Array<{ file?: string; url?: string; size?: string | number; path?: string }>;
+      files: Array<{ name?: string; url?: string; size?: string | number; path?: string }>;
+      records: Array<{ file?: string; format?: string; path?: string }>;
       forwards: Array<{ 
         id?: string | number; 
         count?: number; 
@@ -75,9 +77,9 @@ export interface FormattedMessage {
   /** 图片列表 */
   images: Array<{ file?: string; url?: string; path?: string; summary?: string }>;
   /** 视频列表 */
-  videos: Array<{ file?: string; url?: string }>;
+  videos: Array<{ file?: string; url?: string; path?: string }>;
   /** 文件列表 */
-  files: Array<{ name?: string; url?: string; size?: number | string; file_id?: string }>;
+  files: Array<{ name?: string; url?: string; size?: number | string; file_id?: string; path?: string }>;
   /** 语音列表 */
   records: Array<{ file?: string; url?: string; path?: string; file_size?: string | number }>;
   /** 卡片消息列表 */
@@ -294,6 +296,7 @@ export class MessageStream {
       type: msgType,
       self_id: selfId,
       summary,
+      objective: `${senderName} 戳了 ${targetName}`,
       sender_id: senderId,
       sender_name: senderName,
       sender_card: senderCard,
@@ -680,13 +683,14 @@ export class MessageStream {
           summary: seg.data?.summary 
         });
       } else if (seg.type === 'video') {
-        videos.push({ file: seg.data?.file, url: seg.data?.url });
+        videos.push({ file: seg.data?.file, url: seg.data?.url, path: seg.data?.path });
       } else if (seg.type === 'file') {
         files.push({ 
           name: seg.data?.file || seg.data?.name, 
           file_id: seg.data?.file_id,
           size: seg.data?.file_size || seg.data?.size,
-          url: seg.data?.url 
+          url: seg.data?.url,
+          path: seg.data?.path,
         });
       } else if (seg.type === 'record') {
         records.push({ 
@@ -749,6 +753,7 @@ export class MessageStream {
       type: ev.message_type,
       self_id: (ev as any).self_id,
       summary: '', // 稍后生成
+      objective: '', // 稍后生成
       sender_id: ev.user_id ?? 0,
       sender_name: ev.sender?.nickname || String(ev.user_id ?? 0),
       text,
@@ -884,6 +889,8 @@ export class MessageStream {
 
     // 生成消息摘要（Markdown格式）
     formatted.summary = await this.generateSummary(formatted);
+    // 生成事件的自然语言描述（Markdown，自然语言 + 多媒体md）
+    formatted.objective = this.generateObjective(formatted);
 
     return formatted;
   }
@@ -893,6 +900,365 @@ export class MessageStream {
    */
   getClientCount(): number {
     return this.clients.size;
+  }
+
+  /**
+   * 生成事件的自然语言描述（Markdown，自然语言 + 多媒体md）
+   * 不包含时间/消息ID等技术信息，只关注「谁在什么场景做了什么」
+   */
+  private generateObjective(msg: FormattedMessage): string {
+    const isGroup = msg.type === 'group';
+    const senderName = msg.sender_name || `QQ:${msg.sender_id}`;
+    const groupName = msg.group_name || (msg.group_id ? `群${msg.group_id}` : '未知群');
+    let desc = isGroup ? `在群聊「${groupName}」中，${senderName}` : `在私聊中，${senderName}`;
+
+    // @ 提及
+    if (msg.at_all) {
+      desc += ' 艾特了全体成员';
+    } else if (msg.at_users && msg.at_users.length > 0) {
+      const idsPreview = msg.at_users.slice(0, 3).map((u) => String(u)).join('、');
+      const more = msg.at_users.length > 3 ? ` 等${msg.at_users.length}人` : '';
+      desc += ` 艾特了${msg.at_users.length}人(${idsPreview}${more})`;
+    }
+
+    const text = (msg.text || '').trim();
+    let hasSaid = false;
+    if (text) {
+      // 如果前面已经有艾特动作，加上“然后说”
+      if (msg.at_all || (msg.at_users && msg.at_users.length > 0)) {
+        desc += `，然后说: ${text}`;
+      } else {
+        desc += ` 说: ${text}`;
+      }
+      hasSaid = true;
+    }
+
+    const actions: string[] = [];
+
+    // 图片（使用完整 Markdown 链接，优先本地路径）
+    if (msg.images && msg.images.length > 0) {
+      const items: string[] = [];
+      msg.images.forEach((img, idx) => {
+        let label: string | undefined = (img as any).summary && String((img as any).summary).trim();
+        if (label && label.startsWith('[') && label.endsWith(']')) {
+          label = label.slice(1, -1);
+        }
+        const filename = label || img.file || `图片${idx + 1}`;
+        const localPath = (img as any).path;
+        let target = localPath as string | undefined;
+        if (!target && img.url) {
+          let url = img.url;
+          if (!url.match(/^[a-zA-Z]:[\\\/]/) && !url.startsWith('/')) {
+            url = `${url}${url.includes('?') ? '&' : '?'}file=${encodeURIComponent(filename)}`;
+          }
+          target = url;
+        }
+        const safeTarget = target || img.url || img.file || '';
+        items.push(`![${filename}](${safeTarget})`);
+      });
+      const countText = msg.images.length === 1 ? '一张图片' : `${msg.images.length}张图片`;
+      actions.push(`发送了${countText}: ${items.join('、 ')}`);
+    }
+
+    // 语音（使用 Markdown 链接，带大小信息）
+    if (msg.records && msg.records.length > 0) {
+      const items: string[] = [];
+      msg.records.forEach((rec, idx) => {
+        const filename = rec.file || `语音${idx + 1}`;
+        let target = rec.path as string | undefined;
+        if (!target && rec.url) {
+          let url = rec.url;
+          if (!url.match(/^[a-zA-Z]:[\\\/]/) && !url.startsWith('/')) {
+            url = `${url}${url.includes('?') ? '&' : '?'}file=${encodeURIComponent(filename)}`;
+          }
+          target = url;
+        }
+        const safeTarget = target || rec.url || rec.file || '';
+        const sizeText = rec.file_size ? ` (${this.formatFileSize(rec.file_size)})` : '';
+        items.push(`[语音: ${filename}](${safeTarget})${sizeText}`);
+      });
+      const countText = msg.records.length === 1 ? '一条语音消息' : `${msg.records.length}条语音消息`;
+      actions.push(`发送了${countText}: ${items.join('、 ')}`);
+    }
+
+    // 文件（使用 Markdown 链接，处理远程 URL 上的文件名参数）
+    if (msg.files && msg.files.length > 0) {
+      const items: string[] = [];
+      msg.files.forEach((file, idx) => {
+        const filename = file.name || `文件${idx + 1}`;
+        let link = file.url || '';
+        if (link && !link.match(/^[a-zA-Z]:[\\\/]/) && !link.startsWith('/')) {
+          if (link.includes('fname=')) {
+            link = link.replace(/fname=([^&]*)/, `fname=${encodeURIComponent(filename)}`);
+          } else {
+            link = `${link}${link.includes('?') ? '&' : '?'}file=${encodeURIComponent(filename)}`;
+          }
+        }
+        const safeTarget = link || file.path || '';
+        const sizeText = file.size ? ` (${this.formatFileSize(file.size)})` : '';
+        items.push(`[${filename}](${safeTarget})${sizeText}`);
+      });
+      const countText = msg.files.length === 1 ? '一个文件' : `${msg.files.length}个文件`;
+      actions.push(`发送了${countText}: ${items.join('、 ')}`);
+    }
+
+    // 视频（使用 Markdown 链接）
+    if (msg.videos && msg.videos.length > 0) {
+      const items: string[] = [];
+      msg.videos.forEach((vid, idx) => {
+        const filename = vid.file || `视频${idx + 1}`;
+        let link = vid.url || '';
+        if (link && !link.match(/^[a-zA-Z]:[\\\/]/) && !link.startsWith('/')) {
+          link = `${link}${link.includes('?') ? '&' : '?'}file=${encodeURIComponent(filename)}`;
+        }
+        const safeTarget = link || vid.path || '';
+        items.push(`[视频: ${filename}](${safeTarget})`);
+      });
+      const countText = msg.videos.length === 1 ? '一个视频' : `${msg.videos.length}个视频`;
+      actions.push(`发送了${countText}: ${items.join('、 ')}`);
+    }
+
+    // 表情（保持为人类可读文本）
+    if (msg.faces && msg.faces.length > 0) {
+      const labels = msg.faces
+        .slice(0, 5)
+        .map((f) => f.text || `表情${f.id ?? ''}`);
+      actions.push(`发送了表情：${labels.join('、')}`);
+    }
+
+    // 卡片消息（share/json/xml/app，使用标题+链接的 Markdown）
+    if (msg.cards && msg.cards.length > 0) {
+      const items: string[] = [];
+      msg.cards.forEach((card) => {
+        const type = card.type || 'card';
+        let label: string;
+        if (type === 'share') label = '链接';
+        else if (type === 'app') label = '应用卡片';
+        else if (type === 'json') label = 'JSON卡片';
+        else if (type === 'xml') label = 'XML卡片';
+        else label = '卡片';
+
+        const title = card.title || card.preview || '(无标题)';
+        const url = card.url || '';
+        const desc = card.content || '';
+
+        let part: string;
+        if (url) {
+          part = `${label}: [${title}](${url})`;
+        } else {
+          part = `${label}: ${title}`;
+        }
+        if (desc) {
+          part += `，简介: ${String(desc).slice(0, 100)}${
+            String(desc).length > 100 ? '...' : ''
+          }`;
+        }
+        items.push(part);
+      });
+
+      const countText = msg.cards.length === 1 ? '一条卡片消息' : `${msg.cards.length}条卡片消息`;
+      actions.push(`分享了${countText}: ${items.join('；')}`);
+    }
+
+    // 转发消息（概括节点数量与预览）
+    if (msg.forwards && msg.forwards.length > 0) {
+      const items: string[] = [];
+      msg.forwards.forEach((fwd, idx) => {
+        const count =
+          (fwd as any).count ?? ((fwd as any).nodes?.length ?? 0);
+        const previews = Array.isArray((fwd as any).preview)
+          ? (fwd as any).preview!.slice(0, 3).join(' / ')
+          : '';
+        let line = `第${idx + 1}个转发，共${count}条消息`;
+        if (previews) line += `，预览: ${previews}`;
+        items.push(line);
+      });
+      const countText = msg.forwards.length === 1 ? '一组转发消息' : `${msg.forwards.length}组转发消息`;
+      actions.push(`转发了${countText}: ${items.join('；')}`);
+    }
+
+    // 引用消息（拟人化 + 多媒体 Markdown）
+    if (msg.reply) {
+      const r = msg.reply;
+      const rSenderName =
+        r.sender_name ||
+        (r.sender_id ? `QQ:${r.sender_id}` : `消息${r.id}`);
+      const replyParts: string[] = [];
+
+      replyParts.push(`引用了 ${rSenderName} 的一条消息`);
+
+      if (r.text && r.media.cards.length === 0) {
+        replyParts.push(`该消息说: ${r.text}`);
+      }
+
+      // 引用中的图片
+      if (r.media.images && r.media.images.length > 0) {
+        const items: string[] = [];
+        r.media.images.forEach((img, idx) => {
+          let label: string | undefined =
+            (img as any).summary && String((img as any).summary).trim();
+          if (label && label.startsWith('[') && label.endsWith(']')) {
+            label = label.slice(1, -1);
+          }
+          const filename =
+            label || img.filename || img.file?.split(/[\\/]/).pop() || `图片${idx + 1}`;
+          const localPath = (img as any).path as string | undefined;
+          let target = localPath;
+          if (!target && img.url) {
+            let url = img.url;
+            if (!url.match(/^[a-zA-Z]:[\\\/]/) && !url.startsWith('/')) {
+              url = `${url}${url.includes('?') ? '&' : '?'}file=${encodeURIComponent(
+                filename,
+              )}`;
+            }
+            target = url;
+          }
+          const safeTarget = target || img.url || img.file || '';
+          items.push(`![${filename}](${safeTarget})`);
+        });
+        replyParts.push(
+          `其中包含图片: ${items.join('、 ')}`,
+        );
+      }
+
+      // 引用中的语音
+      if (r.media.records && r.media.records.length > 0) {
+        const items: string[] = [];
+        r.media.records.forEach((rec, idx) => {
+          const filename = rec.file || `语音${idx + 1}`;
+          let target = (rec as any).path as string | undefined;
+          const url = (rec as any).url as string | undefined;
+          if (!target && url) {
+            let u = url;
+            if (!u.match(/^[a-zA-Z]:[\\\/]/) && !u.startsWith('/')) {
+              u = `${u}${u.includes('?') ? '&' : '?'}file=${encodeURIComponent(filename)}`;
+            }
+            target = u;
+          }
+          const safeTarget = target || url || rec.file || '';
+          items.push(`[语音: ${filename}](${safeTarget})`);
+        });
+        replyParts.push(
+          `其中包含语音: ${items.join('、 ')}`,
+        );
+      }
+
+      // 引用中的文件
+      if (r.media.files && r.media.files.length > 0) {
+        const items: string[] = [];
+        r.media.files.forEach((file, idx) => {
+          const filename = file.name || `文件${idx + 1}`;
+          let link = file.url || '';
+          if (link && !link.match(/^[a-zA-Z]:[\\\/]/) && !link.startsWith('/')) {
+            if (link.includes('fname=')) {
+              link = link.replace(
+                /fname=([^&]*)/,
+                `fname=${encodeURIComponent(filename)}`,
+              );
+            } else {
+              link = `${link}${link.includes('?') ? '&' : '?'}file=${encodeURIComponent(
+                filename,
+              )}`;
+            }
+          }
+          const safeTarget = link || file.path || '';
+          const sizeText =
+            file.size !== undefined
+              ? ` (${this.formatFileSize(file.size)})`
+              : '';
+          items.push(`[${filename}](${safeTarget})${sizeText}`);
+        });
+        replyParts.push(
+          `其中包含文件: ${items.join('、 ')}`,
+        );
+      }
+
+      // 引用中的视频
+      if (r.media.videos && r.media.videos.length > 0) {
+        const items: string[] = [];
+        r.media.videos.forEach((vid, idx) => {
+          const filename = vid.file || `视频${idx + 1}`;
+          let link = vid.url || '';
+          if (link && !link.match(/^[a-zA-Z]:[\\\/]/) && !link.startsWith('/')) {
+            link = `${link}${link.includes('?') ? '&' : '?'}file=${encodeURIComponent(
+              filename,
+            )}`;
+          }
+          const safeTarget = link || vid.path || '';
+          items.push(`[视频: ${filename}](${safeTarget})`);
+        });
+        replyParts.push(
+          `其中包含视频: ${items.join('、 ')}`,
+        );
+      }
+
+      // 引用中的表情
+      if (r.media.faces && r.media.faces.length > 0) {
+        const labels = r.media.faces
+          .slice(0, 5)
+          .map((f) => f.text || `表情${f.id ?? ''}`);
+        replyParts.push(`其中包含表情: ${labels.join('、')}`);
+      }
+
+      // 引用中的卡片
+      if (r.media.cards && r.media.cards.length > 0) {
+        const items: string[] = [];
+        r.media.cards.forEach((card) => {
+          const type = card.type || 'card';
+          let label: string;
+          if (type === 'share') label = '链接';
+          else if (type === 'app') label = '应用卡片';
+          else if (type === 'json') label = 'JSON卡片';
+          else if (type === 'xml') label = 'XML卡片';
+          else label = '卡片';
+
+          const title = card.title || card.preview || '(无标题)';
+          const url = card.url || '';
+          const desc = card.content || '';
+
+          let part: string;
+          if (url) {
+            part = `${label}: [${title}](${url})`;
+          } else {
+            part = `${label}: ${title}`;
+          }
+          if (desc) {
+            part += `，简介: ${String(desc).slice(0, 100)}${
+              String(desc).length > 100 ? '...' : ''
+            }`;
+          }
+          items.push(part);
+        });
+        replyParts.push(`其中包含卡片消息: ${items.join('；')}`);
+      }
+
+      // 引用中的转发
+      if (r.media.forwards && r.media.forwards.length > 0) {
+        const items: string[] = [];
+        r.media.forwards.forEach((fwd, idx) => {
+          const count =
+            (fwd as any).count ?? ((fwd as any).nodes?.length ?? 0);
+          const previews = Array.isArray((fwd as any).preview)
+            ? (fwd as any).preview!.slice(0, 3).join(' / ')
+            : '';
+          let line = `第${idx + 1}个转发，共${count}条消息`;
+          if (previews) line += `，预览: ${previews}`;
+          items.push(line);
+        });
+        replyParts.push(`其中包含转发消息: ${items.join('；')}`);
+      }
+
+      if (replyParts.length > 0) {
+        actions.push(replyParts.join('，'));
+      }
+    }
+
+    if (actions.length > 0) {
+      desc += hasSaid ? '，并且' : '，';
+      desc += actions.join('；');
+    }
+
+    return desc;
   }
 
   /**
@@ -1079,7 +1445,12 @@ export class MessageStream {
         replyLines.push(msg.reply.media.images.length === 1 ? `${rSenderInfo} 发送了一张图片:` : `${rSenderInfo} 发送了${msg.reply.media.images.length}张图片:`);
         msg.reply.media.images.forEach((img, i) => {
           const imgPath = img.file || img.url || '未知';
-          const filename = img.filename || img.file?.split(/[\\\/]/).pop() || `图片${i + 1}`;
+          let label: string | undefined =
+            (img as any).summary && String((img as any).summary).trim();
+          if (label && label.startsWith('[') && label.endsWith(']')) {
+            label = label.slice(1, -1);
+          }
+          const filename = label || img.filename || img.file?.split(/[\\\/]/).pop() || `图片${i + 1}`;
           replyLines.push(`![${filename}](${imgPath})`);
         });
       }
@@ -1088,7 +1459,7 @@ export class MessageStream {
         replyLines.push(msg.reply.media.records.length === 1 ? `${rSenderInfo} 发送了一条语音消息:` : `${rSenderInfo} 发送了${msg.reply.media.records.length}条语音消息:`);
         msg.reply.media.records.forEach((rec, i) => {
           const recPath = rec.file || '未知';
-          const filename = recPath.split(/[\\\/]/).pop() || `语音${i + 1}`;
+          const filename = rec.file || `语音${i + 1}`;
           replyLines.push(`[语音: ${filename}](${recPath})`);
         });
       }
@@ -1118,7 +1489,7 @@ export class MessageStream {
           const filename = vid.file || `视频${i + 1}`;
           // 如果URL不是本地绝对路径，需要拼接文件名
           let fullUrl = vid.url || '';
-          if (fullUrl && !fullUrl.match(/^[a-zA-Z]:[\\\\\/]/) && !fullUrl.startsWith('/')) {
+          if (fullUrl && !fullUrl.match(/^[a-zA-Z]:[\\\/]/) && !fullUrl.startsWith('/')) {
             fullUrl = `${fullUrl}${fullUrl.includes('?') ? '&' : '?'}file=${encodeURIComponent(filename)}`;
           }
           replyLines.push(`[视频: ${filename}](${fullUrl})`);
@@ -1146,7 +1517,12 @@ export class MessageStream {
                 if (nodeImages.length > 0) {
                   replyLines.push(`  发送了${nodeImages.length === 1 ? '一' : String(nodeImages.length)}张图片:`);
                   nodeImages.forEach((s: any, i2: number) => {
-                    const fname = s.data?.file || `图片${i2 + 1}`;
+                    let label: string | undefined =
+                      s.data?.summary && String(s.data.summary).trim();
+                    if (label && label.startsWith('[') && label.endsWith(']')) {
+                      label = label.slice(1, -1);
+                    }
+                    const fname = label || s.data?.file || `图片${i2 + 1}`;
                     const local = s.data?.path || s.data?.cache_path;
                     const url = s.data?.url;
                     const target = local || (url ? `${url}${String(url).includes('?') ? '&' : '?'}file=${encodeURIComponent(fname)}` : '');
@@ -1287,7 +1663,12 @@ export class MessageStream {
         lines.push(`发送了${msg.images.length}张图片:`);
       }
       msg.images.forEach((img, i) => {
-        const filename = img.file || `图片${i + 1}`;
+        let label: string | undefined =
+          (img as any).summary && String((img as any).summary).trim();
+        if (label && label.startsWith('[') && label.endsWith(']')) {
+          label = label.slice(1, -1);
+        }
+        const filename = label || img.file || `图片${i + 1}`;
         const localPath = (img as any).path; // 本地缓存绝对路径（由 main.ts 填充）
         const fullUrl = !localPath && img.url ? `${img.url}${img.url.includes('?') ? '&' : '?'}file=${encodeURIComponent(filename)}` : '';
         const target = localPath || fullUrl || '';

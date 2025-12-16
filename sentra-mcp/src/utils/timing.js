@@ -8,7 +8,7 @@ export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
-// 时间解析工具类（参考用户提供的实现风格）
+// 时间解析工具类
 export class TimeParser {
   constructor(config = {}) {
     this.windowConfig = {

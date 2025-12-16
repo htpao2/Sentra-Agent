@@ -121,11 +121,18 @@ class ReplySendQueue {
           ? String(meta.meta.groupId)
           : (meta?.groupId ? String(meta.groupId) : null);
         const textForRecent = (meta?.textForDedup || '').trim();
+        const resourcesForRecent = Array.isArray(meta?.resourceKeys) ? meta.resourceKeys : [];
+        const hasTextOrResourceForRecent = !!textForRecent || resourcesForRecent.length > 0;
 
-        // 跨批次/跨轮的最近已发送去重：避免在同一会话里，前后两轮说几乎一样的话
-        if (groupIdForRecent && textForRecent) {
+        // 跨批次/跨轮的最近已发送去重：仅在资源集合完全一致的前提下，避免在同一会话里前后两轮说几乎一样的话
+        if (groupIdForRecent && hasTextOrResourceForRecent) {
           try {
-            const recentDup = await this._isRecentDuplicate(groupIdForRecent, textForRecent, meta?.hasTool);
+            const recentDup = await this._isRecentDuplicate(
+              groupIdForRecent,
+              textForRecent,
+              resourcesForRecent,
+              meta?.hasTool
+            );
             if (recentDup) {
               logger.info(
                 `最近发送去重: 跳过任务 ${taskId} (groupId=${groupIdForRecent})`
@@ -146,8 +153,8 @@ class ReplySendQueue {
           const duration = Date.now() - startTime;
           
           logger.success(`发送完成: ${taskId} (耗时: ${duration}ms)`);
-          if (groupIdForRecent && textForRecent) {
-            this._rememberRecentSent(groupIdForRecent, textForRecent);
+          if (groupIdForRecent && hasTextOrResourceForRecent) {
+            this._rememberRecentSent(groupIdForRecent, textForRecent, resourcesForRecent);
           }
           resolve(result);
         } catch (error) {
@@ -193,13 +200,38 @@ class ReplySendQueue {
     for (let j = 0; j < n; j++) {
       const metaJ = batch[j]?.meta || {};
       const textJ = (metaJ.textForDedup || '').trim();
-      if (!textJ) continue;
+      const resourcesJ = Array.isArray(metaJ.resourceKeys) ? metaJ.resourceKeys : [];
+      const hasTextJ = !!textJ;
+      const hasResJ = resourcesJ.length > 0;
+
+      if (!hasTextJ && !hasResJ) continue;
 
       for (let i = 0; i < j; i++) {
         if (!keep[i]) continue;
         const metaI = batch[i]?.meta || {};
         const textI = (metaI.textForDedup || '').trim();
-        if (!textI) continue;
+        const resourcesI = Array.isArray(metaI.resourceKeys) ? metaI.resourceKeys : [];
+        const hasTextI = !!textI;
+        const hasResI = resourcesI.length > 0;
+
+        if (!hasTextI && !hasResI) continue;
+
+        // 资源集合必须完全一致，才允许进一步按文本语义做去重判断
+        const resourcesEqual = this._areResourceSetsEqual(resourcesI, resourcesJ);
+        if (!resourcesEqual) {
+          continue;
+        }
+
+        // 资源集合完全一致且双方都没有文本：视为纯资源重复，保留时间更晚的 j
+        if (!hasTextI && !hasTextJ) {
+          keep[i] = false;
+          continue;
+        }
+
+        // 一个有文本一个没文本：用途不同，不去重
+        if (!hasTextI || !hasTextJ) {
+          continue;
+        }
 
         const { areSimilar } = await this._judgePairSimilarity(textI, textJ);
         if (areSimilar) {
@@ -223,6 +255,34 @@ class ReplySendQueue {
       .trim();
   }
 
+  _normalizeResourceKeys(keys) {
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return [];
+    }
+
+    const cleaned = keys
+      .map((k) => (typeof k === 'string' ? k.trim() : ''))
+      .filter(Boolean);
+
+    if (cleaned.length === 0) {
+      return [];
+    }
+
+    const uniq = Array.from(new Set(cleaned));
+    uniq.sort();
+    return uniq;
+  }
+
+  _areResourceSetsEqual(a, b) {
+    const aa = this._normalizeResourceKeys(a);
+    const bb = this._normalizeResourceKeys(b);
+    if (aa.length !== bb.length) return false;
+    for (let i = 0; i < aa.length; i++) {
+      if (aa[i] !== bb[i]) return false;
+    }
+    return true;
+  }
+
   _pruneRecentList(groupId, now = Date.now()) {
     const g = String(groupId || '');
     if (!g) return;
@@ -238,7 +298,12 @@ class ReplySendQueue {
     if (list.length === 0) return;
 
     const cutoff = now - ttl;
-    const filtered = list.filter((item) => item && item.ts >= cutoff && item.text);
+    const filtered = list.filter(
+      (item) =>
+        item &&
+        item.ts >= cutoff &&
+        (item.text || (Array.isArray(item.resources) && item.resources.length > 0))
+    );
     while (filtered.length > max) {
       filtered.shift();
     }
@@ -250,29 +315,36 @@ class ReplySendQueue {
     }
   }
 
-  _rememberRecentSent(groupId, text, now = Date.now()) {
+  _rememberRecentSent(groupId, text, resourceKeys, now = Date.now()) {
     if (!RECENT_DEDUP_ENABLED) return;
     const g = String(groupId || '');
-    const t = this._normalizeRecentText(text);
-    if (!g || !t) return;
+    const t = this._normalizeRecentText(text || '');
+    const r = this._normalizeResourceKeys(resourceKeys);
+    if (!g || (!t && r.length === 0)) return;
 
     const list = this.recentSentByGroup.get(g) || [];
-    list.push({ text: t, ts: now });
+    list.push({ text: t, resources: r, ts: now });
     this.recentSentByGroup.set(g, list);
     this._pruneRecentList(g, now);
   }
 
-  async _isRecentDuplicate(groupId, text, hasTool) {
+  async _isRecentDuplicate(groupId, text, resourceKeys, hasTool) {
     if (!RECENT_DEDUP_ENABLED) return false;
     const g = String(groupId || '');
-    const t = this._normalizeRecentText(text);
-    if (!g || !t) return false;
+    const t = this._normalizeRecentText(text || '');
+    const r = this._normalizeResourceKeys(resourceKeys);
+    if (!g || (!t && r.length === 0)) return false;
 
     const isPrivate = g.startsWith('U:');
     if (isPrivate && !RECENT_DEDUP_STRICT_FOR_PRIVATE) {
-      // 私聊未启用严格去重时，只做简单 exact 匹配
+      // 私聊未启用严格去重时，只做简单 exact 匹配，但仍需资源集合一致
       const list = this.recentSentByGroup.get(g) || [];
-      return list.some((item) => item && item.text === t);
+      return list.some(
+        (item) =>
+          item &&
+          this._areResourceSetsEqual(item.resources || [], r) &&
+          item.text === t
+      );
     }
 
     const list = this.recentSentByGroup.get(g) || [];
@@ -288,18 +360,34 @@ class ReplySendQueue {
     const candidates = recent.slice(-3);
 
     for (const item of candidates) {
-      if (!item || !item.text) continue;
-      const base = this._normalizeRecentText(item.text);
-      if (!base) continue;
+      if (!item) continue;
+
+      const baseResources = Array.isArray(item.resources) ? item.resources : [];
+      // 资源集合不同，一律不视为重复
+      if (!this._areResourceSetsEqual(baseResources, r)) {
+        continue;
+      }
+
+      const baseText = this._normalizeRecentText(item.text || '');
+
+      // 资源集合完全一致且双方都没有文本：视为纯资源重复
+      if (!baseText && !t) {
+        return true;
+      }
+
+      // 一个有文本一个没文本：不视为重复
+      if (!baseText || !t) {
+        continue;
+      }
 
       // 快速 exact：完全相同视为复读
-      if (base === t) {
+      if (baseText === t) {
         return true;
       }
 
       // 语义相似：复用批次去重的判定逻辑
       try {
-        const { areSimilar } = await this._judgePairSimilarity(base, t);
+        const { areSimilar } = await this._judgePairSimilarity(baseText, t);
         if (areSimilar) {
           return true;
         }

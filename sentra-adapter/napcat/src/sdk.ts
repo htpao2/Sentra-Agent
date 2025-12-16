@@ -9,6 +9,7 @@ import { onConfigChange } from './runtimeConfig';
 import { assertOk } from './ob11';
 import { extractReplyInfo, type ReplyInfo } from './utils/reply-parser';
 import { MessageStream, type FormattedMessage } from './stream';
+import { ensureLocalFile } from './utils/fileCache';
 
 export type SDKInit =
   | { adapter: NapcatAdapter | NapcatReverseAdapter }
@@ -160,10 +161,10 @@ export type SdkInvoke = ((action: string, params?: any) => Promise<OneBotRespons
       referredPlain: string;
       currentPlain: string;
       media: {
-        images: Array<{ file?: string; url?: string; size?: string | number; filename?: string }>;
-        videos: Array<{ file?: string; url?: string; size?: string | number }>;
-        files: Array<{ name?: string; url?: string; size?: string | number }>;
-        records: Array<{ file?: string; format?: string }>;
+        images: Array<{ file?: string; url?: string; size?: string | number; filename?: string; path?: string }>;
+        videos: Array<{ file?: string; url?: string; size?: string | number; path?: string }>;
+        files: Array<{ name?: string; url?: string; size?: string | number; path?: string }>;
+        records: Array<{ file?: string; format?: string; path?: string }>;
         forwards: Array<{ 
           id?: string | number; 
           count?: number; 
@@ -605,15 +606,19 @@ export function createSDK(init?: SDKInit): SdkInvoke {
             parts.push(title ? `[分享]${title}` : '[分享链接]');
           }
           else if (s.type === 'app') {
-            const raw = s.data?.content ?? s.data?.data ?? '';
-            try {
-              const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
-              const title = obj?.meta?.news?.title || obj?.meta?.detail_1?.title || obj?.prompt || obj?.meta?.title || obj?.title || '';
-              parts.push(title ? `[应用]${title}` : '[应用卡片]');
-            } catch {
-              parts.push('[应用卡片]');
-            }
+          const raw = s.data?.content ?? s.data?.data ?? '';
+          let preview = '';
+          try {
+            const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            // 尝试提取有意义的字段：标题或描述
+            const title = obj?.meta?.news?.title || obj?.meta?.detail_1?.title || obj?.prompt || obj?.meta?.title || obj?.title || '';
+            const desc = obj?.meta?.news?.desc || obj?.meta?.detail_1?.desc || obj?.desc || '';
+            preview = title || desc || '';
+          } catch {
+            preview = typeof raw === 'string' ? raw.slice(0, 100) : '';
           }
+          parts.push(preview ? `[应用]${preview}` : '[应用卡片]');
+        }
           else if (s.type === 'forward') parts.push('[转发消息]');
           else parts.push(`[${String(s.type)}]`);
         }
@@ -767,27 +772,33 @@ export function createSDK(init?: SDKInit): SdkInvoke {
         const tasks = limit.map(async (img: any) => {
           try {
             const detail: any = await fn.data('get_image', { file: img.file || img.url });
-            return {
+            const localPath = await ensureLocalFile({
+              kind: 'image',
               file: detail?.file || img.file,
+              url: detail?.url || img.url,
+              filenameHint: detail?.file_name || img.file,
+            });
+            return {
+              file: localPath || detail?.file || img.file,
               url: detail?.url || img.url,
               size: detail?.file_size || img.file_size,
               filename: detail?.file_name || img.file,
+              path: localPath,
             };
           } catch {
-            // 检查 file 是否为绝对路径（包含盘符、/ 或 \\ 开头）
-            const isAbsolutePath = (path: string): boolean => {
-              if (!path) return false;
-              // Windows: C:\ or D:\ or \\network\path
-              if (/^[a-zA-Z]:[\\\/]/.test(path)) return true;
-              if (path.startsWith('\\\\')) return true;
-              // Unix/Linux: /path
-              if (path.startsWith('/')) return true;
-              return false;
+            const localPath = await ensureLocalFile({
+              kind: 'image',
+              file: img.file,
+              url: img.url,
+              filenameHint: img.file,
+            });
+            return {
+              file: localPath || img.file,
+              url: img.url,
+              size: img.file_size,
+              filename: img.file,
+              path: localPath,
             };
-            
-            // 如果 file 不是绝对路径，优先使用 url
-            const finalFile = isAbsolutePath(img.file) ? img.file : (img.url || img.file);
-            return { file: finalFile, url: img.url, size: img.file_size };
           }
         });
         return await Promise.all(tasks);
@@ -798,12 +809,29 @@ export function createSDK(init?: SDKInit): SdkInvoke {
         const tasks = limit.map(async (rec: any) => {
           try {
             const detail: any = await fn.data('get_record', { file: rec.file, out_format: 'mp3' });
-            return {
+            const localPath = await ensureLocalFile({
+              kind: 'record',
               file: detail?.file || rec.path || rec.file,
+              url: undefined,
+              filenameHint: rec.file,
+            });
+            return {
+              file: localPath || detail?.file || rec.path || rec.file,
               format: detail?.out_format || 'mp3',
+              path: localPath,
             };
           } catch {
-            return { file: rec.path || rec.file, format: 'unknown' };
+            const localPath = await ensureLocalFile({
+              kind: 'record',
+              file: rec.path || rec.file,
+              url: undefined,
+              filenameHint: rec.file,
+            });
+            return {
+              file: localPath || rec.path || rec.file,
+              format: 'unknown',
+              path: localPath,
+            };
           }
         });
         return await Promise.all(tasks);
@@ -820,13 +848,32 @@ export function createSDK(init?: SDKInit): SdkInvoke {
             } else if (msgType === 'private' && targetId && fileId) {
               detail = await fn.data('get_file', { file_id: fileId });
             }
+            const url = detail?.url || detail?.file_url || f.url;
+            const localPath = await ensureLocalFile({
+              kind: 'file',
+              file: detail?.file,
+              url,
+              filenameHint: detail?.file_name || f.file || f.name,
+            });
             return {
               name: detail?.file_name || f.file || f.name,
-              url: detail?.url || detail?.file_url || f.url,
+              url,
               size: detail?.file_size || f.file_size || f.size,
+              path: localPath,
             };
           } catch {
-            return { name: f.file || f.name, url: f.url, size: f.file_size || f.size };
+            const localPath = await ensureLocalFile({
+              kind: 'file',
+              file: (f as any).path || f.file,
+              url: f.url,
+              filenameHint: f.file || f.name,
+            });
+            return {
+              name: f.file || f.name,
+              url: f.url,
+              size: f.file_size || f.size,
+              path: localPath,
+            };
           }
         });
         return await Promise.all(tasks);

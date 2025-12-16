@@ -5,10 +5,7 @@ import { formatEventCompact, isMeaningfulMessage } from './events';
 import type { MessageEvent } from './types/onebot';
 import { getConfig, refreshConfigFromEnv } from './runtimeConfig';
 import { startEnvWatcher } from './envWatcher';
-import * as path from 'path';
-import * as fs from 'fs';
-import { promises as fsp } from 'fs';
-import * as https from 'https';
+import { ensureLocalFile, startCacheCleanupTimer, isLocalPath } from './utils/fileCache';
 
 const log = createLogger(process.env.LOG_LEVEL as any || 'info');
 
@@ -19,6 +16,9 @@ async function main() {
   const isReverse = mode === 'reverse';
 
   log.info({ mode }, '启动配置');
+
+  // 启动缓存目录的周期清理（图片/文件等），默认 2 天过期
+  startCacheCleanupTimer(log as any);
 
   const sdk = createSDK();
 
@@ -93,34 +93,10 @@ async function main() {
       try {
         const streamInstance = sdk.stream.getInstance();
         if (streamInstance) {
-          // 准备图片缓存目录
-          const imageCacheDir = process.env.IMAGE_CACHE_DIR || path.resolve(process.cwd(), 'cache', 'images');
-          try { await fsp.mkdir(imageCacheDir, { recursive: true }); } catch {}
+          const msg = ev as MessageEvent;
 
-          // 简单的 https 下载到文件（用于无法直接复制本地文件时的兜底）
-          const downloadToFile = (url: string, destPath: string): Promise<void> => new Promise((resolve, reject) => {
-            const fileStream = fs.createWriteStream(destPath);
-            const req = https.get(url, (res) => {
-              if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                // 简单跟随一次重定向
-                https.get(res.headers.location, (res2) => {
-                  res2.pipe(fileStream);
-                  fileStream.on('finish', () => fileStream.close(() => resolve()));
-                }).on('error', reject);
-                return;
-              }
-              if (res.statusCode !== 200) {
-                reject(new Error(`HTTP ${res.statusCode}`));
-                return;
-              }
-              res.pipe(fileStream);
-              fileStream.on('finish', () => fileStream.close(() => resolve()));
-            });
-            req.on('error', reject);
-          });
-
-          // 图片：快速转存到本地缓存，并在 segment 上写入 cache_path，供 summary 使用
-          const imageSegments = (ev as MessageEvent).message.filter((s: any) => s.type === 'image');
+          // 图片：统一通过 fileCache 转成本地路径，写入 path/cache_path，供下游使用
+          const imageSegments = msg.message.filter((s: any) => s.type === 'image');
           if (imageSegments.length > 0) {
             await Promise.all(imageSegments.map(async (seg: any) => {
               try {
@@ -129,97 +105,161 @@ async function main() {
                 try {
                   const resp: any = await (sdk as any).call('get_image', { file: fileParam });
                   detail = resp?.data;
-                } catch {}
-
-                const origLocalPath: string | undefined = detail?.file; // NapCat 返回的本地原图路径
-                const filenameFromDetail = detail?.file_name as string | undefined;
-                const filenameFromSeg = (seg.data?.file as string | undefined) || (seg.data?.url ? String(seg.data.url).split('?')[0].split('/').pop() : undefined);
-                const filename = (filenameFromDetail || filenameFromSeg || `image_${Date.now()}.jpg`).replace(/[\\/:*?"<>|]/g, '_');
-                const destPath = path.resolve(imageCacheDir, filename);
-
-                if (origLocalPath && fs.existsSync(origLocalPath)) {
-                  try { await fsp.copyFile(origLocalPath, destPath); } catch {}
-                  seg.data.cache_path = destPath;
-                } else if (seg.data?.url) {
-                  try { await downloadToFile(seg.data.url, destPath); seg.data.cache_path = destPath; } catch {}
+                } catch {
+                  detail = undefined;
                 }
-              } catch {}
+                const localPath = await ensureLocalFile({
+                  kind: 'image',
+                  file: detail?.file || seg.data?.file,
+                  url: seg.data?.url || detail?.url,
+                  filenameHint: detail?.file_name || seg.data?.file,
+                });
+                if (localPath) {
+                  seg.data.path = localPath;
+                  // 为兼容旧逻辑，仍保留 cache_path 字段
+                  seg.data.cache_path = localPath;
+                }
+                if (!seg.data.url && detail?.url) {
+                  seg.data.url = detail.url;
+                }
+              } catch {
+              }
             }));
           }
 
-          // 获取当前消息中所有语音的详细信息（本地路径和文件大小）
-          const recordSegments = (ev as MessageEvent).message.filter((s: any) => s.type === 'record');
+          // 视频：如果只有 URL，则下载到本地缓存
+          const videoSegments = msg.message.filter((s: any) => s.type === 'video');
+          if (videoSegments.length > 0) {
+            await Promise.all(videoSegments.map(async (seg: any) => {
+              try {
+                const localPath = await ensureLocalFile({
+                  kind: 'video',
+                  file: seg.data?.file,
+                  url: seg.data?.url,
+                  filenameHint: seg.data?.file,
+                });
+                if (localPath) {
+                  seg.data.path = localPath;
+                }
+              } catch {
+              }
+            }));
+          }
+
+          // 语音：获取 NapCat 返回的本地路径，并通过 fileCache 统一成本地文件
+          const recordSegments = msg.message.filter((s: any) => s.type === 'record');
           if (recordSegments.length > 0) {
             await Promise.all(recordSegments.map(async (seg: any) => {
               try {
                 const response: any = await (sdk as any).call('get_record', { file: seg.data?.file, out_format: 'mp3' });
                 const detail = response?.data;
                 if (detail) {
-                  // 添加本地路径和文件大小到 segment data
-                  seg.data.path = detail.file;
+                  const localPath = await ensureLocalFile({
+                    kind: 'record',
+                    file: detail.file,
+                    url: seg.data?.url,
+                    filenameHint: seg.data?.file,
+                  });
+                  seg.data.path = localPath || detail.file;
                   seg.data.file_size = detail.file_size;
                 }
-              } catch (err) {
-                // 忽略获取失败的情况
+              } catch {
+                try {
+                  const localPath = await ensureLocalFile({
+                    kind: 'record',
+                    file: seg.data?.path || seg.data?.file,
+                    url: seg.data?.url,
+                    filenameHint: seg.data?.file,
+                  });
+                  if (localPath) {
+                    seg.data.path = localPath;
+                  }
+                } catch {
+                }
               }
             }));
           }
-          
-          // 获取当前消息中所有文件的下载链接
-          const fileSegments = (ev as MessageEvent).message.filter((s: any) => s.type === 'file');
+
+          // 文件：先获取 NapCat 提供的下载信息，再统一缓存为本地文件路径
+          const fileSegments = msg.message.filter((s: any) => s.type === 'file');
           if (fileSegments.length > 0) {
             await Promise.all(fileSegments.map(async (seg: any) => {
               try {
                 const fileId = seg.data?.file_id;
-                if (!fileId) return;
-                
-                let response: any;
-                if ((ev as MessageEvent).message_type === 'group') {
-                  // 群聊文件：使用 get_group_file_url
-                  response = await (sdk as any).call('get_group_file_url', {
-                    group_id: (ev as MessageEvent).group_id,
-                    file_id: fileId,
-                    busid: seg.data?.busid || 102
-                  });
-                } else {
-                  // 私聊文件：使用 get_file
-                  response = await (sdk as any).call('get_file', {
-                    file_id: fileId
-                  });
+                let detail: any;
+                if (fileId) {
+                  if (msg.message_type === 'group') {
+                    // 群聊文件：使用 get_group_file_url
+                    const resp: any = await (sdk as any).call('get_group_file_url', {
+                      group_id: msg.group_id,
+                      file_id: fileId,
+                      busid: seg.data?.busid || 102,
+                    });
+                    detail = resp?.data;
+                  } else {
+                    // 私聊文件：使用 get_file
+                    const resp: any = await (sdk as any).call('get_file', {
+                      file_id: fileId,
+                    });
+                    detail = resp?.data;
+                  }
                 }
-                
-                const detail = response?.data;
+
                 if (detail) {
-                  // 添加下载链接到 segment data（仅使用可公开访问的URL字段）
-                  seg.data.url = detail.url || detail.file_url;
+                  const url = detail.url || detail.file_url || seg.data?.url;
                   if (detail.file_size) {
                     seg.data.file_size = detail.file_size;
                   }
                   if (detail.file_name && !seg.data.file) {
                     seg.data.file = detail.file_name;
                   }
+                  if (url) {
+                    seg.data.url = url;
+                  }
+                  const localPath = await ensureLocalFile({
+                    kind: 'file',
+                    file: detail.file,
+                    url,
+                    filenameHint: detail.file_name || seg.data.file,
+                  });
+                  if (localPath) {
+                    seg.data.path = localPath;
+                  }
                 }
-              } catch (err) {
-                // 忽略获取失败的情况
+
+                if (!seg.data.path) {
+                  const localPath = await ensureLocalFile({
+                    kind: 'file',
+                    file: seg.data?.path || seg.data?.file,
+                    url: seg.data?.url,
+                    filenameHint: seg.data?.file,
+                  });
+                  if (localPath) {
+                    seg.data.path = localPath;
+                  }
+                }
+              } catch {
               }
             }));
           }
-          
-          // 如果文件仍没有可用链接/路径，则跳过推送（过滤掉该消息）
+
+          // 如果文件既没有本地路径也没有可用 URL，则跳过推送（过滤掉该消息）
           if (fileSegments.length > 0) {
-            // 仅当无法得到可用的 http(s) URL 时，视为未就绪
             const unresolved = fileSegments.some((seg: any) => {
+              const p = seg.data?.path;
               const u = seg.data?.url;
-              return !(typeof u === 'string' && /^https?:\/\//i.test(u));
+              const hasLocal = typeof p === 'string' && isLocalPath(p);
+              const hasUrl = typeof u === 'string' && /^https?:\/\//i.test(u);
+              return !(hasLocal || hasUrl);
             });
             if (unresolved) {
               if (process.env.LOG_LEVEL === 'debug') {
-                log.warn({ files: fileSegments.map((s: any) => s.data) }, '跳过推送：文件URL未就绪');
+                log.warn({ files: fileSegments.map((s: any) => s.data) }, '跳过推送：文件未就绪（无本地路径/URL）');
               }
               return; // 不推送该条消息
             }
           }
-          
+
           await streamInstance.push(ev as MessageEvent, replyContext);
         }
       } catch (err) {

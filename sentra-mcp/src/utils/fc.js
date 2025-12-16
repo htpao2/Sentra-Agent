@@ -1,24 +1,18 @@
 // Function-call fallback utilities: parse <sentra-tools> blocks and build instructions
 // Prompts are loaded from JSON under src/agent/prompts/ via loader.
 import { loadPrompt, renderTemplate } from '../agent/prompts/loader.js';
+import { XMLParser } from 'fast-xml-parser';
 
 /**
  * Extract <sentra-tools> ... </sentra-tools> blocks from text and parse to calls
- * Returns array of { name: string, arguments: any }
- * Supports both XML format (preferred) and legacy ReAct format
- * 
+ * Returns array of { name: string, arguments: any } using the Sentra XML Protocol.
+ *
  * XML format (Sentra XML Protocol):
  * <sentra-tools>
  *   <invoke name="tool_name">
- *     <parameter name="param1">value1</parameter>
- *     <parameter name="param2">{"key": "value"}</parameter>
+ *     <parameter name="param1"><string>value1</string></parameter>
+ *     <parameter name="param2"><object>...</object></parameter>
  *   </invoke>
- * </sentra-tools>
- * 
- * Legacy ReAct format (backward compatibility):
- * <sentra-tools>
- * Action: tool_name
- * Action Input: {...JSON...}
  * </sentra-tools>
  */
 export function parseFunctionCalls(text = '', opts = {}) {
@@ -29,15 +23,11 @@ export function parseFunctionCalls(text = '', opts = {}) {
   let m;
   while ((m = reSentra.exec(text)) !== null) {
     const raw = (m[1] || '').trim();
-    // Try XML format first (preferred)
+    // Parse Sentra XML tool call
     const xmlCall = parseSentraXML(raw);
     if (xmlCall) {
       out.push(xmlCall);
-      continue;
     }
-    // Fallback to legacy ReAct format for backward compatibility
-    const reactCall = parseSentraReAct(raw);
-    if (reactCall) out.push(reactCall);
   }
   return out;
 }
@@ -150,84 +140,304 @@ function safeParseJson(s) {
   return null;
 }
 
-/**
- * Parse Sentra XML Protocol format:
- * <invoke name="tool_name">
- *   <parameter name="param1">value1</parameter>
- *   <parameter name="param2">{"key": "value"}</parameter>
- * </invoke>
- * 
- * Key features:
- * - String/scalar parameters: specified directly (no escaping needed)
- * - Lists/objects: use JSON format
- * - Spaces in string values are preserved
- * - Parsed with regex (not strict XML validation)
- */
-function parseSentraXML(raw) {
-  if (!raw) return null;
-  const withoutFences = stripCodeFences(raw);
-  
-  // Match <invoke name="..."> ... </invoke>
-  const reInvoke = /<\s*invoke\s+name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\s*\/\s*invoke\s*>/i;
-  const mInvoke = withoutFences.match(reInvoke);
-  if (!mInvoke) return null;
-  
-  const name = String(mInvoke[1] || '').trim();
-  const paramsBlock = mInvoke[2] || '';
-  
-  // Extract all <parameter name="...">...</parameter> pairs
+// Simple XML entity unescape (kept local to avoid cross-module deps)
+function unescapeXmlEntities(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
+}
+
+// Dedicated XML parser instance for <sentra-tools> blocks.
+// We disable automatic value/attribute parsing so that type decoding is
+// entirely controlled by our own typed node protocol
+// (<string>/<number>/<boolean>/<null>/<array>/<object>).
+const sentraToolsXmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  trimValues: false,
+  allowBooleanAttributes: true,
+  parseTagValue: false,
+  parseAttributeValue: false,
+});
+
+// Best-effort parser for typed XML value blocks like
+// <array><object>...</object></array> or <object><parameter ...>...</parameter></object>
+function parseStructuredXmlValue(raw) {
+  if (!raw) return { matched: false };
+  const t = stripCodeFences(String(raw)).trim();
+  if (!t) return { matched: false };
+
+  // <array>...</array>
+  const mArr = t.match(/<\s*array\b[^>]*>([\s\S]*?)<\s*\/\s*array\s*>/i);
+  if (mArr) {
+    const val = parseXmlArray(mArr[1] || '');
+    return { matched: true, value: val };
+  }
+
+  // self-closing <array /> represents an empty array
+  const mArrSelf = t.match(/<\s*array\b[^>]*\/\s*>/i);
+  if (mArrSelf) {
+    return { matched: true, value: [] };
+  }
+
+  // <object>...</object>
+  const mObj = t.match(/<\s*object\b[^>]*>([\s\S]*?)<\s*\/\s*object\s*>/i);
+  if (mObj) {
+    const val = parseXmlObject(mObj[1] || '');
+    return { matched: true, value: val };
+  }
+
+  // self-closing <object /> represents an empty object
+  const mObjSelf = t.match(/<\s*object\b[^>]*\/\s*>/i);
+  if (mObjSelf) {
+    return { matched: true, value: {} };
+  }
+
+  // <string>...</string>
+  const mStr = t.match(/<\s*string\b[^>]*>([\s\S]*?)<\s*\/\s*string\s*>/i);
+  if (mStr) {
+    const inner = mStr[1] || '';
+    return { matched: true, value: unescapeXmlEntities(inner) };
+  }
+
+  // <number>...</number>
+  const mNum = t.match(/<\s*number\b[^>]*>([\s\S]*?)<\s*\/\s*number\s*>/i);
+  if (mNum) {
+    const n = Number(String(mNum[1] || '').trim());
+    if (!Number.isNaN(n)) {
+      return { matched: true, value: n };
+    }
+  }
+
+  // <boolean>...</boolean>
+  const mBool = t.match(/<\s*boolean\b[^>]*>([\s\S]*?)<\s*\/\s*boolean\s*>/i);
+  if (mBool) {
+    const v = String(mBool[1] || '').trim().toLowerCase();
+    if (v === 'true' || v === 'false') {
+      return { matched: true, value: v === 'true' };
+    }
+  }
+
+  // <null></null>
+  const mNull = t.match(/<\s*null\b[^>]*>([\s\S]*?)<\s*\/\s*null\s*>/i);
+  if (mNull) {
+    return { matched: true, value: null };
+  }
+
+  return { matched: false };
+}
+
+function parseXmlArray(inner) {
+  if (!inner || typeof inner !== 'string') return [];
+  const items = [];
+  const reChild = /<\s*(object|string|number|boolean|null|array)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi;
+  let m;
+  while ((m = reChild.exec(inner)) !== null) {
+    const block = m[0] || '';
+    const parsed = parseStructuredXmlValue(block);
+    if (parsed && parsed.matched) {
+      items.push(parsed.value);
+    }
+  }
+  return items;
+}
+
+function parseXmlObject(inner) {
+  const obj = {};
+  if (!inner || typeof inner !== 'string') return obj;
+
+  const seenKeys = new Set();
+
+  // Object form: <object><parameter name="field">VALUE</parameter>...</object>
   const reParam = /<\s*parameter\s+name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\s*\/\s*parameter\s*>/gi;
+  let m;
+  while ((m = reParam.exec(inner)) !== null) {
+    const key = String(m[1] || '').trim();
+    const body = m[2] || '';
+    if (!key || seenKeys.has(key)) continue;
+    const parsed = parseStructuredXmlValue(body);
+    if (parsed && parsed.matched) {
+      obj[key] = parsed.value;
+    } else {
+      obj[key] = inferScalarType(body);
+    }
+    seenKeys.add(key);
+  }
+
+  return obj;
+}
+
+// Extract concatenated text content from a fast-xml-parser AST node.
+function extractAstText(node) {
+  if (node == null) return '';
+  if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    return node.map((n) => extractAstText(n)).join('');
+  }
+  if (typeof node === 'object') {
+    // Prefer explicit text node when present
+    if (typeof node['#text'] === 'string') {
+      return node['#text'];
+    }
+    let out = '';
+    for (const [k, v] of Object.entries(node)) {
+      if (k === '#text') continue;
+      if (k.startsWith('@_')) continue;
+      out += extractAstText(v);
+    }
+    return out;
+  }
+  return '';
+}
+
+function decodeAstTypedValue(node) {
+  if (node == null) return null;
+  if (typeof node !== 'object') {
+    return inferScalarType(String(node));
+  }
+
+  if (Object.prototype.hasOwnProperty.call(node, 'string')) {
+    // For tool arguments we expect XML-escaped special chars; decode them so
+    // downstream tools receive raw text (HTML, code, etc.).
+    const raw = extractAstText(node.string);
+    return unescapeXmlEntities(raw);
+  }
+  if (Object.prototype.hasOwnProperty.call(node, 'number')) {
+    const raw = extractAstText(node.number);
+    const n = Number(String(raw).trim());
+    return Number.isNaN(n) ? raw : n;
+  }
+  if (Object.prototype.hasOwnProperty.call(node, 'boolean')) {
+    const raw = String(extractAstText(node.boolean)).trim().toLowerCase();
+    if (raw === 'true') return true;
+    if (raw === 'false') return false;
+    return raw;
+  }
+  if (Object.prototype.hasOwnProperty.call(node, 'null')) {
+    return null;
+  }
+  if (Object.prototype.hasOwnProperty.call(node, 'array')) {
+    return decodeAstArray(node.array);
+  }
+  if (Object.prototype.hasOwnProperty.call(node, 'object')) {
+    return decodeAstObject(node.object);
+  }
+
+  // Fallback: treat whole node as scalar text
+  return inferScalarType(extractAstText(node));
+}
+
+function decodeAstArray(arrayNode) {
+  if (arrayNode == null) return [];
+  const values = [];
+  const containers = Array.isArray(arrayNode) ? arrayNode : [arrayNode];
+  const typeKeys = ['string', 'number', 'boolean', 'null', 'array', 'object'];
+
+  for (const c of containers) {
+    if (!c || typeof c !== 'object') continue;
+    for (const key of typeKeys) {
+      if (!Object.prototype.hasOwnProperty.call(c, key)) continue;
+      const raw = c[key];
+      const items = Array.isArray(raw) ? raw : [raw];
+      for (const it of items) {
+        const wrapper = { [key]: it };
+        values.push(decodeAstTypedValue(wrapper));
+      }
+    }
+  }
+  return values;
+}
+
+function decodeAstObject(objectNode) {
+  const out = {};
+  if (objectNode == null) return out;
+  const containers = Array.isArray(objectNode) ? objectNode : [objectNode];
+
+  for (const c of containers) {
+    if (!c || typeof c !== 'object') continue;
+    const props = [];
+    if (c.property !== undefined) {
+      const list = Array.isArray(c.property) ? c.property : [c.property];
+      props.push(...list);
+    }
+    if (c.parameter !== undefined) {
+      const list = Array.isArray(c.parameter) ? c.parameter : [c.parameter];
+      props.push(...list);
+    }
+    for (const p of props) {
+      if (!p || typeof p !== 'object') continue;
+      const key = String(p['@_name'] || '').trim();
+      if (!key || Object.prototype.hasOwnProperty.call(out, key)) continue;
+      out[key] = decodeAstTypedValue(p);
+    }
+  }
+  return out;
+}
+
+function parseSentraXMLFast(raw) {
+  if (!raw) return null;
+  const inner = stripCodeFences(raw);
+  const wrapped = `<sentra-tools>${inner}</sentra-tools>`;
+  let ast;
+  try {
+    ast = sentraToolsXmlParser.parse(wrapped);
+  } catch {
+    return null;
+  }
+  if (!ast || typeof ast !== 'object') return null;
+
+  const root = ast['sentra-tools'] || ast.sentra_tools || ast;
+  if (!root || typeof root !== 'object') return null;
+
+  let invoke = root.invoke;
+  if (!invoke) return null;
+  if (Array.isArray(invoke)) invoke = invoke[0];
+  if (!invoke || typeof invoke !== 'object') return null;
+
+  const name = String(invoke['@_name'] || '').trim();
+  if (!name) return null;
+
+  const rawParams = invoke.parameter;
+  const paramsArr = Array.isArray(rawParams) ? rawParams : (rawParams ? [rawParams] : []);
   const args = {};
-  let paramMatch;
-  
-  while ((paramMatch = reParam.exec(paramsBlock)) !== null) {
-    const paramName = String(paramMatch[1] || '').trim();
-    const paramValue = paramMatch[2] || '';
-    
-    if (!paramName) continue;
-    
-    // Try to parse as JSON first (for objects/arrays)
-    const trimmed = paramValue.trim();
-    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || 
-        (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-      const parsed = safeParseJson(trimmed);
+
+  for (const p of paramsArr) {
+    if (!p || typeof p !== 'object') continue;
+    const paramName = String(p['@_name'] || '').trim();
+    if (!paramName || Object.prototype.hasOwnProperty.call(args, paramName)) continue;
+
+    // First try JSON if the entire parameter body is a raw JSON string
+    const txt = extractAstText(p).trim();
+    if ((txt.startsWith('{') && txt.endsWith('}')) || (txt.startsWith('[') && txt.endsWith(']'))) {
+      const parsed = safeParseJson(txt);
       if (parsed !== null) {
         args[paramName] = parsed;
         continue;
       }
     }
-    
-    // Otherwise treat as string/scalar (preserve spaces, try type inference)
-    const value = inferScalarType(paramValue);
-    args[paramName] = value;
+
+    // Then apply typed-node decoding (<string>/<number>/<boolean>/<null>/<array>/<object>)
+    const val = decodeAstTypedValue(p);
+    args[paramName] = val;
   }
-  
+
   if (Object.keys(args).length === 0) return null;
   return { name, arguments: args };
 }
-
 /**
- * Parse legacy ReAct format (backward compatibility):
- * Action: tool_name
- * Action Input: {...JSON...}
+ * Main Sentra XML parser entry: use fast-xml-parser AST mapping
+ * for well-formed <sentra-tools> blocks. Malformed or non-XML
+ * content simply yields null and is ignored.
  */
-function parseSentraReAct(raw) {
+function parseSentraXML(raw) {
   if (!raw) return null;
-  const withoutFences = stripCodeFences(raw);
-  // Allow Chinese colon, varying spaces/cases
-  const mName = withoutFences.match(/^\s*Action\s*[:：]\s*(.+)$/mi);
-  if (!mName) return null;
-  const name = String(mName[1] || '').trim();
-  // Find start of Action Input
-  const reInput = /^\s*Action\s*[-_]*\s*Input\s*[:：]\s*/mi;
-  const mi = withoutFences.match(reInput);
-  if (!mi) return null;
-  const idx = withoutFences.search(reInput);
-  const start = idx + mi[0].length;
-  const jsonText = String(withoutFences.slice(start)).trim();
-  const args = (typeof jsonText === 'string') ? safeParseJson(jsonText) : null;
-  if (!args || typeof args !== 'object') return null;
-  return { name, arguments: args };
+  return parseSentraXMLFast(raw);
 }
 
 /**
@@ -360,8 +570,37 @@ export function parseSentraResult(text) {
   const mData = contentBlock.match(reData);
   
   const reason = mReason ? String(mReason[1] || '').trim() : '';
-  const args = mArgs ? safeParseJson(mArgs[1]) : {};
-  const data = mData ? safeParseJson(mData[1]) : null;
+  let args = {};
+  if (mArgs) {
+    const rawArgs = mArgs[1] || '';
+    const jsonArgs = safeParseJson(rawArgs);
+    if (jsonArgs && typeof jsonArgs === 'object') {
+      args = jsonArgs;
+    } else {
+      const parsed = parseStructuredXmlValue(rawArgs);
+      if (parsed && parsed.matched) {
+        args = parsed.value;
+      } else {
+        args = {};
+      }
+    }
+  }
+
+  let data = null;
+  if (mData) {
+    const rawData = mData[1] || '';
+    const jsonData = safeParseJson(rawData);
+    if (jsonData !== null) {
+      data = jsonData;
+    } else {
+      const parsed = parseStructuredXmlValue(rawData);
+      if (parsed && parsed.matched) {
+        data = parsed.value;
+      } else {
+        data = rawData;
+      }
+    }
+  }
   
   return { stepIndex, aiName, reason, args, result: { success, data }, success };
 }

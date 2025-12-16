@@ -4,7 +4,7 @@
  */
 
 import { z } from 'zod';
-import { jsonToXMLLines, extractXMLTag, extractAllXMLTags, extractFilesFromContent, valueToXMLString, USER_QUESTION_FILTER_KEYS, extractFullXMLTag, extractAllFullXMLTags } from './xmlUtils.js';
+import { jsonToXMLLines, extractXMLTag, extractAllXMLTags, extractFilesFromContent, valueToXMLString, USER_QUESTION_FILTER_KEYS, extractFullXMLTag, extractAllFullXMLTags, escapeXmlAttr } from './xmlUtils.js';
 import { createLogger } from './logger.js';
 
 const logger = createLogger('ProtocolUtils');
@@ -522,11 +522,28 @@ export function convertHistoryToMCPFormat(historyConversations) {
           mcpConversation.push({ role: 'assistant', content: combined });
         }
       } else {
-        // 没有 <sentra-result>：仍需生成一条 assistant，明确“未调用工具”的判定，便于AI判断
-        mcpConversation.push(msg);
+        // 没有 <sentra-result>：仍需生成一组标准化的 user + assistant，
+        // 明确“未调用工具”的判定，便于 AI 在 MCP 历史中看到完整决策轨迹
+        const pendingMessages = extractXMLTag(msg.content, 'sentra-pending-messages');
+        const uq = extractXMLTag(msg.content, 'sentra-user-question') || '';
+
+        if (uq) {
+          // 和有工具路径保持一致：仅注入 pending-messages + sentra-user-question
+          let userContent = '';
+          if (pendingMessages) {
+            userContent += `<sentra-pending-messages>\n${pendingMessages}\n</sentra-pending-messages>\n\n`;
+          }
+          userContent += `<sentra-user-question>\n${uq}\n</sentra-user-question>`;
+          mcpConversation.push({
+            role: 'user',
+            content: userContent
+          });
+        } else {
+          // 兼容旧历史：没有 sentra-user-question 时，直接保留原始 user 内容
+          mcpConversation.push(msg);
+        }
 
         // 从 <sentra-user-question> 提取 summary/text 作为原因
-        const uq = extractXMLTag(msg.content, 'sentra-user-question') || '';
         let reasonText = extractXMLTag(uq, 'summary') || extractXMLTag(uq, 'text') || '';
         reasonText = (reasonText || '').trim();
         if (!reasonText) reasonText = 'No tool required for this message.';
@@ -573,9 +590,107 @@ export function convertHistoryToMCPFormat(historyConversations) {
       mcpConversation.push(msg);
     }
   }
-  
-  logger.debug(`MCP格式转换: ${historyConversations.length}条 → ${mcpConversation.length}条 (转换${convertedCount}个工具, 跳过${skippedCount}条)`);
+
+  // 详细输出一次转换后的 MCP 消息预览，便于排查上下文结构问题
+  try {
+    const total = mcpConversation.length;
+    const previewLimit = 50;
+    const preview = total > previewLimit ? mcpConversation.slice(0, previewLimit) : mcpConversation;
+    logger.debug(
+      `MCP格式转换详细messages预览(${preview.length}/${total}条): ${JSON.stringify(preview)}`
+    );
+  } catch (e) {
+    logger.debug(`MCP格式转换详细messages预览序列化失败: ${String(e)}`);
+  }
+
+  logger.debug(
+    `MCP格式转换: ${historyConversations.length}条 → ${mcpConversation.length}条 (转换${convertedCount}个工具, 跳过${skippedCount}条)`
+  );
   return mcpConversation;
+}
+
+function inferScalarForParam(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return '';
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  if (trimmed === 'null') return null;
+  const n = Number(trimmed);
+  if (!Number.isNaN(n)) return n;
+  return trimmed;
+}
+
+// (string|number|boolean|null|array|object) 渲染为 <parameter> 内部的 XML 行
+function renderTypedValueLinesForParam(value, indentLevel = 3) {
+  const lines = [];
+  const pad = '  '.repeat(indentLevel);
+
+  if (value === null) {
+    lines.push(`${pad}<null></null>`);
+    return lines;
+  }
+
+  const t = typeof value;
+
+  if (t === 'string') {
+    lines.push(`${pad}<string>${valueToXMLString(value, 0)}</string>`);
+    return lines;
+  }
+
+  if (t === 'number') {
+    lines.push(`${pad}<number>${String(value)}</number>`);
+    return lines;
+  }
+
+  if (t === 'boolean') {
+    lines.push(`${pad}<boolean>${value ? 'true' : 'false'}</boolean>`);
+    return lines;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      lines.push(`${pad}<array />`);
+      return lines;
+    }
+    lines.push(`${pad}<array>`);
+    for (const item of value) {
+      lines.push(...renderTypedValueLinesForParam(item, indentLevel + 1));
+    }
+    lines.push(`${pad}</array>`);
+    return lines;
+  }
+
+  if (t === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length === 0) {
+      lines.push(`${pad}<object />`);
+      return lines;
+    }
+    lines.push(`${pad}<object>`);
+    for (const key of keys) {
+      const keyAttr = escapeXmlAttr(String(key));
+      const paramPad = '  '.repeat(indentLevel + 1);
+      lines.push(`${paramPad}<parameter name="${keyAttr}">`);
+      lines.push(...renderTypedValueLinesForParam(value[key], indentLevel + 2));
+      lines.push(`${paramPad}</parameter>`);
+    }
+    lines.push(`${pad}</object>`);
+    return lines;
+  }
+
+  // 其他类型统一按字符串处理
+  lines.push(`${pad}<string>${valueToXMLString(String(value), 0)}</string>`);
+  return lines;
+}
+
+// 构建单个 typed <parameter> 块
+function buildTypedParameterBlock(name, jsValue) {
+  const safeName = escapeXmlAttr(String(name));
+  const lines = [];
+  lines.push(`    <parameter name="${safeName}">`);
+  lines.push(...renderTypedValueLinesForParam(jsValue, 3));
+  lines.push('    </parameter>');
+  return lines;
 }
 
 /**
@@ -599,19 +714,22 @@ function buildSentraToolsFromArgs(aiName, argsContent) {
   } catch {}
 
   if (parsed && typeof parsed === 'object') {
-    const entries = argsObjectToParamEntries(parsed);
-    for (const p of entries) {
-      xmlLines.push(`    <parameter name="${p.name}">${valueToXMLString(p.value, 0)}</parameter>`);
+    const entries = Object.entries(parsed);
+    for (const [key, value] of entries) {
+      const paramLines = buildTypedParameterBlock(key, value);
+      xmlLines.push(...paramLines);
     }
   } else {
-    // 回退：从简单 XML 解析 <key>value</key> 对
+    // 简单 XML 解析 <key>value</key> 对
     try {
       const re = /<([a-zA-Z0-9_\-]+)>([^<]*)<\/\1>/g;
       const matches = String(argsContent || '').matchAll(re);
       for (const m of matches) {
         const paramName = m[1];
-        const paramValue = m[2];
-        xmlLines.push(`    <parameter name="${paramName}">${paramValue}</parameter>`);
+        const rawValue = m[2];
+        const jsValue = inferScalarForParam(rawValue);
+        const paramLines = buildTypedParameterBlock(paramName, jsValue);
+        xmlLines.push(...paramLines);
       }
     } catch {}
   }
@@ -635,9 +753,10 @@ function buildSentraToolsBatch(items) {
       }
     } catch {}
     if (parsed && typeof parsed === 'object') {
-      const entries = argsObjectToParamEntries(parsed);
-      for (const p of entries) {
-        xmlLines.push(`    <parameter name="${p.name}">${valueToXMLString(p.value, 0)}</parameter>`);
+      const entries = Object.entries(parsed);
+      for (const [key, value] of entries) {
+        const paramLines = buildTypedParameterBlock(key, value);
+        xmlLines.push(...paramLines);
       }
     } else {
       try {
@@ -645,8 +764,10 @@ function buildSentraToolsBatch(items) {
         const matches = String(argsContent || '').matchAll(re);
         for (const m of matches) {
           const paramName = m[1];
-          const paramValue = m[2];
-          xmlLines.push(`    <parameter name="${paramName}">${paramValue}</parameter>`);
+          const rawValue = m[2];
+          const jsValue = inferScalarForParam(rawValue);
+          const paramLines = buildTypedParameterBlock(paramName, jsValue);
+          xmlLines.push(...paramLines);
         }
       } catch {}
     }

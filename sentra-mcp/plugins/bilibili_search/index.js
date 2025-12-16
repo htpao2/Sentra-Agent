@@ -15,6 +15,95 @@ function toMarkdownPath(abs) {
   return `![${label}](${mdPath})`;
 }
 
+// ==== BVID 去重缓存（避免重复推送相同视频，默认 24 小时）====
+const BVID_CACHE_TTL_SEC = Number(process.env.BILI_BVID_CACHE_TTL_SEC || 24 * 60 * 60);
+const bvidMemCache = new Map(); // Map<bvid, { expireAt:number, data:any }>
+
+function now() { return Date.now(); }
+
+function getBvidCacheDir() {
+  return path.resolve(process.cwd(), 'cache', 'bilibili_search');
+}
+
+async function ensureBvidCacheDir() {
+  await fs.mkdir(getBvidCacheDir(), { recursive: true });
+}
+
+function getBvidCacheFilePath(bvid) {
+  const safe = String(bvid).replace(/[^\w,-]/g, '_');
+  return path.join(getBvidCacheDir(), `${safe}.json`);
+}
+
+async function readBvidFileCache(bvid) {
+  try {
+    const p = getBvidCacheFilePath(bvid);
+    const txt = await fs.readFile(p, 'utf-8');
+    const cached = JSON.parse(txt);
+    if (cached.expireAt && Number(cached.expireAt) > now()) return cached.data || null;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeBvidFileCache(bvid, data, ttlSec) {
+  try {
+    await ensureBvidCacheDir();
+    const p = getBvidCacheFilePath(bvid);
+    const obj = {
+      expireAt: now() + ttlSec * 1000,
+      data,
+      cachedAt: new Date().toISOString()
+    };
+    await fs.writeFile(p, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch (e) {
+    logger.warn?.('bilibili_search:write_bvid_cache_failed', { label: 'PLUGIN', error: String(e?.message || e) });
+  }
+}
+
+function getFromBvidMem(bvid) {
+  const v = bvidMemCache.get(String(bvid));
+  if (v && v.expireAt > now()) return v.data;
+  return null;
+}
+
+function setToBvidMem(bvid, data, ttlSec) {
+  bvidMemCache.set(String(bvid), { expireAt: now() + ttlSec * 1000, data });
+}
+
+async function isBvidUsedRecently(bvid) {
+  if (!bvid) return false;
+  const mem = getFromBvidMem(bvid);
+  if (mem) return true;
+  const file = await readBvidFileCache(bvid);
+  if (file) {
+    setToBvidMem(bvid, file, BVID_CACHE_TTL_SEC);
+    return true;
+  }
+  return false;
+}
+
+async function markBvidUsed(bvid, context = {}) {
+  if (!bvid) return;
+  const ttl = BVID_CACHE_TTL_SEC > 0 ? BVID_CACHE_TTL_SEC : 24 * 60 * 60;
+  const data = { bvid, ...context };
+  setToBvidMem(bvid, data, ttl);
+  await writeBvidFileCache(bvid, data, ttl);
+}
+
+// Fisher-Yates 洗牌算法，增强随机性
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // 基础超时请求封装
 async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
   const controller = new AbortController();
@@ -286,9 +375,43 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
     logger.info?.('bilibili_search:step:search_done', { label: 'PLUGIN', count: items.length });
     if (!items.length) return { success: false, code: 'NO_RESULT', error: `未找到与 "${keyword}" 相关的视频` };
 
-    const chosen = pick === 'random' ? items[Math.floor(Math.random() * items.length)] : items[0];
+    // 基于 BVID 做去重过滤，优先选择近期未使用过的视频
+    const freshItems = [];
+    const skippedBvids = [];
+    for (const it of items) {
+      const rawBvid = it?.bvid ?? it?.bvid?.trim?.();
+      const bvidCandidate = String(rawBvid || '').trim();
+      if (!bvidCandidate) {
+        freshItems.push(it);
+        continue;
+      }
+      try {
+        const used = await isBvidUsedRecently(bvidCandidate);
+        if (!used) {
+          freshItems.push(it);
+        } else {
+          skippedBvids.push(bvidCandidate);
+        }
+      } catch {
+        // 缓存异常时不阻塞主流程
+        freshItems.push(it);
+      }
+    }
+    if (skippedBvids.length) {
+      logger.info?.('bilibili_search:bvid_skipped_by_cache', { label: 'PLUGIN', keyword, count: skippedBvids.length });
+    }
+
+    let pool = freshItems.length ? freshItems : items;
+    if (pick === 'random') {
+      pool = shuffleInPlace([...pool]);
+    }
+
+    const chosen = pool[0];
+    if (!chosen) return { success: false, code: 'NO_RESULT', error: `未找到与 "${keyword}" 相关的视频` };
+
     const title = String(chosen?.title || '').replace(/<[^>]+>/g, '');
-    const bvid = String(chosen?.bvid || chosen?.bvid?.trim?.() || '');
+    const rawBvidChosen = chosen?.bvid ?? chosen?.bvid?.trim?.();
+    const bvid = String(rawBvidChosen || '').trim();
     const up = String(chosen?.author || chosen?.uname || '');
     const duration = String(chosen?.duration || '');
     const pic = String(chosen?.pic || '');
@@ -351,33 +474,31 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
       timestamp: new Date().toISOString(),
     };
 
-    // ==================== 音乐卡片发送模式 ====================
+    // 9) 音乐卡片模式
     if (sendAsMusicCard) {
       logger.info?.('bilibili_search:send_music_card', { label: 'PLUGIN', mode: 'music_card', user_id, group_id });
-      
-      // 构建自定义音乐卡片
+
       const picUrl = pic.startsWith('//') ? `https:${pic}` : pic;
       const segments = buildCustomMusicCardSegments({
-        url: urlVideoPage,           // 点击跳转到B站视频页
-        audio: playUrls[0] || '',    // 音频/视频播放链接
+        url: urlVideoPage,
+        audio: playUrls[0] || '',
         title: title || '未知标题',
-        image: picUrl || ''           // 封面图
+        image: picUrl || ''
       });
-      
+
       const pathList = [pathMain, (user_id ? pathPri : pathGrp)].filter((v, i, a) => !!v && a.indexOf(v) === i);
       const sendRes = await sendMusicCardViaWS(
         { wsUrl, timeoutMs: wsSendTimeoutMs, pathList, argStyle },
         { user_id, group_id },
         segments
       );
-      
+
       if (sendRes.ok) {
         data.music_card_sent = true;
         data.send_target = user_id ? '私聊' : '群聊';
         data.send_to = user_id || group_id;
         data.status = 'OK_MUSIC_CARD_SENT';
         data.summary = `已成功发送B站视频"${title}"（${bvid}）的音乐卡片到${data.send_target}`;
-        // 方便 MCP 等上层直接展示的 Markdown 文本
         data.markdown = [
           '### B 站视频搜索结果',
           '',
@@ -387,16 +508,18 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
           bvid ? `- BV 号：\`${bvid}\`` : null,
           `- 发送方式：${data.send_target}（已以音乐卡片形式发送）`
         ].filter(Boolean).join('\n');
+        try {
+          await markBvidUsed(bvid, { keyword, mode: 'music_card', status: data.status });
+        } catch {}
         logger.info?.('bilibili_search:send_music_card_success', { label: 'PLUGIN', target: data.send_target, to: data.send_to });
         return { success: true, data };
-      } else {
-        logger.warn?.('bilibili_search:send_music_card_failed', { label: 'PLUGIN', reason: 'all_ws_paths_failed' });
-        return { success: false, code: 'SEND_FAILED', error: '发送音乐卡片失败（所有WebSocket路径均失败）' };
       }
+
+      logger.warn?.('bilibili_search:send_music_card_failed', { label: 'PLUGIN', reason: 'all_ws_paths_failed' });
+      return { success: false, code: 'SEND_FAILED', error: '发送音乐卡片失败（所有WebSocket路径均失败）' };
     }
 
-    // ==================== 下载模式（默认） ====================
-    // 如果探测到大小且超过阈值：不下载，仅返回链接
+    // 10) 下载模式 / 链接模式
     if (Number.isFinite(sizeBytes) && sizeBytes > 0 && sizeBytes > maxBytes) {
       const sizeMB = +(sizeBytes / 1024 / 1024).toFixed(2);
       logger.info?.('bilibili_search:too_large_skip_download', { label: 'PLUGIN', sizeMB, maxDownloadMB });
@@ -408,15 +531,13 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
       data.status = 'OK_LINK_ONLY';
       data.summary = `已成功获取视频"${title}"（${bvid}），体积 ${sizeMB}MB 超过阈值 ${maxDownloadMB}MB，按策略不下载，已提供链接：${urlVideoPage}`;
     } else if ((!Number.isFinite(sizeBytes) || sizeBytes <= 0) && strictProbe) {
-      // 未能确定大小，启用严格模式：直接返回链接，避免长时间下载导致超时
       logger.info?.('bilibili_search:unknown_size_skip_download', { label: 'PLUGIN', strictProbe });
       data.unknown_size = true;
       data.downloaded = false;
       data.status = 'OK_LINK_ONLY';
-      data.notice = `已获取视频链接，但无法确定文件大小，按严格策略不下载，已提供访问链接`;
+      data.notice = '已获取视频链接，但无法确定文件大小，按严格策略不下载，已提供访问链接';
       data.summary = `已成功获取视频"${title}"（${bvid}），由于无法确定体积，按策略不下载，已提供链接：${urlVideoPage}`;
     } else {
-      // 下载视频（支持备用 URL 重试）
       let videoSize = 0; let contentType = '';
       let lastError = null;
       for (let i = 0; i < playUrls.length; i++) {
@@ -427,7 +548,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
           videoSize = got.size; contentType = got.contentType;
           logger.info?.('bilibili_search:step:download_done', { label: 'PLUGIN', urlIndex: i, sizeMB: (videoSize / 1024 / 1024).toFixed(2) });
           lastError = null;
-          break; // 成功，退出重试循环
+          break;
         } catch (e) {
           lastError = e;
           logger.warn?.('bilibili_search:download_failed_retry', { label: 'PLUGIN', urlIndex: i, error: String(e?.message || e) });
@@ -436,18 +557,20 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
           }
         }
       }
-      
+
       if (lastError) {
-        // 所有 URL 都失败：优雅回退为仅链接
         const note = String(lastError?.message || lastError);
         logger.warn?.('bilibili_search:download_aborted_all_urls', { label: 'PLUGIN', error: note });
         data.downloaded = false;
         data.status = 'OK_LINK_ONLY';
         data.notice = `下载阶段中止（尝试了 ${playUrls.length} 个地址）：${note}。已提供访问链接`;
         data.summary = `已获取视频"${title}"（${bvid}），下载阶段中止（${note}），按策略返回链接：${urlVideoPage}`;
+        try {
+          await markBvidUsed(bvid, { keyword, mode: 'link_only_after_download_fail', status: data.status });
+        } catch {}
         return { success: true, data };
       }
-      // 与规范一致，仅提供 markdown 形式的本地视频文件路径
+
       data.path_markdown = toMarkdownPath(videoAbs);
       data.video = { path_markdown: toMarkdownPath(videoAbs), size: videoSize, contentType };
       data.downloaded = true;
@@ -458,7 +581,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
       data.summary = `已成功下载视频"${title}"（${bvid}），大小 ${sizeMB}MB，保存至本地。`;
     }
 
-    // 下载封面
+    // 11) 下载封面
     if (wantCover && pic) {
       try {
         logger.info?.('bilibili_search:step:download_cover', { label: 'PLUGIN', timeout: fetchTimeoutMs });
@@ -474,7 +597,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
       }
     }
 
-    // 为非音乐卡片模式统一构建 Markdown 文本，便于直接展示
+    // 12) 构建 Markdown
     try {
       const lines = [];
       lines.push('### B 站视频搜索结果');
@@ -497,6 +620,11 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
       data.markdown = lines.join('\n');
     } catch {}
 
+    // 13) 最终标记 BVID 已使用
+    try {
+      await markBvidUsed(bvid, { keyword, mode: 'download_or_link', status: data.status });
+    } catch {}
+
     logger.info?.('bilibili_search:complete', { label: 'PLUGIN', status: data.status, downloaded: data.downloaded });
     return { success: true, data };
   } catch (e) {
@@ -515,14 +643,25 @@ export default async function handler(args = {}, options = {}) {
     return { success: false, code: 'INVALID', error: 'keywords 为必填参数，请提供至少一个搜索关键词数组，如：["鬼灭之刃 MAD", "进击的巨人 AMV"]' };
   }
 
+  const delayMinMs = Number(process.env.BILI_SEARCH_DELAY_MIN_MS || 800);
+  const delayMaxMs = Number(process.env.BILI_SEARCH_DELAY_MAX_MS || 3000);
+  const enableDelay = delayMaxMs > 0 && delayMaxMs >= delayMinMs;
+
   const results = [];
-  for (const kw of keywords) {
+  for (let i = 0; i < keywords.length; i++) {
+    const kw = keywords[i];
     const singleArgs = { ...args, keyword: kw };
     const res = await singleBilibiliSearchHandler(singleArgs, options);
     results.push({
       keyword: kw,
       ...res
     });
+
+    if (enableDelay && i < keywords.length - 1) {
+      const delay = delayMinMs + Math.floor(Math.random() * (delayMaxMs - delayMinMs + 1));
+      logger.info?.('bilibili_search:inter_keyword_delay', { label: 'PLUGIN', delayMs: delay, index: i, total: keywords.length });
+      await sleep(delay);
+    }
   }
 
   const anyOk = results.some((r) => r.success);

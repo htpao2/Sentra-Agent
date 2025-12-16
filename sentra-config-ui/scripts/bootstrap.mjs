@@ -285,6 +285,43 @@ async function ensureNodeProjects(pm, force, dryRun, registry) {
   }
 }
 
+async function ensurePuppeteerBrowserForMcp(pm, dryRun) {
+  const mcpDir = path.join(repoRoot, 'sentra-mcp');
+  const label = path.relative(repoRoot, mcpDir) || 'sentra-mcp';
+  if (!exists(mcpDir) || !isNodeProject(mcpDir)) return;
+
+  const pkgPath = path.join(mcpDir, 'package.json');
+  let hasPuppeteer = false;
+  try {
+    const pkgRaw = fs.readFileSync(pkgPath, 'utf8');
+    const pkg = JSON.parse(pkgRaw);
+    hasPuppeteer = !!(pkg?.dependencies?.puppeteer || pkg?.devDependencies?.puppeteer);
+  } catch {
+    // If we cannot read/parse package.json, just skip
+    return;
+  }
+  if (!hasPuppeteer) return;
+
+  const spinner = ora(`Ensuring Puppeteer Chrome browser is installed for ${chalk.bold(label)}...`).start();
+  if (dryRun) {
+    spinner.info(chalk.yellow(`[DRY] puppeteer browsers install chrome @ ${label}`));
+    return;
+  }
+
+  const cmd = pm === 'pnpm' ? 'pnpm' : 'npx';
+  const args = pm === 'pnpm'
+    ? ['exec', 'puppeteer', 'browsers', 'install', 'chrome']
+    : ['puppeteer', 'browsers', 'install', 'chrome'];
+
+  try {
+    await run(cmd, args, mcpDir);
+    spinner.succeed(chalk.green(`Puppeteer Chrome browser ready @ ${label}`));
+  } catch (e) {
+    spinner.fail(chalk.red(`Failed to install Puppeteer Chrome browser for ${label}`));
+    console.warn(chalk.yellow(`You may need to run "${cmd} ${args.join(' ')}" manually in ${mcpDir}`));
+  }
+}
+
 function venvPythonPath(venvDir) {
   return process.platform === 'win32' ? path.join(venvDir, 'Scripts', 'python.exe') : path.join(venvDir, 'bin', 'python');
 }
@@ -423,7 +460,7 @@ async function ensureEmoPython(pyChoice, pipIndex, force, dryRun) {
 }
 
 async function main() {
-  console.log(chalk.bold.magenta('🚀 Sentra Agent Bootstrap'));
+  console.log(chalk.bold.magenta(' Sentra Agent Bootstrap'));
   const opts = parseArgs();
   const pm = choosePM(opts.pm);
   const { pipIndexDefault } = resolveMirrorProfileDefaults();
@@ -432,6 +469,7 @@ async function main() {
 
   if (opts.only === 'all' || opts.only === 'node') {
     await ensureNodeProjects(pm, opts.force, opts.dryRun, npmRegistry);
+    await ensurePuppeteerBrowserForMcp(pm, opts.dryRun);
   }
   if (opts.only === 'all' || opts.only === 'python') {
     await ensureEmoPython(opts.py, resolvedPipIndex, opts.force, opts.dryRun);

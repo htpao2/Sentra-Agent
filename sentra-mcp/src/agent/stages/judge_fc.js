@@ -107,8 +107,12 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
       userGoalLength: userGoal.length
     });
 
-    // 获取 FC 模式的模型配置
-    const model = getStageModel('judge');
+    // 获取 FC 模式的模型配置（支持多模型列表）
+    const defaultModel = getStageModel('judge');
+    const models = Array.isArray(config?.fcLlm?.judgeModels) && config.fcLlm.judgeModels.length
+      ? config.fcLlm.judgeModels
+      : [defaultModel];
+
     const useOmit = Number(config?.fcLlm?.maxTokens ?? -1) <= 0;
     const timeoutMs = Math.max(0, Number(config?.judge?.raceTimeoutMs ?? 12000));
     const withTimeout = (p, ms) => new Promise((resolve, reject) => {
@@ -116,8 +120,8 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
       p.then((v) => { clearTimeout(t); resolve(v); })
        .catch((err) => { clearTimeout(t); reject(err); });
     });
-    
-    const attempt = async () => {
+
+    const attemptOnce = async (modelName) => {
       const res = await chatCompletion({
         messages: msgs,
         omitMaxTokens: useOmit,
@@ -125,7 +129,7 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
         temperature: Number(config.fcLlm.temperature ?? 0.2),
         apiKey: config.fcLlm.apiKey,
         baseURL: config.fcLlm.baseURL,
-        model,
+        model: modelName,
       });
       const content = res?.choices?.[0]?.message?.content || '';
       const calls = parseFunctionCalls(String(content), {});
@@ -140,21 +144,41 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
       const need = !!parsed.need_tools;
       const summary = String(parsed.summary || '').trim();
       const operations = Array.isArray(parsed.operations) ? parsed.operations.filter(Boolean) : [];
-      logger.info?.('Judge结果（FC模式）', { need, summary, operations: operations.length > 0 ? operations : '(无)', model, label: 'JUDGE' });
+      logger.info?.('Judge结果（FC模式）', { need, summary, operations: operations.length > 0 ? operations : '(无)', model: modelName, label: 'JUDGE' });
       return { need, summary, operations, ok: true };
     };
-
-    try {
-      const attemptWithTimeout = () => (timeoutMs > 0 ? withTimeout(attempt(), timeoutMs) : attempt());
-      const winner = await Promise.any([
-        attemptWithTimeout(),
-        attemptWithTimeout(),
-      ]);
-      return winner;
-    } catch (e) {
-      logger.error?.('Judge阶段异常（FC模式）', { label: 'JUDGE', error: String(e) });
+    // 并发尝试多个 Judge 模型（FC 模式）：第一个成功返回的结果获胜
+    if (models.length === 1) {
+      try {
+        const attemptPromise = attemptOnce(models[0]);
+        const result = timeoutMs > 0 ? await withTimeout(attemptPromise, timeoutMs) : await attemptPromise;
+        if (result && result.ok) return result;
+      } catch (e) {
+        logger.warn?.('Judge FC 模型尝试失败', { label: 'JUDGE', model: models[0], error: String(e) });
+      }
+      logger.error?.('Judge阶段异常（FC模式）', { label: 'JUDGE', error: 'single judge model failed' });
       return { need: false, summary: 'Judge阶段异常（FC）', operations: [], ok: false };
     }
+
+    const tasks = models.map((modelName) => (async () => {
+      try {
+        const attemptPromise = attemptOnce(modelName);
+        const result = timeoutMs > 0 ? await withTimeout(attemptPromise, timeoutMs) : await attemptPromise;
+        return result;
+      } catch (e) {
+        logger.warn?.('Judge FC 模型尝试失败（并发）', { label: 'JUDGE', model: modelName, error: String(e) });
+        throw e;
+      }
+    })());
+
+    try {
+      const first = await Promise.any(tasks);
+      if (first && first.ok) return first;
+    } catch (e) {
+      logger.error?.('Judge阶段异常（FC模式）：所有模型均失败', { label: 'JUDGE', error: String(e) });
+    }
+
+    return { need: false, summary: 'Judge阶段异常（FC）', operations: [], ok: false };
   } catch (e) {
     logger.error?.('Judge阶段异常（FC模式）', { label: 'JUDGE', error: String(e) });
     return { need: false, summary: 'Judge阶段异常（FC）', operations: [], ok: false };

@@ -76,12 +76,19 @@ export function setupSocketHandlers(ctx) {
         }
 
         const emoText =
-          typeof msg?.text === 'string' && msg.text.trim() ? msg.text : msg?.summary || '';
+          (typeof msg?.text === 'string' && msg.text.trim())
+            ? msg.text
+            : ((typeof msg?.objective === 'string' && msg.objective.trim())
+                ? msg.objective
+                : (msg?.summary || ''));
         if (userid && emoText && emo && shouldAnalyzeEmotion(emoText, userid)) {
           emo.analyze(emoText, { userid, username }).catch(() => {});
         }
         const groupId = msg?.group_id ? `G:${msg.group_id}` : `U:${userid}`;
-        const summary = msg?.summary || msg?.text || '';
+        const summary =
+          (typeof msg?.objective === 'string' && msg.objective.trim())
+            ? msg.objective
+            : (msg?.summary || msg?.text || '');
         await historyManager.addPendingMessage(groupId, summary, msg);
 
         if (personaManager && userid && summary) {

@@ -1,6 +1,7 @@
 import logger from '../../logger/index.js';
 import { config, getStageModel } from '../../config/index.js';
 import { chatCompletion } from '../../openai/client.js';
+import { z } from 'zod';
 import { buildPlanningManifest, manifestToBulletedText, manifestToXmlToolsCatalog } from './manifest.js';
 import { rerankManifest } from './router.js';
 import { getPreThought } from '../stages/prethought.js';
@@ -13,6 +14,34 @@ import { HistoryStore } from '../../history/store.js';
 import { isRunCancelled } from '../../bus/runCancel.js';
 
 function now() { return Date.now(); }
+
+// zod schema for emit_plan arguments decoded from FC <sentra-tools>
+// reason 最终仍要求是 string[]，但为了避免模型偶尔输出纯字符串
+// 直接导致整份计划被丢弃，这里用 preprocess 把 string 自动收敛为 [string]。
+const PlanStepSchema = z.object({
+  aiName: z.string().min(1),
+  reason: z.preprocess(
+    (v) => {
+      if (Array.isArray(v)) return v;
+      if (typeof v === 'string') {
+        const t = v.trim();
+        return t ? [t] : [];
+      }
+      return [];
+    },
+    z.array(z.string()).default([]),
+  ),
+  nextStep: z.string().optional().default(''),
+  draftArgs: z.record(z.any()).optional().default({}),
+  dependsOn: z.array(z.number()).optional(),
+});
+
+const EmitPlanSchema = z.object({
+  overview: z.string().optional(),
+  steps: z.array(PlanStepSchema).optional().default([]),
+  // Backward compatibility: some models may still nest steps under plan.steps
+  plan: z.object({ steps: z.array(PlanStepSchema).optional().default([]) }).partial().optional(),
+}).passthrough();
 
 /**
  * 规范化 reason：仅支持数组格式
@@ -38,22 +67,40 @@ async function generateSinglePlan({
   maxRetries,
   policyText,
   planInstrText,
+  model,
 }) {
   const validNames = new Set(allowedAiNames || []);
   let steps = [];
   let lastContent = '';
+  let lastSchemaErrors = null;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     let reinforce = '';
     if (attempt > 1) {
-      try {
-        const pfRe = await loadPrompt('fc_reinforce_plan');
-        const tplRe = pfRe.zh;
-        reinforce = renderTemplate(tplRe, {
-          allowed_list: (allowedAiNames || []).join(', ') || '(无)',
-          attempt: String(attempt),
-          max_retries: String(maxRetries)
-        });
-      } catch {}
+      // 若上轮存在结构化 schema 错误，优先使用 FC 规划修复提示（英文），
+      // 携带错误详情与上一轮的 <sentra-tools> 原始片段，引导模型按协议重写 emit_plan。
+      if (Array.isArray(lastSchemaErrors) && lastSchemaErrors.length > 0) {
+        try {
+          const pfFix = await loadPrompt('fc_plan_fix');
+          const tplFix = pfFix.en || pfFix.user || pfFix.zh;
+          reinforce = renderTemplate(tplFix, {
+            errors: JSON.stringify(lastSchemaErrors || [], null, 2),
+            previous_xml: String(lastContent || '').slice(0, 4000),
+          });
+        } catch {}
+      }
+
+      // 若没有结构化错误信息可用，则退回到通用强化提示
+      if (!reinforce) {
+        try {
+          const pfRe = await loadPrompt('fc_reinforce_plan');
+          const tplRe = pfRe.en || pfRe.zh;
+          reinforce = renderTemplate(tplRe, {
+            allowed_list: (allowedAiNames || []).join(', ') || '(none)',
+            attempt: String(attempt),
+            max_retries: String(maxRetries),
+          });
+        } catch {}
+      }
     }
     const attemptMessages = attempt === 1
       ? baseMessages
@@ -63,7 +110,7 @@ async function generateSinglePlan({
           { role: 'user', content: [policyText, planInstrText].join('\n\n') },
         ]);
 
-    const planModel = getStageModel('plan');
+    const planModel = model || getStageModel('plan');
     const resp = await chatCompletion({
       messages: attemptMessages,
       temperature: planningTemp,
@@ -79,23 +126,73 @@ async function generateSinglePlan({
     const call = calls.find((c) => String(c.name) === 'emit_plan') || calls[0];
     let candidate = [];
     try {
-      const parsed = call?.arguments || {};
-      // 新协议：直接使用顶层 overview 和 steps 参数
-      // 兼容旧协议：如果 steps 缺失但存在 plan.steps，则回退使用 plan.steps
-      const stepsArr = Array.isArray(parsed?.steps)
-        ? parsed.steps
-        : (Array.isArray(parsed?.plan?.steps) ? parsed.plan.steps : []);
+      const rawArgs = call?.arguments || {};
+      let parsed = {};
+      try {
+        const zres = EmitPlanSchema.safeParse(rawArgs);
+        if (!zres.success) {
+          const issues = zres.error?.issues || [];
+          logger.warn?.('FC emit_plan schema 校验失败，将回退到空计划', {
+            label: 'PLAN',
+            errors: issues.map((it) => ({ path: it.path, message: it.message })) || [],
+          });
+          lastSchemaErrors = issues;
+          parsed = {};
+        } else {
+          parsed = zres.data;
+          lastSchemaErrors = null;
+        }
+      } catch {
+        parsed = rawArgs || {};
+        lastSchemaErrors = null;
+      }
+
+      // 新协议：优先使用顶层 steps；兼容旧协议：如果 steps 为空但存在 plan.steps，则回退使用 plan.steps
+      const topSteps = Array.isArray(parsed?.steps) ? parsed.steps : [];
+      const legacySteps = Array.isArray(parsed?.plan?.steps) ? parsed.plan.steps : [];
+      const stepsArr = topSteps.length ? topSteps : legacySteps;
 
       candidate = stepsArr.map((s) => ({
         aiName: s?.aiName,
         reason: normalizeReason(s?.reason),
         nextStep: s?.nextStep || '',
         draftArgs: s?.draftArgs || {},
-        dependsOn: Array.isArray(s?.dependsOn) ? s.dependsOn : undefined
+        dependsOn: Array.isArray(s?.dependsOn) ? s.dependsOn : undefined,
       }));
     } catch {}
 
     const filtered = validNames.size ? candidate.filter((s) => s.aiName && validNames.has(s.aiName)) : candidate;
+
+    // 若 emit_plan 产出了步骤，但全部因 aiName 不在允许列表而被过滤，则构造“伪 schema 错误”
+    // 交给 fc_plan_fix 提示词使用，用于显式提醒模型不要发明 schedule_progress / timer 等非法工具名。
+    if (
+      filtered.length === 0 &&
+      candidate.length > 0 &&
+      validNames.size > 0 &&
+      (allowedAiNames || []).length > 0
+    ) {
+      const invalidIssues = [];
+      const invalidNames = [];
+      for (let idx = 0; idx < candidate.length; idx++) {
+        const name = candidate[idx]?.aiName;
+        if (typeof name === 'string' && name && !validNames.has(name)) {
+          invalidNames.push(name);
+          invalidIssues.push({
+            path: ['steps', idx, 'aiName'],
+            message: `aiName "${name}" is not in allowed list: ${(allowedAiNames || []).join(', ')}. You MUST choose aiName strictly from this allowed list and MUST NOT invent new tool names (for example schedule_* or timer). Any scheduling / time-delay semantics must be expressed via a schedule field inside draftArgs of a valid tool, not as a separate scheduling tool.`,
+          });
+        }
+      }
+      if (invalidIssues.length > 0) {
+        logger.warn?.('FC emit_plan 产出的步骤全部使用了不在允许列表中的 aiName，将视为规划错误', {
+          label: 'PLAN',
+          invalidAiNames: invalidNames,
+          allowedAiNames,
+        });
+        lastSchemaErrors = invalidIssues;
+      }
+    }
+
     if (filtered.length > 0 || (allowedAiNames || []).length === 0) {
       steps = filtered;
       break;
@@ -279,91 +376,113 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
 
   let steps = [];
   let lastContent = '';
-  const enableMulti = !!config.planner?.multiEnable && Number(config.planner?.multiCandidates || 0) > 1;
-  if (enableMulti) {
-    const K = Math.max(2, Math.min(5, Number(config.planner.multiCandidates || 3)));
-    const half = Math.ceil(K / 2);
-    const minWait = Math.max(0, Number(config.planner?.candidateMinTimeoutMs ?? 3000));
-    const maxWait = Math.max(minWait, Number(config.planner?.candidateMaxTimeoutMs ?? 25000));
-    const factor = Number.isFinite(config.planner?.candidateTimeFactor) ? Number(config.planner.candidateTimeFactor) : 1.25;
-    const extra = 1 + 0.25 * (K - half);
-    const queue = [];
-    const resolvers = [];
-    function push(x) { const r = resolvers.shift(); if (r) r(x); else queue.push(x); }
-    function next() { if (queue.length) return Promise.resolve(queue.shift()); return new Promise(res => resolvers.push(res)); }
-    const startedAt = now();
-    let finished = 0;
-    const done = [];
-    let deadline = 0;
 
-    const tasks = [];
-    for (let i = 0; i < K; i++) {
-      const diversifyHint = `多方案生成：这是变体 #${i + 1}。请提供与其它变体差异明显且可执行的计划，步骤不超过 ${Math.max(1, Number(config.planner?.maxSteps || 8))} 步。`;
-      const msg = compactMessages([
-        ...messages,
-        { role: 'user', content: diversifyHint },
-      ]);
-      const t0 = now();
-      const p = generateSinglePlan({
-        baseMessages: msg,
-        allowedAiNames,
-        fc,
-        planningTemp: planningTemp + Math.min(0.3, 0.03 * i),
-        top_p,
-        maxRetries,
-        policyText,
-        planInstrText,
-      })
-        .then((res) => ({ ok: true, res, i, ms: now() - t0 }))
-        .catch(() => ({ ok: false, res: null, i, ms: now() - t0 }))
-        .then((r) => { push(r); return r; });
-      tasks.push(p);
-    }
+  // 规划模型列表：
+  // - 若 PLAN_FC_MODEL 配置了多个模型（逗号分隔），则对每个模型各生成一份候选计划
+  // - 若仅配置 1 个或未配置，则退化为单模型单计划（不再使用单模型 K 变体采样）
+  const planModelsRaw = Array.isArray(fc.planModels) ? fc.planModels : [];
+  const planModels = planModelsRaw.filter((m) => typeof m === 'string' && m.trim());
+  const uniqueModels = Array.from(new Set(planModels));
 
-    while (finished < K) {
-      if (runId && isRunCancelled(runId)) {
-        if (config.flags.enableVerboseSteps) {
-          logger.info('FC 多计划：检测到运行已取消，提前结束候选收集', { label: 'PLAN', runId, finished, K });
-        }
-        break;
-      }
-      let waiter;
-      if (deadline > 0) {
-        const remain = Math.max(0, deadline - now());
-        waiter = Promise.race([next(), new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), remain))]);
-      } else {
-        waiter = next();
-      }
-      const evt = await waiter;
-      if (evt && evt.timeout) break;
-      if (!evt) break;
-      finished += 1;
-      if (evt.ok && evt.res && Array.isArray(evt.res.steps) && evt.res.steps.length > 0) done.push(evt);
-      if (done.length === half && deadline === 0) {
-        const mean = done.reduce((s, x) => s + Number(x.ms || 0), 0) / Math.max(1, done.length);
-        const waitMs = Math.max(minWait, Math.min(maxWait, mean * factor * extra));
-        if (config.flags.enableVerboseSteps) {
-          logger.info('FC 多计划：达到50%完成阈值，进入动态等待', { label: 'PLAN', K, half, meanMs: Math.round(mean), waitMs: Math.round(waitMs) });
-        }
-        deadline = now() + waitMs;
-      }
-    }
-
-    const candidates = done
-      .map((d) => ({ steps: Array.isArray(d.res.steps) ? d.res.steps : [], raw: d.res.raw || '' }))
-      .filter((c) => c.steps.length > 0);
-    if (config.flags.enableVerboseSteps) {
-      logger.info('FC 多计划：生成候选数量', { label: 'PLAN', count: candidates.length });
-    }
+  // 若未显式配置 PLAN_FC_MODEL，则使用阶段默认模型（getStageModel('plan')）
+  const fallbackModel = getStageModel('plan');
+  if (uniqueModels.length <= 1) {
+    const modelName = uniqueModels[0] || fallbackModel;
     if (runId && isRunCancelled(runId)) {
       if (config.flags.enableVerboseSteps) {
-        logger.info('FC 规划：运行已取消，返回空计划', { label: 'PLAN', runId });
+        logger.info('FC 规划：运行已取消，跳过单模型规划', { label: 'PLAN', runId });
       }
       return { manifest, steps: [] };
     }
 
+    const one = await generateSinglePlan({
+      baseMessages: messages,
+      allowedAiNames,
+      fc,
+      planningTemp,
+      top_p,
+      maxRetries,
+      policyText,
+      planInstrText,
+      model: modelName,
+    });
+    steps = Array.isArray(one.steps) ? one.steps : [];
+    lastContent = one.raw || '';
+
+    if (runId && isRunCancelled(runId)) {
+      if (config.flags.enableVerboseSteps) {
+        logger.info('FC 规划：单模型规划完成后运行被取消，返回空计划', { label: 'PLAN', runId });
+      }
+      return { manifest, steps: [] };
+    }
+  } else {
+    if (runId && isRunCancelled(runId)) {
+      if (config.flags.enableVerboseSteps) {
+        logger.info('FC 多模型规划：运行已取消，跳过规划', { label: 'PLAN', runId });
+      }
+      return { manifest, steps: [] };
+    }
+
+    if (config.flags.enableVerboseSteps) {
+      logger.info('FC 多模型规划：开始为每个模型生成候选计划', { label: 'PLAN', models: uniqueModels });
+    }
+
+    const tasks = uniqueModels.map((modelName) => {
+      const t0 = now();
+      return generateSinglePlan({
+        baseMessages: messages,
+        allowedAiNames,
+        fc,
+        planningTemp,
+        top_p,
+        maxRetries,
+        policyText,
+        planInstrText,
+        model: modelName,
+      })
+        .then((res) => ({ ok: true, res, model: modelName, ms: now() - t0 }))
+        .catch((err) => ({ ok: false, res: null, model: modelName, ms: now() - t0, error: String(err || '') }));
+    });
+
+    const results = await Promise.all(tasks);
+
+    if (runId && isRunCancelled(runId)) {
+      if (config.flags.enableVerboseSteps) {
+        logger.info('FC 多模型规划：规划过程中检测到运行已取消，返回空计划', { label: 'PLAN', runId });
+      }
+      return { manifest, steps: [] };
+    }
+
+    const candidates = results
+      .filter((r) => r.ok && r.res && Array.isArray(r.res.steps) && r.res.steps.length > 0)
+      .map((r) => ({
+        steps: Array.isArray(r.res.steps) ? r.res.steps : [],
+        raw: r.res.raw || '',
+        model: r.model,
+      }));
+
+    if (config.flags.enableVerboseSteps) {
+      logger.info('FC 多模型规划：生成候选数量', {
+        label: 'PLAN',
+        totalModels: uniqueModels.length,
+        candidates: candidates.length,
+      });
+    }
+
     if (candidates.length === 0) {
-      const one = await generateSinglePlan({ baseMessages: messages, allowedAiNames, fc, planningTemp, top_p, maxRetries, policyText, planInstrText });
+      // 若所有模型均未产出有效步骤，则回退到主模型单次规划
+      const primaryModel = uniqueModels[0] || fallbackModel;
+      const one = await generateSinglePlan({
+        baseMessages: messages,
+        allowedAiNames,
+        fc,
+        planningTemp,
+        top_p,
+        maxRetries,
+        policyText,
+        planInstrText,
+        model: primaryModel,
+      });
       steps = Array.isArray(one.steps) ? one.steps : [];
       lastContent = one.raw || '';
     } else if (candidates.length === 1) {
@@ -371,35 +490,30 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
       lastContent = candidates[0].raw;
     } else {
       const pick = await selectBestPlan({ objective, manifest, candidates, context });
-      const best = candidates[Math.max(0, Math.min(candidates.length - 1, Number(pick.index) || 0))];
+      const idx = Math.max(0, Math.min(candidates.length - 1, Number(pick.index) || 0));
+      const best = candidates[idx];
       if (config.flags.enableVerboseSteps) {
-        logger.info('FC 多计划：选择候选', { label: 'PLAN', index: pick.index, audit: clip(String(pick.audit || ''), 360) });
+        logger.info('FC 多模型规划：选择候选', {
+          label: 'PLAN',
+          index: idx,
+          model: best.model,
+          audit: clip(String(pick.audit || ''), 360),
+        });
       }
       steps = best.steps;
       lastContent = best.raw;
       try {
         if (context?.runId) {
-          await HistoryStore.append(context.runId, { type: 'plan_audit', mode: 'fc', candidates: candidates.length, chosenIndex: Number(pick.index) || 0, reason: String(pick.audit || '') });
+          await HistoryStore.append(context.runId, {
+            type: 'plan_audit',
+            mode: 'fc',
+            candidates: candidates.length,
+            chosenIndex: idx,
+            chosenModel: best.model,
+            reason: String(pick.audit || ''),
+          });
         }
       } catch {}
-    }
-  } else {
-    if (runId && isRunCancelled(runId)) {
-      if (config.flags.enableVerboseSteps) {
-        logger.info('FC 单计划：运行已取消，跳过规划', { label: 'PLAN', runId });
-      }
-      return { manifest, steps: [] };
-    }
-
-    const one = await generateSinglePlan({ baseMessages: messages, allowedAiNames, fc, planningTemp, top_p, maxRetries, policyText, planInstrText });
-    steps = Array.isArray(one.steps) ? one.steps : [];
-    lastContent = one.raw || '';
-
-    if (runId && isRunCancelled(runId)) {
-      if (config.flags.enableVerboseSteps) {
-        logger.info('FC 单计划：运行在规划完成后被取消，返回空计划', { label: 'PLAN', runId });
-      }
-      return { manifest, steps: [] };
     }
   }
 

@@ -140,6 +140,20 @@ export class SentraMcpSDK {
   }
 
   /**
+   * Call a single MCP tool directly by aiName, bypassing planning.
+   * @param {{ aiName: string, args?: object, context?: object }} params
+   * @returns {Promise<any>}
+   */
+  async callTool({ aiName, args = {}, context = {} }) {
+    await this.init();
+    if (!aiName) {
+      throw new Error('callTool requires aiName');
+    }
+    const ctx = context && typeof context === 'object' ? context : {};
+    return this.mcpcore.callByAIName(aiName, args || {}, ctx);
+  }
+
+  /**
    * Export available tools to JSON / Markdown / XML.
    * If outputPath is provided, writes to disk; otherwise returns content.
    * @param {{ format?: 'json'|'md'|'markdown'|'xml', outputPath?: string, pretty?: number }} [opts]

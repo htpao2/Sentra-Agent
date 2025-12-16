@@ -6,7 +6,7 @@ import { HistoryStore } from '../history/store.js';
 import { ok, fail } from '../utils/result.js';
 import { summarizeToolHistory } from './summarizer.js';
 import { clip } from '../utils/text.js';
-import { timeParser, sleep } from '../utils/timing.js';
+import { timeParser } from '../utils/timing.js';
 // 规划期与工具清单相关的辅助函数
 import { buildPlanningManifest, manifestToBulletedText, buildToolContextSystem } from './plan/manifest.js';
 import { buildDependentContextText } from './plan/history.js';
@@ -90,6 +90,26 @@ function formatReason(reason) {
   return '';
 }
 
+// 判断某个工具在使用 schedule 参数时，是否允许“立即执行 + 延迟发送”模式
+// 规则：
+// - 若在 SCHEDULE_IMMEDIATE_AI_DENYLIST 中，始终视为不允许（仅到点再执行）
+// - 若 allowlist 为空，则默认不启用立即执行（保持兼容）
+// - 若在 SCHEDULE_IMMEDIATE_AI_ALLOWLIST 中且不在 denylist 中，则启用立即执行
+function isImmediateScheduleAllowed(aiName) {
+  if (!aiName) return false;
+  const schedCfg = config.schedule || {};
+  const allow = Array.isArray(schedCfg.immediateAllowlist)
+    ? schedCfg.immediateAllowlist
+    : (schedCfg.immediateAllowlist ? [schedCfg.immediateAllowlist] : []);
+  const deny = Array.isArray(schedCfg.immediateDenylist)
+    ? schedCfg.immediateDenylist
+    : (schedCfg.immediateDenylist ? [schedCfg.immediateDenylist] : []);
+
+  if (deny.includes(aiName)) return false;
+  if (allow.length === 0) return false;
+  return allow.includes(aiName);
+}
+
 // 清理 context 以供日志记录：省略 promptOverlays 等大字段
 function sanitizeContextForLog(context) {
   if (!context || typeof context !== 'object') return context;
@@ -100,6 +120,8 @@ function sanitizeContextForLog(context) {
   }
   return sanitized;
 }
+
+// 时间意图现在完全交由模型自行理解与决策，不再在 planner 中做额外的 TimeParser 预判断。
 
 // 多计划生成（native tools 模式）——单次生成一个候选
 async function generateSingleNativePlan({ messages, tools, allowedAiNames, temperature }) {
@@ -970,20 +992,73 @@ export async function executePlan(runId, objective, mcpcore, plan, opts = {}) {
     // === schedule 延迟反馈机制：仅当插件 schema 中定义了 schedule 参数时启用 ===
     let delayMs = 0;
     let scheduleDetected = false;
+    let scheduleText = '';
+    let scheduleParsed = null;
+    let scheduleMode = 'none'; // 'immediate_exec' | 'delayed_exec' | 'none'
     const schemaHasSchedule = !!(currentToolFull?.inputSchema?.properties?.schedule);
     
     if (schemaHasSchedule && toolArgs && Object.prototype.hasOwnProperty.call(toolArgs, 'schedule') && toolArgs.schedule) {
       scheduleDetected = true;
       try {
-        const scheduleText = typeof toolArgs.schedule === 'string' ? toolArgs.schedule : (toolArgs.schedule.when || toolArgs.schedule.text || '');
-        const lang = typeof toolArgs.schedule === 'object' ? toolArgs.schedule.language : undefined;
-        const parsed = timeParser.parseTimeExpression(scheduleText, { language: lang || (scheduleText.match(/[\u4e00-\u9fa5]/) ? 'zh' : 'en') });
-        if (parsed.success && parsed.parsedDateTime) {
+        // 统一提取文本与语言
+        const rawSchedule = toolArgs.schedule;
+        scheduleText = typeof rawSchedule === 'string'
+          ? rawSchedule
+          : (rawSchedule.when || rawSchedule.text || '');
+        const lang = typeof rawSchedule === 'object' ? rawSchedule.language : undefined;
+
+        // 1) 优先使用 ArgGen/Plan 阶段已经解析好的 targetISO（若存在）
+        let targetISO = (typeof rawSchedule === 'object' && rawSchedule.targetISO)
+          ? String(rawSchedule.targetISO)
+          : '';
+        let timezone = (typeof rawSchedule === 'object' && rawSchedule.timezone)
+          ? String(rawSchedule.timezone)
+          : undefined;
+        let targetMs = NaN;
+
+        if (targetISO) {
+          const ts = Date.parse(targetISO);
+          if (Number.isFinite(ts) && ts > 0) {
+            targetMs = ts;
+            // 构造一个最小的 scheduleParsed 结构，便于后续统一使用 parsedISO/timezone
+            scheduleParsed = {
+              parsedISO: targetISO,
+              timezone,
+              parsedDateTime: null,
+            };
+          }
+        }
+
+        // 2) 若缺少有效 targetISO，则回退到基于文本的时间解析
+        if (!Number.isFinite(targetMs) || targetMs <= 0) {
+          const parsed = timeParser.parseTimeExpression(scheduleText, {
+            language: lang || (scheduleText.match(/[\u4e00-\u9fa5]/) ? 'zh' : 'en'),
+          });
+          if (parsed.success && parsed.parsedDateTime) {
+            scheduleParsed = parsed;
+            const tm = parsed.parsedDateTime.toMillis
+              ? parsed.parsedDateTime.toMillis()
+              : Date.parse(parsed.parsedDateTime);
+            if (Number.isFinite(tm) && tm > 0) {
+              targetMs = tm;
+            }
+          }
+        }
+
+        if (Number.isFinite(targetMs) && targetMs > 0) {
           const nowMs = Date.now();
-          const targetMs = parsed.parsedDateTime.toMillis ? parsed.parsedDateTime.toMillis() : Date.parse(parsed.parsedDateTime);
           delayMs = Math.max(0, targetMs - nowMs);
           if (delayMs > 0) {
-            logger.info?.('Schedule 延迟反馈启用', { label: 'SCHEDULE', aiName, scheduleText, delayMs, targetISO: parsed.parsedISO });
+            const immediateAllowed = isImmediateScheduleAllowed(aiName);
+            scheduleMode = immediateAllowed ? 'immediate_exec' : 'delayed_exec';
+            logger.info?.('Schedule 延迟反馈启用', {
+              label: 'SCHEDULE',
+              aiName,
+              scheduleText,
+              delayMs,
+              targetISO: scheduleParsed?.parsedISO || targetISO || null,
+              scheduleMode,
+            });
           }
         }
       } catch (e) {
@@ -994,88 +1069,58 @@ export async function executePlan(runId, objective, mcpcore, plan, opts = {}) {
     let res;
     let elapsed;
     if (scheduleDetected && delayMs > 0) {
-      // 启动工具执行（异步，不等待）
-      const toolPromise = mcpcore.callByAIName(aiName, toolArgs, { runId, stepIndex: i });
-      let toolCompleted = false;
-      let toolResult = null;
-      let toolCompletedAt = 0;
-
-      // 监听工具完成
-      toolPromise.then(r => {
-        toolResult = r;
-        toolCompleted = true;
-        toolCompletedAt = Date.now();
-      }).catch(e => {
-        toolResult = { success: false, code: 'ERROR', error: String(e), data: null };
-        toolCompleted = true;
-        toolCompletedAt = Date.now();
-      });
-
-      // 等待延迟时间
-      await sleep(delayMs);
-
-      if (toolCompleted) {
-        // 工具已完成，但时间还没到（已经等待了）
-        res = toolResult;
-        elapsed = toolCompletedAt - stepStart;
-        logger.info?.('Schedule 延迟反馈: 工具已提前完成，延迟后反馈', { label: 'SCHEDULE', aiName, delayMs, actualMs: toolCompletedAt - stepStart });
-      } else {
-        // 时间到了但工具未完成：生成人性化的进度消息（继承 overlays 品牌语气）
-        let progressMessage = `工具正在执行中，规定时间 ${Math.round(delayMs / 1000)}s 内未完成，继续等待...`;
-        try {
-          const overlays = (context?.promptOverlays || context?.overlays || {});
-          const overlayGlobal = overlays.global?.system || overlays.global || '';
-          const overlayProgress = overlays.schedule_progress?.system || overlays.schedule_progress || '';
-          
-          if (overlayGlobal || overlayProgress) {
-            const sp = await loadPrompt('schedule_progress');
-            const systemContent = composeSystem(sp.system, [overlayGlobal, overlayProgress].filter(Boolean).join('\n\n'));
-            const userContent = renderTemplate(sp.user, {
-              aiName,
-              reason: formatReason(step.reason) || '完成任务',
-              delaySeconds: String(Math.round(delayMs / 1000))
-            });
-
-            const progressPrompt = [
-              { role: 'system', content: systemContent },
-              { role: 'user', content: userContent }
-            ];
-            const progressResp = await chatCompletion({
-              messages: progressPrompt,
-              temperature: 0.7,
-              max_tokens: 100
-            });
-            const generatedMsg = progressResp?.choices?.[0]?.message?.content?.trim();
-            if (generatedMsg && generatedMsg.length > 0 && generatedMsg.length < 300) {
-              progressMessage = generatedMsg;
-            }
-          }
-        } catch (e) {
-          logger.warn?.('生成人性化进度消息失败，使用默认消息', { label: 'SCHEDULE', error: String(e) });
-        }
-
-        const intermediateEvent = {
-          type: 'tool_choice',
-          stepIndex: i,
+      const scheduleEvent = {
+        type: 'tool_choice',
+        stepIndex: i,
+        aiName,
+        reason: formatReason(step.reason),
+        status: 'scheduled',
+        // message 留空，由上层主逻辑通过 schedule_progress 结果和上下文自行生成自然语言回复
+        message: undefined,
+        delayMs,
+        // 透传用于延迟队列执行或延迟发送的参数，供上层记录和后续 worker 使用
+        args: toolArgs,
+        schedule: {
+          text: scheduleText,
+          targetISO: scheduleParsed?.parsedISO,
+          timezone: scheduleParsed?.timezone,
+          mode: scheduleMode !== 'none' ? scheduleMode : undefined,
+        },
+        scheduleMode: scheduleMode !== 'none' ? scheduleMode : undefined,
+      };
+      try {
+        emitRunEvent(runId, scheduleEvent);
+        await HistoryStore.append(runId, scheduleEvent);
+        logger.info?.('Schedule 延迟反馈: 发送立即确认', {
+          label: 'SCHEDULE',
           aiName,
-          reason: formatReason(step.reason),
-          status: 'in_progress',
-          message: progressMessage,
-          elapsedMs: Date.now() - stepStart
-        };
-        try {
-          emitRunEvent(runId, intermediateEvent);
-          await HistoryStore.append(runId, intermediateEvent);
-          logger.info?.('Schedule 延迟反馈: 发送中间状态', { label: 'SCHEDULE', aiName, delayMs, message: progressMessage });
-        } catch {}
+          delayMs,
+          targetISO: scheduleParsed?.parsedISO,
+          scheduleMode,
+        });
+      } catch {}
 
-        // 继续等待工具完成
-        res = await toolPromise;
-        elapsed = Date.now() - stepStart;
-        logger.info?.('Schedule 延迟反馈: 工具延迟完成', { label: 'SCHEDULE', aiName, totalMs: elapsed });
+      if (scheduleMode === 'delayed_exec') {
+        // 仅对不允许立即执行的工具采用“到点再执行”的旧语义：返回占位结果，实际执行交给延迟队列
+        res = {
+          success: true,
+          code: 'SCHEDULED',
+          data: {
+            scheduled: true,
+            delayMs,
+            schedule: {
+              text: scheduleText,
+              targetISO: scheduleParsed?.parsedISO,
+              timezone: scheduleParsed?.timezone,
+            },
+          },
+        };
+        elapsed = now() - stepStart;
       }
-    } else {
-      // 无 schedule 或延迟时间为 0：正常执行
+    }
+
+    if (!res) {
+      // 无 schedule、delayMs 为 0，或启用了“立即执行 + 延迟发送”模式：正常执行工具
       res = await mcpcore.callByAIName(aiName, toolArgs, { runId, stepIndex: i });
       elapsed = now() - stepStart;
     }
@@ -1106,6 +1151,16 @@ export async function executePlan(runId, objective, mcpcore, plan, opts = {}) {
       groupSize: (gid != null && groups[gid]?.nodes?.length) ? groups[gid].nodes.length : 1,
       toolMeta: toolMetaInherited,
     };
+    if (scheduleDetected && delayMs > 0 && scheduleMode && scheduleMode !== 'none') {
+      ev.schedule = {
+        text: scheduleText,
+        targetISO: scheduleParsed?.parsedISO,
+        timezone: scheduleParsed?.timezone,
+        delayMs,
+        mode: scheduleMode,
+      };
+      ev.scheduleMode = scheduleMode;
+    }
     emitToolResultGrouped(ev, i);
     await HistoryStore.append(runId, ev);
     if (config.memory?.enable && res?.success) {
@@ -1147,11 +1202,10 @@ export async function executePlan(runId, objective, mcpcore, plan, opts = {}) {
     const pRun = runningByProvider.get(normKey(prov)) || 0;
     if (tRun >= toolLim) return false;
     if (pRun >= provLim) return false;
-    const deps = Array.isArray(plan.steps[i]?.dependsOn) ? plan.steps[i].dependsOn : [];
+    // 使用预先归一化的 depsArr 作为依赖来源（已剔除自依赖/越界索引），避免因无效 dependsOn 导致永远无可执行步骤
+    const deps = depsArr[i] || [];
     if (!deps.length) return true;
-    for (const d of deps) {
-      const idx = Number(d);
-      if (!Number.isFinite(idx)) continue;
+    for (const idx of deps) {
       if (!finished.has(idx)) return false;
     }
     return true;

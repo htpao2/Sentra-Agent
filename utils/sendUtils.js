@@ -399,22 +399,8 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
       if (resourceKeys.length > 0) {
         resourceKeys = Array.from(new Set(resourceKeys));
       }
-
-      const signatureParts = [];
-      const trimmedText = textForDedup.trim();
-      if (trimmedText) {
-        signatureParts.push(trimmedText);
-      }
-      if (resourceKeys.length > 0) {
-        signatureParts.push(`RES:${resourceKeys.slice().sort().join(',')}`);
-      }
-      if (emojiKey) {
-        signatureParts.push(`EMOJI:${emojiKey}`);
-      }
-
-      if (!trimmedText && signatureParts.length > 0) {
-        textForDedup = signatureParts.join('\n');
-      }
+      // 文本去重仅基于纯文本内容，资源和表情通过 resourceKeys 独立参与资源集合去重。
+      // 这里不再将资源信息混入文本指纹，避免资源差异被语义文本相似度误伤。
     }
   } catch (e) {
     logger.warn('smartSend: 预解析用于去重的 sentra-response 失败，将回退为基于完整响应字符串的去重', { err: String(e) });
