@@ -25,7 +25,7 @@ class ReplySendQueue {
     this.isProcessing = false;
     this.sendDelayMs = getEnvInt('REPLY_SEND_DELAY_MS', 2000); // 默认2秒
     this.pureReplyCooldown = new Map();
-    this.recentSentByGroup = new Map(); // Map<groupId, Array<{ text, ts }>>
+    this.recentSentByGroup = new Map(); // Map<groupId, Array<{ text, question, resources, ts }>>
     logger.info(`回复发送队列初始化 - 发送间隔: ${this.sendDelayMs}ms`);
   }
 
@@ -112,7 +112,18 @@ class ReplySendQueue {
         const { sendTask, taskId, meta, resolve, reject } = batch[i];
 
         if (!selectedSet.has(i)) {
-          logger.info(`发送阶段去重: 跳过任务 ${taskId}`);
+          const dedupInfo = meta && meta._dedupInfo;
+          if (dedupInfo && dedupInfo.similarity != null) {
+            const simVal =
+              typeof dedupInfo.similarity === 'number' && !Number.isNaN(dedupInfo.similarity)
+                ? dedupInfo.similarity.toFixed(3)
+                : String(dedupInfo.similarity);
+            logger.info(
+              `发送阶段去重: 跳过任务 ${taskId}, by=${dedupInfo.byTaskId || 'unknown'}, sim=${simVal}`
+            );
+          } else {
+            logger.info(`发送阶段去重: 跳过任务 ${taskId}`);
+          }
           resolve(null);
           continue;
         }
@@ -122,6 +133,7 @@ class ReplySendQueue {
           : (meta?.groupId ? String(meta.groupId) : null);
         const textForRecent = (meta?.textForDedup || '').trim();
         const resourcesForRecent = Array.isArray(meta?.resourceKeys) ? meta.resourceKeys : [];
+        const questionForRecent = (meta?.questionForDedup || '').trim();
         const hasTextOrResourceForRecent = !!textForRecent || resourcesForRecent.length > 0;
 
         // 跨批次/跨轮的最近已发送去重：仅在资源集合完全一致的前提下，避免在同一会话里前后两轮说几乎一样的话
@@ -131,7 +143,8 @@ class ReplySendQueue {
               groupIdForRecent,
               textForRecent,
               resourcesForRecent,
-              meta?.hasTool
+              meta?.hasTool,
+              questionForRecent
             );
             if (recentDup) {
               logger.info(
@@ -154,7 +167,12 @@ class ReplySendQueue {
           
           logger.success(`发送完成: ${taskId} (耗时: ${duration}ms)`);
           if (groupIdForRecent && hasTextOrResourceForRecent) {
-            this._rememberRecentSent(groupIdForRecent, textForRecent, resourcesForRecent);
+            this._rememberRecentSent(
+              groupIdForRecent,
+              textForRecent,
+              resourcesForRecent,
+              questionForRecent
+            );
           }
           resolve(result);
         } catch (error) {
@@ -201,6 +219,7 @@ class ReplySendQueue {
       const metaJ = batch[j]?.meta || {};
       const textJ = (metaJ.textForDedup || '').trim();
       const resourcesJ = Array.isArray(metaJ.resourceKeys) ? metaJ.resourceKeys : [];
+      const questionJ = (metaJ.questionForDedup || '').trim();
       const hasTextJ = !!textJ;
       const hasResJ = resourcesJ.length > 0;
 
@@ -211,6 +230,7 @@ class ReplySendQueue {
         const metaI = batch[i]?.meta || {};
         const textI = (metaI.textForDedup || '').trim();
         const resourcesI = Array.isArray(metaI.resourceKeys) ? metaI.resourceKeys : [];
+        const questionI = (metaI.questionForDedup || '').trim();
         const hasTextI = !!textI;
         const hasResI = resourcesI.length > 0;
 
@@ -233,11 +253,33 @@ class ReplySendQueue {
           continue;
         }
 
-        const { areSimilar } = await this._judgePairSimilarity(textI, textJ);
-        if (areSimilar) {
-          // 倾向保留时间更晚的那条：丢弃较早的 i，保留 j
-          keep[i] = false;
+        const { areSimilar, embeddingSim } = await this._judgePairSimilarity(textI, textJ);
+        if (!areSimilar) {
+          continue;
         }
+
+        // question-aware: 仅在“问题明显不同”时才做批次去重；问题也相似时不去重
+        let questionSimilar = false;
+        if (questionI && questionJ) {
+          try {
+            const { areSimilar: qSimilar } = await this._judgePairSimilarity(questionI, questionJ);
+            questionSimilar = !!qSimilar;
+          } catch {
+            questionSimilar = false;
+          }
+        }
+
+        if (questionSimilar) {
+          // 同一问题 + 相似回复：视为同一话题的多次回答，不在批次内互相吞掉
+          continue;
+        }
+
+        // 问题不同 + 回复相似：视为跨话题复读，仅保留时间更晚的 j
+        keep[i] = false;
+        batch[i].meta._dedupInfo = {
+          byTaskId: batch[j].taskId,
+          similarity: embeddingSim,
+        };
       }
     }
 
@@ -315,36 +357,46 @@ class ReplySendQueue {
     }
   }
 
-  _rememberRecentSent(groupId, text, resourceKeys, now = Date.now()) {
+  _rememberRecentSent(groupId, text, resourceKeys, questionText, now = Date.now()) {
     if (!RECENT_DEDUP_ENABLED) return;
     const g = String(groupId || '');
     const t = this._normalizeRecentText(text || '');
+    const q = this._normalizeRecentText(questionText || '');
     const r = this._normalizeResourceKeys(resourceKeys);
     if (!g || (!t && r.length === 0)) return;
 
     const list = this.recentSentByGroup.get(g) || [];
-    list.push({ text: t, resources: r, ts: now });
+    list.push({ text: t, question: q, resources: r, ts: now });
     this.recentSentByGroup.set(g, list);
     this._pruneRecentList(g, now);
   }
 
-  async _isRecentDuplicate(groupId, text, resourceKeys, hasTool) {
+  async _isRecentDuplicate(groupId, text, resourceKeys, hasTool, questionText) {
     if (!RECENT_DEDUP_ENABLED) return false;
     const g = String(groupId || '');
     const t = this._normalizeRecentText(text || '');
+    const q = this._normalizeRecentText(questionText || '');
     const r = this._normalizeResourceKeys(resourceKeys);
     if (!g || (!t && r.length === 0)) return false;
 
     const isPrivate = g.startsWith('U:');
     if (isPrivate && !RECENT_DEDUP_STRICT_FOR_PRIVATE) {
-      // 私聊未启用严格去重时，只做简单 exact 匹配，但仍需资源集合一致
+      // 私聊未启用严格去重时，只做简单 exact 匹配，但仍需资源集合一致；同时仍遵守 question-aware 语义
       const list = this.recentSentByGroup.get(g) || [];
-      return list.some(
-        (item) =>
-          item &&
-          this._areResourceSetsEqual(item.resources || [], r) &&
-          item.text === t
-      );
+      return list.some((item) => {
+        if (!item) return false;
+        if (!this._areResourceSetsEqual(item.resources || [], r)) return false;
+        if (item.text !== t) return false;
+
+        const baseQ = this._normalizeRecentText(item.question || '');
+        // 如果能同时拿到两边的用户问题，并且问题文本也完全相同，则视为“同一话题的再次提问”，不去重
+        if (baseQ && q && baseQ === q) {
+          return false;
+        }
+
+        // 否则（问题不同或缺失）视为跨话题复读，执行去重
+        return true;
+      });
     }
 
     const list = this.recentSentByGroup.get(g) || [];
@@ -369,6 +421,7 @@ class ReplySendQueue {
       }
 
       const baseText = this._normalizeRecentText(item.text || '');
+      const baseQuestion = this._normalizeRecentText(item.question || '');
 
       // 资源集合完全一致且双方都没有文本：视为纯资源重复
       if (!baseText && !t) {
@@ -380,18 +433,40 @@ class ReplySendQueue {
         continue;
       }
 
-      // 快速 exact：完全相同视为复读
+      // 先判断回复文本是否高度相似（包含 exact 与语义相似）
+      let replySimilar = false;
+      let replySim = null;
       if (baseText === t) {
-        return true;
+        replySimilar = true;
+        replySim = 1;
+      } else {
+        try {
+          const { areSimilar, embeddingSim } = await this._judgePairSimilarity(baseText, t);
+          replySimilar = !!areSimilar;
+          replySim = embeddingSim;
+        } catch {}
       }
 
-      // 语义相似：复用批次去重的判定逻辑
-      try {
-        const { areSimilar } = await this._judgePairSimilarity(baseText, t);
-        if (areSimilar) {
-          return true;
-        }
-      } catch {}
+      if (!replySimilar) {
+        continue;
+      }
+
+      // 再判断用户问题是否也高度相似：问题也相似时视为“正常重复提问”，不做去重
+      let questionSimilar = false;
+      if (baseQuestion && q) {
+        try {
+          const qr = await this._judgePairSimilarity(baseQuestion, q);
+          questionSimilar = !!qr.areSimilar;
+        } catch {}
+      }
+
+      if (questionSimilar) {
+        // 用户问题与历史问题也高度相似：允许再次回复
+        continue;
+      }
+
+      // 回复高度相似但问题并不相似：视为复读/误触，执行去重
+      return true;
     }
 
     return false;

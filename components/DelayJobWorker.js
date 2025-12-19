@@ -1,4 +1,5 @@
 import { createLogger } from '../utils/logger.js';
+import { getEnvInt } from '../utils/envHotReloader.js';
 
 const logger = createLogger('DelayJobWorker');
 
@@ -24,8 +25,160 @@ export function createDelayJobRunJob(ctx) {
     chatWithRetry,
     smartSend,
     sendAndWaitResult,
-    randomUUID
+    randomUUID,
+    desireManager,
+    getActiveTaskCount,
+    enqueueProactiveCandidate
   } = ctx;
+
+  function getPromiseConfig() {
+    const privateMinSilentSecRaw = getEnvInt('PROMISE_PRIVATE_MIN_SILENT_SEC', 30);
+    const groupMinSilentSecRaw = getEnvInt('PROMISE_GROUP_MIN_SILENT_SEC', 60);
+    const rescheduleDelayMsRaw = getEnvInt('PROMISE_RESCHEDULE_DELAY_MS', 60000);
+    const maxAttemptsRaw = getEnvInt('PROMISE_MAX_ATTEMPTS', 5);
+
+    const privateMinSilentSec = Number.isFinite(privateMinSilentSecRaw)
+      ? privateMinSilentSecRaw
+      : 30;
+    const groupMinSilentSec = Number.isFinite(groupMinSilentSecRaw)
+      ? groupMinSilentSecRaw
+      : 60;
+    const rescheduleDelayMs = Number.isFinite(rescheduleDelayMsRaw)
+      ? rescheduleDelayMsRaw
+      : 60000;
+    const maxAttempts = Number.isFinite(maxAttemptsRaw) ? maxAttemptsRaw : 5;
+
+    return { privateMinSilentSec, groupMinSilentSec, rescheduleDelayMs, maxAttempts };
+  }
+
+  async function handlePromiseJob(job) {
+    if (!job || job.aiName !== '__promise_fulfill__') return;
+
+    const userId = job.userId ? String(job.userId) : '';
+    const rawGroupId = job.groupId != null ? job.groupId : null;
+    const groupId = rawGroupId != null ? String(rawGroupId) : null;
+    const type = job.type === 'private' ? 'private' : groupId ? 'group' : 'private';
+    const conversationKey = groupId ? `G:${groupId}` : userId ? `U:${userId}` : null;
+    const objectiveRaw = typeof job.promiseObjective === 'string'
+      ? job.promiseObjective
+      : '';
+    const objective = objectiveRaw.trim();
+
+    if (!conversationKey || !userId || !objective) {
+      logger.debug('DelayJobWorker: promise job 缺少必要字段，跳过', {
+        jobId: job && job.jobId
+      });
+      return;
+    }
+
+    const { privateMinSilentSec, groupMinSilentSec, rescheduleDelayMs, maxAttempts } =
+      getPromiseConfig();
+
+    const attemptRaw = job.attempt;
+    const attempt = Number.isFinite(attemptRaw) ? attemptRaw : 0;
+    if (maxAttempts > 0 && attempt >= maxAttempts) {
+      logger.info('DelayJobWorker: promise job 超过最大尝试次数，放弃', {
+        jobId: job && job.jobId,
+        attempt
+      });
+      return;
+    }
+
+    let engagement = null;
+    if (desireManager && typeof desireManager.getUserEngagementSummary === 'function') {
+      try {
+        engagement = await desireManager.getUserEngagementSummary(conversationKey, userId);
+      } catch (e) {
+        logger.debug('DelayJobWorker: 获取用户参与度失败，将在后续重试', {
+          jobId: job && job.jobId,
+          err: String(e)
+        });
+      }
+    }
+
+    const activeCount =
+      typeof getActiveTaskCount === 'function' && userId
+        ? getActiveTaskCount(userId)
+        : 0;
+
+    let timeSinceLastUserSec = null;
+    if (engagement && typeof engagement.timeSinceLastUserSec === 'number') {
+      timeSinceLastUserSec = engagement.timeSinceLastUserSec;
+    }
+
+    const minSilentSec = type === 'private' ? privateMinSilentSec : groupMinSilentSec;
+    const silentEnough =
+      Number.isFinite(timeSinceLastUserSec) &&
+      timeSinceLastUserSec >= Math.max(0, minSilentSec || 0);
+    const noActiveTask = !Number.isFinite(activeCount) ? true : activeCount <= 0;
+
+    if (!silentEnough || !noActiveTask) {
+      if (typeof enqueueDelayedJob === 'function' && rescheduleDelayMs > 0) {
+        const nextFireAt = Date.now() + Math.max(1000, rescheduleDelayMs);
+        const nextJob = {
+          ...job,
+          jobId:
+            job && job.jobId
+              ? String(job.jobId) + '_retry_' + Date.now()
+              : randomUUID(),
+          fireAt: nextFireAt,
+          attempt: attempt + 1
+        };
+        try {
+          await enqueueDelayedJob(nextJob);
+        } catch (e) {
+          logger.warn('DelayJobWorker: 重新入队 promise job 失败', {
+            jobId: job && job.jobId,
+            err: String(e)
+          });
+        }
+      }
+      return;
+    }
+
+    if (typeof enqueueProactiveCandidate !== 'function') {
+      logger.warn('DelayJobWorker: 缺少 enqueueProactiveCandidate，无法触发承诺补单', {
+        jobId: job && job.jobId
+      });
+      return;
+    }
+
+    const baseMsg = job.lastMsg || {
+      type,
+      group_id: groupId,
+      sender_id: userId,
+      text: job.reason || objective,
+      summary: job.reason || objective,
+      message_id: null
+    };
+
+    const candidate = {
+      conversationKey,
+      chatType: type === 'private' ? 'private' : 'group',
+      groupId: groupId,
+      userId: userId,
+      lastMsg: baseMsg,
+      desireScore: 100,
+      isFirstAfterUser: true,
+      promiseObjective: objective
+    };
+
+    try {
+      enqueueProactiveCandidate(candidate);
+      logger.info('DelayJobWorker: 已触发承诺补单的主动候选', {
+        jobId: job && job.jobId,
+        conversationKey,
+        userId,
+        groupId
+      });
+    } catch (e) {
+      logger.warn('DelayJobWorker: 触发承诺补单候选失败', {
+        jobId: job && job.jobId,
+        conversationKey,
+        err: String(e)
+      });
+    }
+  }
 
   async function buildDelaySystemContent(groupIdKey, senderId) {
     let personaXml = '';
@@ -76,6 +229,11 @@ export function createDelayJobRunJob(ctx) {
       const aiName = job && job.aiName;
       if (!aiName) {
         logger.warn('DelayJobWorker: job 缺少 aiName，跳过', { jobId: job && job.jobId });
+        return;
+      }
+
+      if (aiName === '__promise_fulfill__') {
+        await handlePromiseJob(job);
         return;
       }
 

@@ -749,6 +749,13 @@ export async function getSandboxSystemPrompt() {
       '    </mentions>\n' +
       '  </send>\n' +
       '  -->\n' +
+      '  <!-- Optional internal commitment meta block: ONLY when you explicitly promise a future action -->\n' +
+      '  <!--\n' +
+      '  <meta>\n' +
+      '    <has_promise>true|false</has_promise>\n' +
+      '    <promise_objective>用 1-2 句自然中文简要描述你答应要完成的后续任务，例如“帮你整理这两周的聊天记录并给一个小结论”。</promise_objective>\n' +
+      '  </meta>\n' +
+      '  -->\n' +
       '</sentra-response>\n' +
       '\n\n' +
       '**Example: @all (no duplication in text)**\n' +
@@ -850,6 +857,10 @@ export async function getSandboxSystemPrompt() {
       '     2) You send ONLY MEDIA but still want to bind to the original message → set `<reply_mode>always`.\n' +
       '     3) You must notify specific members in a group → include `<mentions>` with real IDs; use `all` only for announcements.\n' +
       '     4) Otherwise, OMIT `<send>` (default = no quoting, no mentions).\n\n' +
+      '   - **Optional `<meta>` commitment block**: When且仅当你在本轮回复中明确向用户承诺“稍后会去执行某个动作”（例如稍后去查资料、整理一份结果再发给 TA、等工具完成后补充说明）时，可以在 `<meta>` 中写入：\n' +
+      '     • `<has_promise>true</has_promise>` 表示本条回复中存在这种后续承诺；\n' +
+      '     • `<promise_objective>` 用 1-2 句自然中文简要说明你承诺要完成的任务目标（例如“帮你把这两周的聊天记录整理成一个复习提纲”）；\n' +
+      '     • 当你只是礼貌寒暄、表达愿望，或者本轮已经完成了所有工作（不需要后续动作）时，不要标记 `<has_promise>true</has_promise>`，可以省略整个 `<meta>` 块或把 has_promise 设为 false。\n\n' +
       
       '6. **Tag Closure**: Every `<tag>` must have corresponding `</tag>`\n\n' +
       

@@ -3,9 +3,12 @@ import { createLogger } from './logger.js';
 
 const logger = createLogger('GroupReplyMerger');
 
-const GROUP_MULTI_USER_MERGE_ENABLED = getEnvBool('GROUP_MULTI_USER_MERGE_ENABLED', false);
-const GROUP_MULTI_USER_MERGE_WINDOW_MS = getEnvInt('GROUP_MULTI_USER_MERGE_WINDOW_MS', 5000);
-const GROUP_MULTI_USER_MERGE_MAX_USERS = getEnvInt('GROUP_MULTI_USER_MERGE_MAX_USERS', 2);
+function getMergeConfig() {
+  const enabled = getEnvBool('GROUP_MULTI_USER_MERGE_ENABLED', false);
+  const windowMs = getEnvInt('GROUP_MULTI_USER_MERGE_WINDOW_MS', 5000);
+  const maxUsers = getEnvInt('GROUP_MULTI_USER_MERGE_MAX_USERS', 2);
+  return { enabled, windowMs, maxUsers };
+}
 
 const groupSessions = new Map(); // groupKey -> { windowStart, entries, timer }
 
@@ -91,10 +94,12 @@ export async function handleGroupReplyCandidate(args, deps) {
     return;
   }
 
+  const { enabled, windowMs, maxUsers } = getMergeConfig();
+
   if (
-    !GROUP_MULTI_USER_MERGE_ENABLED ||
-    GROUP_MULTI_USER_MERGE_WINDOW_MS <= 0 ||
-    GROUP_MULTI_USER_MERGE_MAX_USERS <= 1 ||
+    !enabled ||
+    windowMs <= 0 ||
+    maxUsers <= 1 ||
     bundledMsg.type !== 'group'
   ) {
     await handleOneMessage(bundledMsg, taskId);
@@ -115,7 +120,7 @@ export async function handleGroupReplyCandidate(args, deps) {
       finalizeGroup(groupKey, deps).catch((e) => {
         logger.error('finalizeGroup timer error', e);
       });
-    }, GROUP_MULTI_USER_MERGE_WINDOW_MS);
+    }, windowMs);
     return;
   }
 
@@ -125,9 +130,9 @@ export async function handleGroupReplyCandidate(args, deps) {
     return;
   }
 
-  if (session.entries.length < GROUP_MULTI_USER_MERGE_MAX_USERS) {
+  if (session.entries.length < maxUsers) {
     session.entries.push(entry);
-    if (session.entries.length >= GROUP_MULTI_USER_MERGE_MAX_USERS) {
+    if (session.entries.length >= maxUsers) {
       await finalizeGroup(groupKey, deps);
     }
     return;
@@ -145,5 +150,5 @@ export async function handleGroupReplyCandidate(args, deps) {
     finalizeGroup(groupKey, deps).catch((e) => {
       logger.error('finalizeGroup timer error', e);
     });
-  }, GROUP_MULTI_USER_MERGE_WINDOW_MS);
+  }, windowMs);
 }

@@ -32,9 +32,17 @@ try {
 let SensitiveWordFilter = null;
 try {
   const m = require('sensitive-word-filter');
-  SensitiveWordFilter = m?.default || m; 
+  SensitiveWordFilter = m?.default || m;
 } catch (e) {
   logger.warn('`sensitive-word-filter` not installed, Chinese compliance check will be limited.', { err: String(e) });
+}
+
+let sentimentZh = null;
+try {
+  const m = require('sentiment-zh_cn_web');
+  sentimentZh = m?.default || m;
+} catch (e) {
+  logger.warn('`sentiment-zh_cn_web` not installed, Chinese sentiment features will be disabled.', { err: String(e) });
 }
 
 const linkify = new LinkifyIt();
@@ -559,6 +567,44 @@ export class ConversationAnalyzer {
     if (lang === 'und') lang = isLikelyChinese(cleanText) ? 'zho' : (isLikelyLatin(cleanText) ? 'eng' : 'und');
     result.features.language = lang;
 
+    // Chinese sentiment features (based on sentiment-zh_cn_web)，用于后续 follow-up 行为判断
+    let cnSentimentScore = 0;
+    let cnSentimentComparative = 0;
+    let cnSentimentPosCount = 0;
+    let cnSentimentNegCount = 0;
+    if (sentimentZh && (lang === 'cmn' || lang === 'zho' || isLikelyChinese(cleanText))) {
+      try {
+        const res = sentimentZh(cleanText);
+        if (res && typeof res.score === 'number' && Number.isFinite(res.score)) {
+          cnSentimentScore = res.score;
+        }
+        if (res && typeof res.comparative === 'number' && Number.isFinite(res.comparative)) {
+          cnSentimentComparative = res.comparative;
+        }
+        if (res && Array.isArray(res.positive)) {
+          cnSentimentPosCount = res.positive.length;
+        }
+        if (res && Array.isArray(res.negative)) {
+          cnSentimentNegCount = res.negative.length;
+        }
+      } catch {}
+    }
+    let cnSentimentValence = 0;
+    let cnSentimentStrength = 0;
+    if (cnSentimentScore !== 0) {
+      const clipped = Math.max(-8, Math.min(8, cnSentimentScore));
+      cnSentimentValence = clamp(clipped / 8, -1, 1);
+      cnSentimentStrength = Math.abs(cnSentimentValence);
+    }
+    Object.assign(result.features, {
+      cnSentimentScore,
+      cnSentimentComparative,
+      cnSentimentPosCount,
+      cnSentimentNegCount,
+      cnSentimentValence,
+      cnSentimentStrength
+    });
+
     let tokensAll = [], tokensNoStop = [], doc = null;
     if (lang === 'cmn' || lang === 'zho' || isLikelyChinese(cleanText)) {
       tokensAll = chineseTokensAll(cleanText);
@@ -728,6 +774,7 @@ export class ConversationAnalyzer {
       ? clamp(fns.ack(currentText, lang, { totalTokens: totalTokenCount, semanticScore, hasQuestionPunct, hasLink }) || 0, 0, 1)
       : defaultAckScore(currentText, lang, totalTokenCount, semanticScore, hasQuestionPunct, hasLink);
 
+    // intents 作为通用特征参与后续概率计算，不在此处做特定 follow-up 分类
     Object.assign(result.features, { questionness: qScore, callToAction: ctaScore, urgency: urgScore, ack: ackScore, ctaRuleScore });
 
     // compliance

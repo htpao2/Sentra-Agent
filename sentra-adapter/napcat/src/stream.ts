@@ -198,8 +198,14 @@ export class MessageStream {
     const msgType: 'group' | 'private' = isGroup ? 'group' : 'private';
     const selfId = (ev as any).self_id as number | undefined;
     const groupId = (ev as any).group_id as number | undefined;
-    const senderId = (ev as any).user_id as number;
-    const targetId = (ev as any).target_id as number;
+    let senderId = (ev as any).user_id as number;
+    let targetId = (ev as any).target_id as number;
+
+    if (msgType === 'private' && selfId) {
+      if (targetId !== selfId) {
+        senderId = selfId;
+      }
+    }
 
     let groupName: string | undefined;
     if (msgType === 'group' && groupId && this.getGroupNameFn) {
@@ -227,12 +233,17 @@ export class MessageStream {
           senderCard = card || undefined;
           if (role === 'owner' || role === 'admin' || role === 'member') senderRole = role;
         } else if (msgType === 'private') {
-          const call = async () => await inv.data('get_stranger_info', { user_id: senderId });
-          const info: any = this.rpcRetryEnabled
-            ? await this.withRpcRetry(call, 'get_stranger_info', senderId)
-            : await call();
-          const nick = info?.nickname;
-          senderName = nick || String(senderId);
+          if (selfId && senderId === selfId) {
+            const botName = await this.getBotName(selfId);
+            senderName = botName || String(senderId);
+          } else {
+            const call = async () => await inv.data('get_stranger_info', { user_id: senderId });
+            const info: any = this.rpcRetryEnabled
+              ? await this.withRpcRetry(call, 'get_stranger_info', senderId)
+              : await call();
+            const nick = info?.nickname;
+            senderName = nick || String(senderId);
+          }
         }
       } catch {}
     }
@@ -266,25 +277,52 @@ export class MessageStream {
     }
     if (!targetName) targetName = String(targetId);
 
-    // 拟人化的概括文案，便于直接阅读
+    const senderIsBot = !!(selfId && senderId === selfId);
+    const targetIsBot = !!(selfId && targetId === selfId);
+
+    const senderBaseLabel = senderName ? `${senderName}(QQ:${senderId})` : `QQ:${senderId}`;
+    const targetBaseLabel = targetName ? `${targetName}(QQ:${targetId})` : `QQ:${targetId}`;
+
+    const senderRoleLabel =
+      msgType === 'group'
+        ? (senderRole === 'owner'
+            ? '群主'
+            : senderRole === 'admin'
+              ? '管理员'
+              : senderRole === 'member'
+                ? '成员'
+                : '')
+        : '';
+
+    const senderDisplayFull =
+      msgType === 'group' && senderRoleLabel
+        ? `${senderRoleLabel} ${senderBaseLabel}`
+        : senderBaseLabel;
+
+    const targetDisplayFull = targetBaseLabel;
+
     let summary: string;
+    let objective: string;
+
     if (msgType === 'group') {
       const gName = groupName || (groupId ? `群${groupId}` : '未知群');
-      const senderDisplay = senderName ? `${senderName}(QQ:${senderId})` : `QQ:${senderId}`;
-      let targetDisplay = targetName ? `${targetName}(QQ:${targetId})` : `QQ:${targetId}`;
-      if (selfId && targetId === selfId) {
-        // 被戳的是 Bot 自己
-        targetDisplay = targetName ? `${targetName}(我)` : `我(QQ:${targetId})`;
-      }
-      summary = `在群聊「${gName}」中，${senderDisplay} 轻轻戳了 ${targetDisplay}`;
+      const senderSummary = senderIsBot ? `你（${senderBaseLabel}）` : senderDisplayFull;
+      const targetSummary = targetIsBot ? `你（${targetBaseLabel}）` : targetDisplayFull;
+      summary = `在群聊「${gName}」中，${senderSummary} 轻轻戳了 ${targetSummary}`;
+
+      const senderObj = senderIsBot ? `你（${senderDisplayFull}）` : senderDisplayFull;
+      const targetObj = targetIsBot ? `你（${targetDisplayFull}）` : targetDisplayFull;
+      objective = `在群聊「${gName}」中，${senderObj} 戳了 ${targetObj}`;
     } else {
-      const senderDisplay = senderName ? `${senderName}(QQ:${senderId})` : `QQ:${senderId}`;
-      if (selfId && targetId === selfId) {
-        const botDisplay = targetName || String(targetId);
-        summary = `好友 ${senderDisplay} 戳了你（${botDisplay}）`; 
+      if (targetIsBot) {
+        summary = `好友 ${senderBaseLabel} 戳了你（${targetBaseLabel}）`;
+        objective = `好友 ${senderBaseLabel} 戳了你（${targetBaseLabel}）`;
+      } else if (senderIsBot) {
+        summary = `你（${senderBaseLabel}） 在私聊中戳了 ${targetBaseLabel}`;
+        objective = `你（${senderBaseLabel}） 戳了好友 ${targetBaseLabel}`;
       } else {
-        const targetDisplay = targetName ? `${targetName}(QQ:${targetId})` : `QQ:${targetId}`;
-        summary = `${senderDisplay} 在私聊中戳了 ${targetDisplay}`;
+        summary = `${senderBaseLabel} 在私聊中戳了 ${targetBaseLabel}`;
+        objective = `${senderBaseLabel} 在私聊中戳了 ${targetBaseLabel}`;
       }
     }
 
@@ -296,7 +334,7 @@ export class MessageStream {
       type: msgType,
       self_id: selfId,
       summary,
-      objective: `${senderName} 戳了 ${targetName}`,
+      objective,
       sender_id: senderId,
       sender_name: senderName,
       sender_card: senderCard,
@@ -611,6 +649,10 @@ export class MessageStream {
       }
 
       const poke = await this.formatPoke(ev);
+
+      if (poke.self_id && poke.sender_id === poke.self_id && poke.target_id !== poke.self_id) {
+        return;
+      }
 
       try {
         log.info({

@@ -181,6 +181,30 @@ function shouldPassAttentionWindow(msg, senderId, config, options = {}) {
   return false;
 }
 
+function isSenderInAttentionList(msg, senderId, config) {
+  if (!config.attentionEnabled) return true;
+  if (!msg || !msg.group_id) return true;
+  const maxSenders = config.attentionMaxSenders;
+  const windowMs = config.attentionWindowMs;
+  if (!maxSenders || maxSenders <= 0) return true;
+  if (!windowMs || windowMs <= 0) return true;
+
+  const groupKey = getGroupKey(msg.group_id);
+  const now = Date.now();
+  let map = groupAttention.get(groupKey);
+  if (!map) {
+    return false;
+  }
+
+  for (const [sid, ts] of map.entries()) {
+    if (now - ts > windowMs) {
+      map.delete(sid);
+    }
+  }
+
+  return map.has(senderId);
+}
+
 function markAttentionWindow(msg, senderId, config) {
   if (!config.attentionEnabled) return;
   if (!msg || !msg.group_id) return;
@@ -601,6 +625,23 @@ export async function shouldReply(msg, options = {}) {
     }
   }
 
+  let inAttentionList = true;
+  if (isGroup && msg.group_id) {
+    inAttentionList = isSenderInAttentionList(msg, senderId, config);
+    if (!inAttentionList && !isExplicitMention && !mentionedByName) {
+      const reason = '群监听队列外且未提及Bot，跳过本轮群聊消息';
+      logger.info(`[${groupInfo}] 用户${senderId} 决策为不回复: ${reason}`);
+      return {
+        needReply: false,
+        reason,
+        mandatory: false,
+        probability: 0.0,
+        conversationId,
+        taskId: null
+      };
+    }
+  }
+
   if (isGroup) {
     const pass = shouldPassAttentionWindow(msg, senderId, config, {
       isExplicitMention: isExplicitMention || mentionedByName
@@ -721,7 +762,7 @@ export async function shouldReply(msg, options = {}) {
   // 群聊 + 非显式 @ 的消息先通过 ReplyGate 进行价值预判：
   //  - decision = 'ignore'  => 直接不回
   //  - decision = 'llm'     => 继续交给 XML 决策 LLM
-  if (isGroup && !isExplicitMention) {
+  if (isGroup && !isExplicitMention && !mentionedByName) {
     try {
       gateResult = assessReplyWorth(
         msg,
@@ -741,46 +782,51 @@ export async function shouldReply(msg, options = {}) {
       );
 
       if (gateResult && gateResult.decision === 'ignore') {
-        const gateReason = `ReplyGate: ${gateResult.reason || 'low_interest_score'}`;
-        logger.info(`[${groupInfo}] 用户${senderId} 预判为不回复: ${gateReason}`);
-        if (isGroup && msg.group_id) {
-          try {
-            let analyzerProb = null;
-            if (
-              gateResult.debug &&
-              gateResult.debug.analyzer &&
-              typeof gateResult.debug.analyzer.probability === 'number'
-            ) {
-              analyzerProb = gateResult.debug.analyzer.probability;
+        const reasonStr = typeof gateResult.reason === 'string' ? gateResult.reason : '';
+        const isPolicyBlocked = reasonStr.includes('policy_blocked');
+        if (!isFollowupAfterBotReply || isPolicyBlocked) {
+          const gateReason = `ReplyGate: ${gateResult.reason || 'low_interest_score'}`;
+          logger.info(`[${groupInfo}] 用户${senderId} 预判为不回复: ${gateReason}`);
+          if (isGroup && msg.group_id) {
+            try {
+              let analyzerProb = null;
+              if (
+                gateResult.debug &&
+                gateResult.debug.analyzer &&
+                typeof gateResult.debug.analyzer.probability === 'number'
+              ) {
+                analyzerProb = gateResult.debug.analyzer.probability;
+              }
+              const gateP =
+                typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)
+                  ? gateResult.normalizedScore
+                  : null;
+              await updateAttentionStatsAfterDecision({
+                groupId: msg.group_id,
+                senderId,
+                analyzerProb,
+                gateProb: gateP,
+                fusedProb: 0,
+                didReply: false
+              });
+            } catch (e) {
+              logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderId}`, {
+                err: String(e)
+              });
             }
-            const gateP =
-              typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)
-                ? gateResult.normalizedScore
-                : null;
-            await updateAttentionStatsAfterDecision({
-              groupId: msg.group_id,
-              senderId,
-              analyzerProb,
-              gateProb: gateP,
-              fusedProb: 0,
-              didReply: false
-            });
-          } catch (e) {
-            logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderId}`, {
-              err: String(e)
-            });
           }
+          return {
+            needReply: false,
+            reason: gateReason,
+            mandatory: false,
+            probability: gateResult.normalizedScore ?? 0,
+            conversationId,
+            taskId: null
+          };
         }
-        return {
-          needReply: false,
-          reason: gateReason,
-          mandatory: false,
-          probability: gateResult.normalizedScore ?? 0,
-          conversationId,
-          taskId: null
-        };
       }
-      // 其余情况（包括 gateResult.decision === 'llm' 或 gateResult 为空）
+      // 其余情况（包括 gateResult.decision === 'llm' 或 gateResult 为空，
+      // 以及 follow-up 但未被 policy_blocked 的 decision === 'ignore'）
       // 继续走后面的 planGroupReplyDecision XML 决策，并保留 gate 概率用于后续融合
       if (gateResult && typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)) {
         const p = gateResult.normalizedScore;
@@ -796,11 +842,11 @@ export async function shouldReply(msg, options = {}) {
     }
   }
 
-  if (isGroup && msg.group_id && !isExplicitMention && gateProb != null) {
+  if (isGroup && msg.group_id && !isExplicitMention && !mentionedByName && gateProb != null) {
     // 对于来自延迟聚合（改意愿后合并）的新意图，放宽 ReplyGateAccum：
     // - 仍然更新 attentionStats 统计
     // - 但不以 "below_threshold_or_busy" 作为硬门禁，避免用户明确改意愿后再次被吞掉
-    const skipAccumThrottling = source === 'pending_merged';
+    const skipAccumThrottling = source === 'pending_merged' || isFollowupAfterBotReply;
 
     if (!skipAccumThrottling) {
       const allowByAccum = updateGateSessionAndCheck(msg, senderId, config, gateProb, activeCount);
@@ -868,7 +914,9 @@ export async function shouldReply(msg, options = {}) {
     }
   }
 
-  if (isGroup && !config.pureLocalGating) {
+  const useLlmIntervention = isGroup && (!config.pureLocalGating || isExplicitMention || mentionedByName || isFollowupAfterBotReply);
+
+  if (useLlmIntervention) {
     const intervention = await planGroupReplyDecision(msg, {
       signals: {
         mentionedByAt: isExplicitMention,
@@ -889,50 +937,21 @@ export async function shouldReply(msg, options = {}) {
 
     if (intervention && typeof intervention.shouldReply === 'boolean') {
       shouldReplyFlag = intervention.shouldReply;
-      let interventionConfidence = probability;
+
+      let interventionConfidence;
       if (typeof intervention.confidence === 'number' && Number.isFinite(intervention.confidence)) {
         const c = intervention.confidence;
         interventionConfidence = c < 0 ? 0 : c > 1 ? 1 : c;
+      } else {
+        interventionConfidence = shouldReplyFlag ? 1.0 : 0.0;
       }
+
       probability = interventionConfidence;
-      reason = `ReplyIntervention: ${intervention.reason || (shouldReplyFlag ? '需要回复' : '无需回复')}`;
-
-      if (!shouldReplyFlag && Number.isFinite(interventionConfidence)) {
-        const llmConf = interventionConfidence < 0 ? 0 : interventionConfidence > 1 ? 1 : interventionConfidence;
-        const pLlmReply = 1 - llmConf;
-
-        let fusedReplyProb = pLlmReply;
-
-        if (gateProb != null && gateProb > 0) {
-          const cap = 0.55;
-          const pGateNorm = gateProb <= 0 ? 0 : gateProb >= cap ? 1 : (gateProb / cap);
-          const eps = 1e-6;
-          const clamp01eps = (v) => {
-            if (!(Number.isFinite(v))) return 0.5;
-            if (v <= 0) return eps;
-            if (v >= 1) return 1 - eps;
-            return v;
-          };
-          const logit = (p) => Math.log(p / (1 - p));
-          const sigmoid = (x) => 1 / (1 + Math.exp(-x));
-
-          const lGate = logit(clamp01eps(pGateNorm));
-          const lLlm = logit(clamp01eps(pLlmReply));
-          const wGate = 0.35;
-          const wLlm = 0.65;
-          const lComb = wGate * lGate + wLlm * lLlm;
-          fusedReplyProb = sigmoid(lComb);
-        }
-
-        if (fusedReplyProb > 0) {
-          const r = Math.random();
-          if (r < fusedReplyProb) {
-            shouldReplyFlag = true;
-            probability = fusedReplyProb;
-            reason = `${reason}（本地gate与LLM融合后保守回复, p=${fusedReplyProb.toFixed(2)}）`;
-          }
-        }
-      }
+      reason = intervention.reason
+        ? `ReplyIntervention: ${intervention.reason}`
+        : (shouldReplyFlag
+            ? 'ReplyIntervention: LLM 判定应进入主对话流程'
+            : 'ReplyIntervention: LLM 判定本轮不进入主对话流程');
     }
   }
 

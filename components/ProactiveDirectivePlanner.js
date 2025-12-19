@@ -589,7 +589,8 @@ export async function planProactiveObjective(payload = {}) {
     memoryXml = '',
     conversationContext = null,
     lastBotMessage = '',
-    userEngagement = null
+    userEngagement = null,
+    promiseObjective = ''
   } = payload || {};
 
   let effectivePresetXml = typeof presetXml === 'string' ? presetXml : '';
@@ -803,7 +804,15 @@ export async function buildProactiveRootDirectiveXml(payload = {}) {
     ? objectiveText.trim()
     : defaultObjectiveLines.join('\n');
 
-  appendXmlBlockLines(lines, 'objective', effectiveObjective, { indent: 1 });
+  let finalObjectiveText = effectiveObjective;
+  const promiseText = typeof promiseObjective === 'string' ? promiseObjective.trim() : '';
+  if (promiseText) {
+    const prefix =
+      `【承诺补单提示】你之前在对话中曾向用户做出过一个后续承诺，大致内容是：「${promiseText}」。本轮主动发言时，请优先考虑如何在合适的上下文中尽量兑现这一承诺（包括必要时调用 MCP 工具、查资料、整理结果并向用户汇报），如果确实无法完成，也要用自然中文诚实说明原因，并给出合理的替代建议或后续安排。`;
+    finalObjectiveText = `${prefix}\n\n${effectiveObjective}`;
+  }
+
+  appendXmlBlockLines(lines, 'objective', finalObjectiveText, { indent: 1 });
 
   lines.push('  <allow_tools>true</allow_tools>');
 

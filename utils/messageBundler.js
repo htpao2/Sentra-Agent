@@ -4,14 +4,21 @@ import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('MessageBundler');
 
-const BUNDLE_WINDOW_MS = getEnvInt('BUNDLE_WINDOW_MS', 5000);
-const BUNDLE_MAX_MS = getEnvInt('BUNDLE_MAX_MS', 15000);
-const BUNDLE_MIN_SIMILARITY = parseFloat(getEnv('BUNDLE_MIN_SIMILARITY', '0.6'));
-const BUNDLE_MAX_LOW_SIM_COUNT = getEnvInt('BUNDLE_MAX_LOW_SIM_COUNT', 2);
+function getBundleTimingConfig() {
+  const windowMs = getEnvInt('BUNDLE_WINDOW_MS', 5000);
+  const maxMs = getEnvInt('BUNDLE_MAX_MS', 15000);
+  const rawSim = parseFloat(getEnv('BUNDLE_MIN_SIMILARITY', '0.6'));
+  const minSimilarity = Number.isFinite(rawSim) ? rawSim : 0.6;
+  const maxLowSimCount = getEnvInt('BUNDLE_MAX_LOW_SIM_COUNT', 2);
+  return { windowMs, maxMs, minSimilarity, maxLowSimCount };
+}
 
 // 向量相似度计算的保护参数：防止 Embedding 请求过慢拖垮整体消息处理
-const BUNDLE_EMBEDDING_TIMEOUT_MS = getEnvInt('BUNDLE_EMBEDDING_TIMEOUT_MS', 8000);
-const BUNDLE_EMBEDDING_MAX_RETRIES = getEnvInt('BUNDLE_EMBEDDING_MAX_RETRIES', 0);
+function getEmbeddingConfig() {
+  const timeoutMs = getEnvInt('BUNDLE_EMBEDDING_TIMEOUT_MS', 8000);
+  const maxRetries = getEnvInt('BUNDLE_EMBEDDING_MAX_RETRIES', 0);
+  return { timeoutMs, maxRetries };
+}
 
 // senderId -> { collecting: true, messages: [], lastUpdate: number }
 const senderBundles = new Map();
@@ -99,13 +106,14 @@ export async function computeSemanticSimilarity(textA, textB) {
   const b = (textB || '').trim();
   if (!a || !b) return null;
 
-  const maxAttempts = Math.max(0, BUNDLE_EMBEDDING_MAX_RETRIES) + 1;
+  const { timeoutMs, maxRetries } = getEmbeddingConfig();
+  const maxAttempts = Math.max(0, maxRetries) + 1;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const vectors = await withTimeout(
         () => client.embedDocuments([a, b]),
-        BUNDLE_EMBEDDING_TIMEOUT_MS,
+        timeoutMs,
         'Embedding 相似度计算'
       );
 
@@ -122,7 +130,7 @@ export async function computeSemanticSimilarity(textA, textB) {
       const isTimeout = e && e.code === 'EMBED_TIMEOUT';
       const reason = isTimeout ? '超时' : '失败';
       logger.warn(
-        `Embedding 相似度计算${reason}，回退为纯时间聚合 (attempt=${attempt + 1}/${maxAttempts}, timeoutMs=${BUNDLE_EMBEDDING_TIMEOUT_MS})`,
+        `Embedding 相似度计算${reason}，回退为纯时间聚合 (attempt=${attempt + 1}/${maxAttempts}, timeoutMs=${timeoutMs})`,
         { err: String(e) }
       );
 
@@ -162,6 +170,7 @@ export async function handleIncomingMessage(senderId, msg, { activeCount }) {
 
   // 若已有聚合窗口，优先考虑追加（即使当前有活跃任务）
   if (bucket && bucket.collecting) {
+    const { minSimilarity, maxLowSimCount } = getBundleTimingConfig();
     const textNew = extractText(msg);
 
     // 若新消息没有有效文本，直接按时间聚合处理
@@ -184,15 +193,15 @@ export async function handleIncomingMessage(senderId, msg, { activeCount }) {
     if (similarity != null) {
       const simPercent = `${(similarity * 100).toFixed(1)}%`;
       const vioBefore = bucket.lowSimCount || 0;
-      if (similarity < BUNDLE_MIN_SIMILARITY) {
+      if (similarity < minSimilarity) {
         const vioAfter = vioBefore + 1;
         bucket.lowSimCount = vioAfter;
         logger.info(
-          `聚合: 语义相似度偏低 (sender=${key}, sim=${simPercent}, violations=${vioAfter}/${BUNDLE_MAX_LOW_SIM_COUNT})`
+          `聚合: 语义相似度偏低 (sender=${key}, sim=${simPercent}, violations=${vioAfter}/${maxLowSimCount})`
         );
 
         // 连续低相似超过阈值：认为用户已切换到新话题
-        if (vioAfter >= BUNDLE_MAX_LOW_SIM_COUNT) {
+        if (vioAfter >= maxLowSimCount) {
           let arr = pendingMessagesByUser.get(key);
           if (!arr) {
             arr = [];
@@ -285,8 +294,9 @@ export async function collectBundleForSender(senderId) {
   }
 
   const start = Date.now();
-  const hasWindow = Number.isFinite(BUNDLE_WINDOW_MS) && BUNDLE_WINDOW_MS > 0;
-  const hasMax = Number.isFinite(BUNDLE_MAX_MS) && BUNDLE_MAX_MS > 0;
+  const { windowMs, maxMs } = getBundleTimingConfig();
+  const hasWindow = Number.isFinite(windowMs) && windowMs > 0;
+  const hasMax = Number.isFinite(maxMs) && maxMs > 0;
 
   let endReason = 'idle';
 
@@ -297,13 +307,13 @@ export async function collectBundleForSender(senderId) {
     const sinceLast = now - lastUpdate;
 
     // 若整体等待时间已超过最大上限，则立即结束（防止长时间不收束）
-    if (hasMax && elapsed >= BUNDLE_MAX_MS) {
+    if (hasMax && elapsed >= maxMs) {
       endReason = 'max_wait';
       break;
     }
 
     // 若距离最后一条消息已静默至少一个窗口，则结束聚合
-    if (hasWindow && sinceLast >= BUNDLE_WINDOW_MS) {
+    if (hasWindow && sinceLast >= windowMs) {
       endReason = 'idle';
       break;
     }
@@ -312,14 +322,14 @@ export async function collectBundleForSender(senderId) {
     let waitMs = Infinity;
 
     if (hasWindow) {
-      const remainIdle = BUNDLE_WINDOW_MS - sinceLast;
+      const remainIdle = windowMs - sinceLast;
       if (remainIdle > 0 && Number.isFinite(remainIdle)) {
         waitMs = Math.min(waitMs, remainIdle);
       }
     }
 
     if (hasMax) {
-      const remainTotal = BUNDLE_MAX_MS - elapsed;
+      const remainTotal = maxMs - elapsed;
       if (remainTotal > 0 && Number.isFinite(remainTotal)) {
         waitMs = Math.min(waitMs, remainTotal);
       }
@@ -327,7 +337,7 @@ export async function collectBundleForSender(senderId) {
 
     if (!Number.isFinite(waitMs) || waitMs <= 0) {
       // 回退为一个小的睡眠间隔，避免忙等
-      waitMs = hasWindow ? BUNDLE_WINDOW_MS : 50;
+      waitMs = hasWindow ? windowMs : 50;
       if (!Number.isFinite(waitMs) || waitMs <= 0) {
         waitMs = 50;
       }

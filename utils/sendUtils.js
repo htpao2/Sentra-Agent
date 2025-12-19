@@ -107,7 +107,7 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
     //logger.debug(`  文件${i+1}: ${f.fileName} (${f.fileType})`);
   });
   
-  if (segments.length === 0 && protocolFiles.length === 0) {
+  if (segments.length === 0 && protocolFiles.length === 0 && !emoji) {
     logger.warn('无内容可发送');
     return;
   }
@@ -367,6 +367,21 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
   let textForDedup = '';
   let resourceKeys = [];
   let emojiKey = '';
+  // 记录本轮用户问题文本，用于 question-aware 最近发送去重
+  let questionForDedup = '';
+  try {
+    const baseText =
+      (msg && typeof msg.text === 'string' && msg.text.trim()) ||
+      (msg && typeof msg.summary === 'string' && msg.summary.trim()) ||
+      (msg &&
+        msg.raw &&
+        ((typeof msg.raw.text === 'string' && msg.raw.text.trim()) ||
+          (typeof msg.raw.summary === 'string' && msg.raw.summary.trim()))) ||
+      '';
+    if (baseText) {
+      questionForDedup = baseText;
+    }
+  } catch {}
   try {
     if (typeof response === 'string') {
       const parsed = parseSentraResponse(response);
@@ -411,7 +426,8 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
     groupId,
     response: typeof response === 'string' ? response : String(response ?? ''),
     textForDedup,
-    resourceKeys: emojiKey ? [...resourceKeys, emojiKey] : resourceKeys
+    resourceKeys: emojiKey ? [...resourceKeys, emojiKey] : resourceKeys,
+    questionForDedup
   };
 
   if (typeof options.hasTool === 'boolean') {

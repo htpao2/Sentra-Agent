@@ -749,6 +749,15 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
             response = rewrittenJudge;
           }
 
+          let parsedJudgeForPromise = null;
+          try {
+            parsedJudgeForPromise = parseSentraResponse(response);
+          } catch (e) {
+            logger.debug('PromiseMeta: parseSentraResponse 失败，跳过承诺检测', {
+              err: String(e)
+            });
+          }
+
           await historyManager.appendToAssistantMessage(groupId, response, pairId);
 
           const latestSenderMessages = getAllSenderMessages();
@@ -789,6 +798,42 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
                   logger.debug('DesireManager onBotMessage(Judge) failed', { err: String(e) });
                 }
               }
+
+              if (
+                parsedJudgeForPromise &&
+                parsedJudgeForPromise.promise &&
+                parsedJudgeForPromise.promise.hasPromise === true &&
+                parsedJudgeForPromise.promise.objective &&
+                typeof enqueueDelayedJob === 'function'
+              ) {
+                try {
+                  const delayRaw = getEnvInt('PROMISE_FULFILL_INITIAL_DELAY_MS', 15000);
+                  const delayMs =
+                    Number.isFinite(delayRaw) && delayRaw >= 0 ? delayRaw : 15000;
+                  const promiseObjective = String(
+                    parsedJudgeForPromise.promise.objective || ''
+                  ).trim();
+                  if (promiseObjective) {
+                    const job = {
+                      jobId: randomUUID(),
+                      aiName: '__promise_fulfill__',
+                      userId: userid,
+                      groupId: msg?.group_id || null,
+                      type: msg?.type || (msg?.group_id ? 'group' : 'private'),
+                      reason: promiseObjective,
+                      promiseObjective,
+                      createdAt: Date.now(),
+                      fireAt: Date.now() + delayMs,
+                      attempt: 0,
+                      lastMsg: finalMsg
+                    };
+                    await enqueueDelayedJob(job);
+                  }
+                } catch (e) {
+                  logger.debug('PromiseMeta: 入队承诺补单任务失败', { err: String(e) });
+                }
+              }
+
               markReplySentForConversation(conversationId);
             }
           } else {

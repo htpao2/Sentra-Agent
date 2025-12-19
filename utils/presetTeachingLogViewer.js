@@ -5,7 +5,9 @@ import { getEnv } from './envHotReloader.js';
 
 const logger = createLogger('PresetTeachingLog');
 
-const DEFAULT_LOG_FILE = getEnv('AGENT_PRESET_TEACHING_LOG_FILE', './logs/preset-teaching.log');
+function getLogFilePath() {
+  return getEnv('AGENT_PRESET_TEACHING_LOG_FILE', './logs/preset-teaching.log');
+}
 
 function ensureDirForFile(filePath) {
   try {
@@ -24,7 +26,7 @@ function ensureDirForFile(filePath) {
  */
 export function appendTeachingLog(entry) {
   if (!entry || typeof entry !== 'object') return;
-  const file = DEFAULT_LOG_FILE;
+  const file = getLogFilePath();
 
   try {
     ensureDirForFile(file);
@@ -45,7 +47,7 @@ export function appendTeachingLog(entry) {
  */
 export function readTeachingLogs(options = {}) {
   const { userId, groupId, limit = 50 } = options;
-  const file = DEFAULT_LOG_FILE;
+  const file = getLogFilePath();
 
   if (!fs.existsSync(file)) {
     return [];

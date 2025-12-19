@@ -50,7 +50,13 @@ export function setupSocketHandlers(ctx) {
 
         if (isPoke) {
           const scene = msg.type || 'unknown';
-          const convId = msg.group_id ? `G:${msg.group_id}` : `U:${msg.sender_id || ''}`;
+          let convId = msg.group_id ? `G:${msg.group_id}` : `U:${msg.sender_id || ''}`;
+          if (!msg.group_id) {
+            const selfId = msg.self_id;
+            if (selfId && msg.sender_id === selfId) {
+              convId = `U:${msg.target_id || ''}`;
+            }
+          }
           logger.info('<< poke', {
             scene,
             group_id: msg.group_id || null,
@@ -64,8 +70,16 @@ export function setupSocketHandlers(ctx) {
         } else {
           logger.debug('<< message', msg.type, msg.group_id || msg.sender_id);
         }
-        const userid = String(msg?.sender_id ?? '');
-        const username = msg?.sender_name || '';
+        let userid = String(msg?.sender_id ?? '');
+        if (isPoke && !msg.group_id) {
+          const selfId = msg.self_id;
+          if (selfId && msg.sender_id === selfId) {
+            userid = String(msg?.target_id ?? '');
+          }
+        }
+        const username = (isPoke && !msg.group_id && msg.self_id && msg.sender_id === msg.self_id)
+          ? (msg?.target_name || '')
+          : (msg?.sender_name || '');
 
         if (desireManager) {
           try {

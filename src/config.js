@@ -13,6 +13,9 @@ export const getConfigFromEnv = () => {
 	const rawMaxRetries = parseInt(process.env.MAX_RETRIES, 10);
 	const rawTimeout = parseInt(process.env.TIMEOUT, 10);
 
+	const safeMaxRetries =
+		Number.isFinite(rawMaxRetries) && rawMaxRetries >= 0 ? rawMaxRetries : 3;
+
 	return {
 		apiBaseUrl: process.env.API_BASE_URL || 'https://yuanplus.chat/v1/',
 		apiKey: process.env.API_KEY || 'sk-ZsC6m89ewvSfx29HqOIEVBPCZOCrhjO0dv3ZhYEmCBl9ijzz',
@@ -20,7 +23,9 @@ export const getConfigFromEnv = () => {
 		temperature: Number.isFinite(rawTemp) ? rawTemp : 0.7,
 		// MAX_TOKENS 支持设置为 -1，表示不限制，由服务端决定（不会在请求中发送 max_tokens）
 		maxTokens: Number.isFinite(rawMaxTokens) ? rawMaxTokens : 1000,
-		maxRetries: Number.isFinite(rawMaxRetries) ? rawMaxRetries : 3,
+		// MAX_RETRIES 表示最大“重试”次数（>=0），总尝试次数 = MAX_RETRIES + 1
+		// 0 表示不重试（单次尝试）
+		maxRetries: safeMaxRetries,
 		timeout: Number.isFinite(rawTimeout) ? rawTimeout : 60000
 	};
 };

@@ -25,13 +25,12 @@ function getBotNames() {
 let sharedConversationAnalyzer = null;
 
 /**
- * 评估一条群聊消息是否值得进入 LLM 决策或直接回复。
- * 不使用本地 ML 模型，只基于分词、token 统计和结构化信号。
+ * 评估一条群聊消息是否值得进入 LLM 决策或直接回复
+ * 基于分词、token 统计和结构化信号
  *
- * 返回决策：
  * - decision = 'ignore'  : 直接判定不回复
- * - decision = 'reply'   : 直接判定需要回复（无需再走决策 LLM）
- * - decision = 'llm'     : 交给 LLM 决策（灰度区间）
+ * - decision = 'reply'   : 直接判定需要回复
+ * - decision = 'llm'     : 交给 LLM 决策
  */
 export function assessReplyWorth(msg, signals = {}, options = {}) {
   const scene = msg?.type || 'unknown';
@@ -84,7 +83,11 @@ export function assessReplyWorth(msg, signals = {}, options = {}) {
     pushTexts(decisionContext.sender_recent_messages);
   }
 
-  const analyzer = sharedConversationAnalyzer || (sharedConversationAnalyzer = new ConversationAnalyzer());
+  const analyzer =
+    sharedConversationAnalyzer ||
+    (sharedConversationAnalyzer = new ConversationAnalyzer({
+      debug: true
+    }));
   let analysis;
   try {
     analysis = analyzer.analyze(rawText, historyTexts, { signals });

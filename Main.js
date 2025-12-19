@@ -508,7 +508,8 @@ async function runProactiveReply(candidate) {
 	  memoryXml,
 	  conversationContext,
 	  lastBotMessage,
-	  userEngagement
+	  userEngagement,
+	  promiseObjective: candidate.promiseObjective || ''
 	});
 
     // 构造一条“虚拟”的用户消息，标记为主动触发，并通过主流程/MCP 处理
@@ -662,7 +663,10 @@ const delayJobRunJob = createDelayJobRunJob({
   chatWithRetry,
   smartSend,
   sendAndWaitResult,
-  randomUUID
+  randomUUID,
+  desireManager,
+  getActiveTaskCount,
+  enqueueProactiveCandidate
 });
 
 startDelayJobWorker({

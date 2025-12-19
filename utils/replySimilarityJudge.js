@@ -6,9 +6,11 @@ import { ConversationAnalyzer } from '../components/gate/analyzer.js';
 
 const logger = createLogger('ReplySimilarityJudge');
 
-const SEND_DEDUP_MIN_SIMILARITY = parseFloat(getEnv('SEND_DEDUP_MIN_SIMILARITY', '0.8'));
-const SEND_DEDUP_USE_LLM = getEnvBool('SEND_DEDUP_USE_LLM', false);
-const SEND_DEDUP_LOCAL_DEBUG = getEnvBool('SEND_DEDUP_LOCAL_DEBUG', false);
+function getSendDedupMinSimilarity() {
+  const raw = getEnv('SEND_DEDUP_MIN_SIMILARITY', '0.9');
+  const v = parseFloat(raw);
+  return Number.isFinite(v) ? v : 0.9;
+}
 
 function buildAnalyzer() {
   try {
@@ -55,6 +57,8 @@ function computeLocalSimilarity(a, b) {
 }
 
 export async function judgeReplySimilarity(textA, textB) {
+  const SEND_DEDUP_USE_LLM = getEnvBool('SEND_DEDUP_USE_LLM', false);
+  const SEND_DEDUP_LOCAL_DEBUG = getEnvBool('SEND_DEDUP_LOCAL_DEBUG', false);
   const a = (textA || '').trim();
   const b = (textB || '').trim();
   if (!a || !b) {
@@ -111,7 +115,7 @@ export async function judgeReplySimilarity(textA, textB) {
     return { areSimilar: false, similarity: null, source: 'none' };
   }
 
-  const threshold = Number.isFinite(SEND_DEDUP_MIN_SIMILARITY) ? SEND_DEDUP_MIN_SIMILARITY : 0.8;
+  const threshold = getSendDedupMinSimilarity();
   const useLlm = SEND_DEDUP_USE_LLM;
 
   if (SEND_DEDUP_LOCAL_DEBUG) {

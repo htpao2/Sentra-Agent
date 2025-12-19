@@ -36,13 +36,21 @@ class Agent {
     }
     
     // 配置优先级：传入参数 > 环境变量 > 默认值
+    const maxRetriesRaw =
+      config.maxRetries ?? (process.env.MAX_RETRIES !== undefined ? process.env.MAX_RETRIES : '3');
+    let maxRetriesParsed = parseInt(maxRetriesRaw, 10);
+    if (!Number.isFinite(maxRetriesParsed) || maxRetriesParsed < 0) {
+      maxRetriesParsed = 1;
+    }
+
     this.config = {
       apiKey: config.apiKey || process.env.API_KEY,
       apiBaseUrl: config.apiBaseUrl || process.env.API_BASE_URL || 'https://yuanplus.chat/v1',
       defaultModel: config.defaultModel || process.env.MAIN_AI_MODEL || 'gpt-3.5-turbo',
       temperature: parseFloat(config.temperature || process.env.TEMPERATURE || '0.7'),
       maxTokens: parseInt(config.maxTokens || process.env.MAX_TOKENS || '4096'),
-      maxRetries: parseInt(config.maxRetries || process.env.MAX_RETRIES || '3'),
+      // 语义：maxRetries = 最大“重试”次数（>=0），总尝试次数 = maxRetries + 1
+      maxRetries: maxRetriesParsed,
       timeout: parseInt(config.timeout || process.env.TIMEOUT || '60000'),
       stream: config.stream !== undefined ? config.stream : false
     };
@@ -100,9 +108,13 @@ class Agent {
     if (options.tool_choice !== undefined) requestConfig.tool_choice = options.tool_choice;
     
     let lastError = null;
-    
-    // 重试机制
-    for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {
+
+    // 重试机制：maxRetries 表示“重试次数”，总尝试次数 = maxRetries + 1（>=1）
+    const maxRetries = Number.isFinite(this.config.maxRetries) && this.config.maxRetries >= 0
+      ? this.config.maxRetries
+      : 0;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const response = await fetch(`${this.config.apiBaseUrl}/chat/completions`, {
           method: 'POST',
@@ -171,26 +183,29 @@ class Agent {
         return message.content;
       } catch (error) {
         lastError = error;
-        
-        // 如果是超时或网络错误，且还有重试次数，则等待后重试
-        if (attempt < this.config.maxRetries - 1) {
+
+        // 如果是超时或网络错误，且还有剩余重试次数，则等待后重试
+        if (attempt < maxRetries) {
           const delay = Math.min(1000 * Math.pow(2, attempt), 10000); // 指数退避
-          logger.warn(`请求失败，${delay}ms 后重试 (${attempt + 1}/${this.config.maxRetries})`, error.message);
+          logger.warn(`请求失败，${delay}ms 后重试 (${attempt + 1}/${maxRetries + 1})`, error.message);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
       }
     }
-    
-    // 所有重试都失败
-    logger.error(`AI 生成失败 (${this.config.maxRetries}次尝试)`, lastError);
-    
+
+    const totalAttempts = maxRetries + 1;
+
+    // 所有尝试都失败
+    logger.error(`AI 生成失败 (${totalAttempts}次尝试)`, lastError);
+
     // 如果配置了跳过失败，返回null而不是抛出错误
     if (process.env.SKIP_ON_GENERATION_FAIL === 'true') {
       return null;
     }
-    
-    throw new Error(`Failed to call AI API after ${this.config.maxRetries} attempts: ${lastError.message}`);
+
+    const errMsg = lastError && lastError.message ? lastError.message : 'unknown error';
+    throw new Error(`Failed to call AI API after ${totalAttempts} attempts: ${errMsg}`);
   }
   
   /**

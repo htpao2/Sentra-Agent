@@ -353,16 +353,16 @@ export function parseSentraResponse(response) {
   } catch (e) {
     logger.warn(`<send> 解析失败: ${e.message}`);
   }
-  
+
   // 提取 <emoji> 标签（可选，最多一个）
   const emojiBlock = extractXMLTag(responseContent, 'emoji');
   let emoji = null;
-  
+
   if (emojiBlock && emojiBlock.trim()) {
     try {
       const source = extractXMLTag(emojiBlock, 'source');
       const caption = extractXMLTag(emojiBlock, 'caption');
-      
+
       if (source) {
         emoji = { source };
         if (caption) emoji.caption = caption;
@@ -372,6 +372,29 @@ export function parseSentraResponse(response) {
       }
     } catch (e) {
       logger.warn(`<emoji> 解析失败: ${e.message}`);
+    }
+  }
+
+  // 提取 <meta> 承诺信息（可选）
+  const metaBlock = extractXMLTag(responseContent, 'meta');
+  let hasPromise = null;
+  let promiseObjective = null;
+
+  if (metaBlock && metaBlock.trim()) {
+    try {
+      const rawHas = (extractXMLTag(metaBlock, 'has_promise') || '').trim().toLowerCase();
+      if (rawHas === 'true' || rawHas === '1' || rawHas === 'yes') {
+        hasPromise = true;
+      } else if (rawHas === 'false' || rawHas === '0' || rawHas === 'no') {
+        hasPromise = false;
+      }
+
+      const rawObj = extractXMLTag(metaBlock, 'promise_objective');
+      if (rawObj && rawObj.trim()) {
+        promiseObjective = rawObj.trim();
+      }
+    } catch (e) {
+      logger.warn(`<meta> 承诺信息解析失败: ${e.message}`);
     }
   }
   
@@ -386,9 +409,20 @@ export function parseSentraResponse(response) {
       validated.emoji = emoji;  // 添加 emoji 到返回结果
     }
 
-    // 如果既没有文本也没有资源，则标记为 shouldSkip，供上层逻辑跳过发送
-    if ((!validated.textSegments || validated.textSegments.length === 0) &&
-        (!validated.resources || validated.resources.length === 0)) {
+    if (hasPromise !== null || (promiseObjective && promiseObjective.trim())) {
+      validated.promise = {
+        hasPromise: hasPromise === true,
+        objective: promiseObjective || ''
+      };
+    }
+
+    // 如果既没有有效文本、也没有资源、也没有 emoji，则标记为 shouldSkip，供上层逻辑跳过发送
+    const hasText = Array.isArray(validated.textSegments)
+      && validated.textSegments.some((t) => (t || '').trim());
+    const hasResources = Array.isArray(validated.resources) && validated.resources.length > 0;
+    const hasEmoji = !!validated.emoji;
+
+    if (!hasText && !hasResources && !hasEmoji) {
       validated.shouldSkip = true;
     }
 
