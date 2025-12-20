@@ -1,9 +1,94 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { EnvVariable } from '../types/config';
 import styles from './EnvEditor.module.css';
 import { IoAdd, IoSave, IoTrash, IoInformationCircle, IoSearch, IoWarning, IoRefresh } from 'react-icons/io5';
 import { motion, AnimatePresence } from 'framer-motion';
 import { SafeInput } from './SafeInput';
+
+type EnvValueType = 'string' | 'number' | 'boolean' | 'enum' | 'array';
+
+const typeLabelMap: Record<EnvValueType, string> = {
+  string: '文本',
+  number: '数字',
+  boolean: '开关',
+  enum: '枚举',
+  array: '数组'
+};
+
+interface EnvFieldMeta {
+  type: EnvValueType;
+  description: string;
+  range?: { min?: number; max?: number };
+  options?: string[];
+}
+
+function parseEnvMeta(comment?: string): EnvFieldMeta | null {
+  if (!comment) return null;
+  const lines = comment.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return null;
+
+  let type: EnvValueType | undefined;
+  let options: string[] | undefined;
+  let range: { min?: number; max?: number } | undefined;
+  const descLines: string[] = [];
+
+  for (const raw of lines) {
+    const line = raw.replace(/^#+\s*/, '');
+    const lower = line.toLowerCase();
+
+    if (lower.startsWith('type:')) {
+      const val = line.slice(line.indexOf(':') + 1).trim().toLowerCase();
+      if (val === 'number' || val === 'int' || val === 'integer') type = 'number';
+      else if (val === 'boolean' || val === 'bool') type = 'boolean';
+      else if (val === 'enum') type = 'enum';
+      else if (val === 'array' || val === 'list') type = 'array';
+      else type = 'string';
+      continue;
+    }
+
+    if (lower.startsWith('options:')) {
+      const val = line.slice(line.indexOf(':') + 1).trim();
+      const parsed = val.split(/[|,]/).map(s => s.trim()).filter(Boolean);
+      if (parsed.length > 0) {
+        options = parsed;
+        if (!type) type = 'enum';
+      }
+      continue;
+    }
+
+    if (lower.startsWith('range:')) {
+      const val = line.slice(line.indexOf(':') + 1).trim();
+      const m = val.match(/(-?\d+)\s*-\s*(-?\d+)/);
+      if (m) {
+        const min = Number(m[1]);
+        const max = Number(m[2]);
+        range = { min, max };
+      }
+      continue;
+    }
+
+    descLines.push(line);
+  }
+
+  const description = descLines.join(' ');
+  const resolvedType: EnvValueType = type || 'string';
+  return { type: resolvedType, description, range, options };
+}
+
+function firstNonMetaLine(comment?: string): string {
+  if (!comment) return '';
+  const lines = comment.split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.replace(/^#+\s*/, '').trim();
+    const lower = line.toLowerCase();
+    if (!line) continue;
+    if (lower.startsWith('type:')) continue;
+    if (lower.startsWith('options:')) continue;
+    if (lower.startsWith('range:')) continue;
+    return line;
+  }
+  return '';
+}
 
 interface EnvEditorProps {
   appName?: string;
@@ -35,14 +120,18 @@ export const EnvEditor: React.FC<EnvEditorProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState<{ index: number; key: string } | null>(null);
   const [restoreConfirm, setRestoreConfirm] = useState(false);
+  const [openEnumIndex, setOpenEnumIndex] = useState<number | null>(null);
 
-  // Filter logic: include key, value, and comment
-  const filteredVars = vars.map((v, i) => ({ ...v, originalIndex: i }))
-    .filter(v =>
-      v.key.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (v.value && v.value.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      (v.comment && v.comment.toLowerCase().includes(searchTerm.toLowerCase()))
-    );
+  const filteredVars = useMemo(() => {
+    const term = searchTerm.toLowerCase();
+    return vars
+      .map((v, i) => ({ ...v, originalIndex: i }))
+      .filter(v =>
+        v.key.toLowerCase().includes(term) ||
+        (v.value && v.value.toLowerCase().includes(term)) ||
+        (v.comment && v.comment.toLowerCase().includes(term))
+      );
+  }, [vars, searchTerm]);
 
   // Handle global Ctrl+F to focus search
   useEffect(() => {
@@ -55,6 +144,24 @@ export const EnvEditor: React.FC<EnvEditorProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // 点击页面其他位置时关闭当前打开的枚举下拉菜单
+  useEffect(() => {
+    if (openEnumIndex === null) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      // 如果点击在任意 macSelect 容器内部，则不关闭
+      if (target.closest(`.${styles.macSelect}`)) return;
+      setOpenEnumIndex(null);
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [openEnumIndex]);
 
   return (
     <div
@@ -165,51 +272,146 @@ export const EnvEditor: React.FC<EnvEditorProps> = ({
             </div>
           ) : (
             <div className={styles.settingsGroup}>
-              {filteredVars.map((v) => (
-                <div key={v.originalIndex} className={styles.settingsRow}>
-                  <div className={styles.rowHeader}>
-                    <div className={styles.keyInfo}>
-                      {v.isNew ? (
-                        <SafeInput
-                          className={styles.newKeyInput}
-                          value={v.key}
-                          onChange={(e) => onUpdate(v.originalIndex, 'key', e.target.value)}
-                          placeholder="NEW_KEY"
-                          autoFocus
+              {filteredVars.map((v) => {
+                const meta = parseEnvMeta(v.comment);
+                const type: EnvValueType = meta?.type || 'string';
+                const description = meta?.description || firstNonMetaLine(v.comment) || '';
+                const rawValue = v.value ?? '';
+                const lowerValue = rawValue.toLowerCase();
+                const boolValue = rawValue === 'true' || rawValue === '1' || lowerValue === 'yes' || lowerValue === 'on';
+                const handleBooleanChange = (next: boolean) => {
+                  onUpdate(v.originalIndex, 'value', next ? 'true' : 'false');
+                };
+
+                // 数字类型：允许直接输入，由浏览器原生 number 控件和后端校验负责约束
+                const handleNumberChange = (raw: string) => {
+                  onUpdate(v.originalIndex, 'value', raw);
+                };
+
+                // 只有纯文本/数字使用带边框的编辑容器，其余类型使用更轻量的 inline 容器，避免“外面一个大文本框”的观感
+                const wrapperClassName =
+                  type === 'string' || type === 'number'
+                    ? styles.editorWrapper
+                    : styles.inlineEditorBody;
+
+                const isEnumOpen = openEnumIndex === v.originalIndex;
+
+                return (
+                  <div key={v.originalIndex} className={styles.settingsRow}>
+                    <div className={styles.rowTop}>
+                      <div className={styles.keyBlock}>
+                        <div className={styles.keyLine}>
+                          {v.isNew ? (
+                            <SafeInput
+                              className={styles.newKeyInput}
+                              value={v.key}
+                              onChange={(e) => onUpdate(v.originalIndex, 'key', e.target.value)}
+                              placeholder="NEW_KEY"
+                              autoFocus
+                            />
+                          ) : (
+                            <div className={styles.keyName}>{v.key}</div>
+                          )}
+                          <div className={styles.typeTag}>{typeLabelMap[type]}</div>
+                        </div>
+                        <div className={styles.descLine}>{description || '未填写说明'}</div>
+                        <div className={styles.metaLine}>
+                          {type === 'number' && meta?.range && (
+                            <span className={`${styles.chip} ${styles.chipSoft}`}>
+                              范围 {meta.range.min ?? '−∞'} ~ {meta.range.max ?? '∞'}
+                            </span>
+                          )}
+                          {type === 'enum' && meta?.options && (
+                            <div className={styles.optionChips}>
+                              {meta.options.map(opt => (
+                                <span key={opt} className={styles.optionChip}>{opt}</span>
+                              ))}
+                            </div>
+                          )}
+                          {type === 'array' && (
+                            <span className={`${styles.chip} ${styles.chipSoft}`}>数组 / JSON</span>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        className={styles.deleteBtn}
+                        onClick={() => setDeleteConfirm({ index: v.originalIndex, key: v.key })}
+                        title="删除"
+                      >
+                        <IoTrash size={16} />
+                      </button>
+                    </div>
+
+                    <div className={wrapperClassName}>
+                      {type === 'boolean' ? (
+                        <div className={styles.booleanRow}>
+                          <button
+                            type="button"
+                            className={styles.toggle}
+                            data-checked={boolValue}
+                            onClick={() => handleBooleanChange(!boolValue)}
+                          >
+                            <span className={styles.toggleKnob} />
+                          </button>
+                          <span className={styles.toggleLabel}>{boolValue ? '已启用' : '已关闭'}</span>
+                        </div>
+                      ) : type === 'enum' && meta?.options && meta.options.length > 0 ? (
+                        <div className={styles.macSelect}>
+                          <button
+                            type="button"
+                            className={styles.macSelectButton}
+                            onClick={() => setOpenEnumIndex(isEnumOpen ? null : v.originalIndex)}
+                          >
+                            <span className={styles.macSelectLabel}>{v.value || meta.options[0] || '请选择'}</span>
+                            <span className={styles.macSelectArrow}>▾</span>
+                          </button>
+                          {isEnumOpen && (
+                            <div className={styles.macSelectMenu}>
+                              {meta.options.map(opt => (
+                                <div
+                                  key={opt}
+                                  className={`${styles.macSelectOption} ${v.value === opt ? styles.macSelectOptionActive : ''}`}
+                                  onClick={() => {
+                                    onUpdate(v.originalIndex, 'value', opt);
+                                    setOpenEnumIndex(null);
+                                  }}
+                                >
+                                  {opt}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : type === 'array' ? (
+                        <textarea
+                          className={styles.valueTextarea}
+                          value={v.value}
+                          onChange={(e) => onUpdate(v.originalIndex, 'value', e.target.value)}
+                          placeholder="输入数组或 JSON..."
+                          spellCheck={false}
                         />
                       ) : (
-                        <div className={styles.keyName}>{v.key}</div>
-                      )}
-                      <div className={styles.keyComment}>
-                        <SafeInput
-                          className={styles.commentInput}
-                          value={v.comment || ''}
-                          onChange={(e) => onUpdate(v.originalIndex, 'comment', e.target.value)}
-                          placeholder="添加说明..."
+                        <input
+                          type={type === 'number' ? 'number' : 'text'}
+                          className={type === 'number' ? styles.valueInputNumber : styles.valueInput}
+                          value={v.value}
+                          onChange={(e) => {
+                            if (type === 'number') {
+                              handleNumberChange(e.target.value);
+                            } else {
+                              onUpdate(v.originalIndex, 'value', e.target.value);
+                            }
+                          }}
+                          placeholder={type === 'number' ? '输入数字...' : '输入值...'}
+                          spellCheck={false}
+                          min={type === 'number' && meta?.range?.min !== undefined ? meta.range.min : undefined}
+                          max={type === 'number' && meta?.range?.max !== undefined ? meta.range.max : undefined}
                         />
-                      </div>
+                      )}
                     </div>
-                    <button
-                      className={styles.deleteBtn}
-                      onClick={() => setDeleteConfirm({ index: v.originalIndex, key: v.key })}
-                      title="删除"
-                    >
-                      <IoTrash size={16} />
-                    </button>
                   </div>
-
-                  <div className={styles.editorWrapper}>
-                    <input
-                      type="text"
-                      className={styles.valueInput}
-                      value={v.value}
-                      onChange={(e) => onUpdate(v.originalIndex, 'value', e.target.value)}
-                      placeholder="输入值..."
-                      spellCheck={false}
-                    />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

@@ -15,7 +15,7 @@ interface MacWindowProps {
   isMinimized: boolean;
   onClose: () => void;
   onMinimize: () => void;
-  onMaximize: () => void;
+  onMaximize: (isMaximized: boolean) => void;
   onFocus: () => void;
   onMove: (x: number, y: number) => void;
   children: React.ReactNode;
@@ -31,6 +31,7 @@ export const MacWindow: React.FC<MacWindowProps> = ({
   isMinimized,
   onClose,
   onMinimize,
+  onMaximize,
   onFocus,
   onMove,
   children
@@ -45,9 +46,10 @@ export const MacWindow: React.FC<MacWindowProps> = ({
     if (initialPos) return initialPos;
     const width = initialSize?.width || 800;
     const height = initialSize?.height || 500;
+    const safeTop = 70;
     return {
       x: Math.max(0, (window.innerWidth - width) / 2),
-      y: Math.max(40, (window.innerHeight - height) / 2)
+      y: Math.max(safeTop, (window.innerHeight - height) / 2)
     };
   });
 
@@ -60,8 +62,11 @@ export const MacWindow: React.FC<MacWindowProps> = ({
   }, []);
 
   const handleMaximizeToggle = () => {
-    setIsMaximized(!isMaximized);
-    // Don't call onMaximize prop as it might be for something else, we handle state locally
+    setIsMaximized(prev => {
+      const next = !prev;
+      onMaximize(next);
+      return next;
+    });
   };
 
   // Animation variants
@@ -110,14 +115,40 @@ export const MacWindow: React.FC<MacWindowProps> = ({
       newH = Math.max(minH, st.startH - movedY);
     }
 
-    // Prevent overflow on the right/bottom relative to viewport
     const viewportW = window.innerWidth;
-    const viewportH = window.innerHeight - 0; // menu bar accounted by y origin
-    if (newX + newW > viewportW) newW = Math.max(minW, viewportW - newX);
-    if (newY + newH > viewportH) newH = Math.max(minH, viewportH - newY);
+    const viewportH = window.innerHeight;
+    if (newX + newW > viewportW) {
+      newW = Math.max(minW, viewportW - newX);
+    }
+
+    if (newY + newH > viewportH) {
+      newH = Math.max(minH, viewportH - newY);
+    }
+
+    const reservedVerticalSpace = 120;
+    const maxAllowedH = Math.max(minH, viewportH - reservedVerticalSpace);
+    if (newH > maxAllowedH) {
+      newH = maxAllowedH;
+    }
 
     setPos({ x: newX, y: newY });
     setSize({ width: newW, height: newH });
+  };
+
+  const clampPosition = (x: number, y: number) => {
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    const w = typeof size.width === 'number' ? size.width : 800;
+    const h = typeof size.height === 'number' ? size.height : 500;
+    const minX = 0;
+    const maxX = Math.max(minX, viewportW - w);
+    const topSafe = 70;
+    const bottomSafe = 120;
+    const minY = topSafe;
+    const maxY = Math.max(minY, viewportH - h - bottomSafe);
+    const clampedX = Math.min(Math.max(x, minX), maxX);
+    const clampedY = Math.min(Math.max(y, minY), maxY);
+    return { x: clampedX, y: clampedY };
   };
 
   const onResizeEnd = () => {
@@ -171,7 +202,7 @@ export const MacWindow: React.FC<MacWindowProps> = ({
       animate="visible"
       exit="exit"
       variants={variants}
-      transition={{ duration: 0.2 }}
+      transition={{ duration: 0.12 }}
     >
       <div className={`${styles.titleBar} window-drag-handle`} onDoubleClick={handleMaximizeToggle}>
         <div className={styles.title}>
@@ -227,11 +258,15 @@ export const MacWindow: React.FC<MacWindowProps> = ({
       handle=".window-drag-handle"
       position={isMaximized ? { x: 0, y: 0 } : (pos || defaultPos)}
       onStart={onFocus}
-      onDrag={(_e, data) => setPos({ x: data.x, y: data.y })}
+      onDrag={(_e, data) => {
+        const next = clampPosition(data.x, data.y);
+        setPos(next);
+      }}
       onStop={(_e, data) => {
         if (!isMaximized) {
-          setPos({ x: data.x, y: data.y });
-          onMove(data.x, data.y);
+          const next = clampPosition(data.x, data.y);
+          setPos(next);
+          onMove(next.x, next.y);
         }
       }}
       nodeRef={nodeRef}

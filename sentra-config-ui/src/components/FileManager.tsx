@@ -405,7 +405,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ addToast, theme }) => 
     }, []);
 
     return (
-        <div className={styles.container} onContextMenu={(e) => e.preventDefault()}>
+        <div className={`${styles.container} ${styles.desktopRoot}`} data-theme={theme} onContextMenu={(e) => e.preventDefault()}>
             <div className={styles.sidebar}>
                 <div className={styles.sidebarHeader}>
                     <span>EXPLORER</span>
@@ -497,7 +497,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ addToast, theme }) => 
                                     automaticLayout: true,
                                     contextmenu: true,
                                     find: {
-                                        addExtraSpaceOnTop: false,
+                                        addExtraSpaceOnTop: true,
                                         autoFindInSelection: 'never',
                                         seedSearchStringFromSelection: 'always'
                                     }

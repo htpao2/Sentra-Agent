@@ -38,7 +38,8 @@ function commandExists(cmd) {
 
 function chooseMode(preferred) {
   if (preferred && preferred !== 'auto') return preferred;
-  return commandExists('pm2') ? 'pm2' : 'node';
+  // Default to plain Node.js; PM2 is only used when explicitly requested
+  return 'node';
 }
 
 function run(cmd, args, opts = {}) {

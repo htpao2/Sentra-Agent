@@ -11,33 +11,33 @@
 
 /* Theme Variables */
 .container[data-theme='dark'] {
-    --bg-primary: #1e1e1e;
-    --bg-secondary: #252526;
-    --bg-tertiary: #333333;
-    --text-primary: #cccccc;
-    --text-secondary: #858585;
-    --border-color: #3e3e42;
-    --accent-color: #0e639c;
-    --hover-color: #2a2d2e;
-    --input-bg: #3c3c3c;
-    --input-border: transparent;
-    --active-item-bg: rgba(14, 99, 156, 0.2);
-    --active-text: #ffffff;
+    --bg-primary: #0b1120;
+    --bg-secondary: #020617;
+    --bg-tertiary: #111827;
+    --text-primary: #e5e7eb;
+    --text-secondary: #9ca3af;
+    --border-color: #1f2937;
+    --accent-color: #38bdf8;
+    --hover-color: #111827;
+    --input-bg: #020617;
+    --input-border: #1f2937;
+    --active-item-bg: rgba(56, 189, 248, 0.18);
+    --active-text: #e5e7eb;
 }
 
 .container[data-theme='light'] {
-    --bg-primary: #ffffff;
-    --bg-secondary: #f3f3f3;
-    --bg-tertiary: #e5e5e5;
-    --text-primary: #333333;
-    --text-secondary: #666666;
-    --border-color: #e1e1e1;
-    --accent-color: #007aff;
-    --hover-color: #e8e8e8;
+    --bg-primary: #f9fafb;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #e5e7eb;
+    --text-primary: #111827;
+    --text-secondary: #6b7280;
+    --border-color: #d1d5db;
+    --accent-color: #0ea5e9;
+    --hover-color: #f3f4f6;
     --input-bg: #ffffff;
-    --input-border: #d1d1d1;
-    --active-item-bg: rgba(0, 122, 255, 0.1);
-    --active-text: #007aff;
+    --input-border: #d1d5db;
+    --active-item-bg: rgba(14, 165, 233, 0.12);
+    --active-text: #0ea5e9;
 }
 
 .sidebar {
@@ -792,5 +792,47 @@
 }
 
 .deleteBtn:hover {
-    filter: brightness(1.1);
+filter: brightness(1.1);
+}
+
+/* Mac 桌面模式：现代化卡片布局 */
+.desktopRoot {
+    /* 保持原来整体两列布局，只做轻量 Mac 风格优化 */
+    padding: 0;
+    background: var(--bg-primary);
+}
+
+.desktopRoot .sidebar {
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-color);
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.desktopRoot .editorArea {
+    margin-left: 0;
+    background: var(--bg-primary);
+    border-radius: 0;
+    border-left: none;
+    box-shadow: none;
+}
+
+.desktopRoot .editorToolbar {
+    height: 40px;
+    padding: 0 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.desktopRoot .actionBtn {
+    border-radius: 999px;
+    padding: 4px 12px;
+}
+
+.desktopRoot .actionBtn.primary {
+    box-shadow: none;
+}
+
+.desktopRoot .emptyState {
+    background: transparent;
 }

@@ -1,8 +1,9 @@
 .window {
     /* Position is handled by inline styles for Draggable/Maximized logic */
     background: var(--mac-window-bg);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    /* 适当降低模糊半径，减少 GPU 压力 */
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     box-shadow: var(--mac-window-shadow);
     display: flex;
     flex-direction: column;

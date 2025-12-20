@@ -1,8 +1,17 @@
-import React from 'react';
+import React, { type ReactNode } from 'react';
 import { IoClose, IoTerminal } from 'react-icons/io5';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { DeskWindow, TerminalWin } from '../types/ui';
 import { getDisplayName, getIconForType } from '../utils/icons';
+
+type ExtraTab = {
+    id: string;
+    title: string;
+    icon: ReactNode;
+    isActive: boolean;
+    onActivate: () => void;
+    onClose: () => void;
+};
 
 interface TopTaskbarProps {
     openWindows: DeskWindow[];
@@ -13,6 +22,7 @@ interface TopTaskbarProps {
     onActivateTerminal: (id: string) => void;
     onCloseWindow: (id: string) => void;
     onCloseTerminal: (id: string) => void;
+    extraTabs?: ExtraTab[];
 }
 
 export const TopTaskbar: React.FC<TopTaskbarProps> = ({
@@ -24,6 +34,7 @@ export const TopTaskbar: React.FC<TopTaskbarProps> = ({
     onActivateTerminal,
     onCloseWindow,
     onCloseTerminal,
+    extraTabs = [],
 }) => {
     const allTabs = [
         ...openWindows.map(w => ({
@@ -43,7 +54,16 @@ export const TopTaskbar: React.FC<TopTaskbarProps> = ({
             icon: <IoTerminal />,
             onActivate: () => onActivateTerminal(t.id),
             onClose: () => onCloseTerminal(t.id),
-        }))
+        })),
+        ...extraTabs.map(t => ({
+            id: t.id,
+            title: t.title,
+            type: 'extra' as const,
+            isActive: t.isActive,
+            icon: t.icon,
+            onActivate: t.onActivate,
+            onClose: t.onClose,
+        })),
     ];
 
     if (allTabs.length === 0) return null;

@@ -120,7 +120,7 @@ export function MobileView(props: MobileViewProps) {
   return (
     <>
       <IOSHomeScreen
-        icons={desktopIcons}
+        icons={desktopIcons.filter(icon => icon.id !== 'desktop-dev-center')}
         folders={desktopFolders}
         onLaunch={(icon) => {
           setReturnToLaunchpad(false); // Reset when opening from Home

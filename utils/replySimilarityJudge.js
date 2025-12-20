@@ -12,12 +12,16 @@ function getSendDedupMinSimilarity() {
   return Number.isFinite(v) ? v : 0.9;
 }
 
+function getSendDedupLocalDebug() {
+  return getEnvBool('SEND_DEDUP_LOCAL_DEBUG', false);
+}
+
 function buildAnalyzer() {
   try {
     return new ConversationAnalyzer({
       contextWindow: 4,
       maxSimilarity: 1,
-      debug: SEND_DEDUP_LOCAL_DEBUG
+      debug: getSendDedupLocalDebug()
     });
   } catch (e) {
     logger.warn('初始化 ConversationAnalyzer 失败，将仅使用 Embedding 相似度', { err: String(e) });
@@ -58,7 +62,7 @@ function computeLocalSimilarity(a, b) {
 
 export async function judgeReplySimilarity(textA, textB) {
   const SEND_DEDUP_USE_LLM = getEnvBool('SEND_DEDUP_USE_LLM', false);
-  const SEND_DEDUP_LOCAL_DEBUG = getEnvBool('SEND_DEDUP_LOCAL_DEBUG', false);
+  const SEND_DEDUP_LOCAL_DEBUG = getSendDedupLocalDebug();
   const a = (textA || '').trim();
   const b = (textB || '').trim();
   if (!a || !b) {

@@ -7,20 +7,24 @@ import { EnvVariable } from '../types';
 export function parseEnvFile(content: string): EnvVariable[] {
   const lines = content.split('\n');
   const variables: EnvVariable[] = [];
-  let currentComment = '';
+  // 支持连续多行注释块：第一行为说明，后续行为 type / range / options 等元数据
+  let currentCommentLines: string[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // 处理注释
+    // 处理注释（支持多行）
     if (trimmed.startsWith('#')) {
-      currentComment = trimmed.substring(1).trim();
+      const text = trimmed.substring(1).trim();
+      if (text) {
+        currentCommentLines.push(text);
+      }
       continue;
     }
 
-    // 处理空行
+    // 处理空行：结束当前注释块，避免泄露到下一组配置
     if (!trimmed) {
-      currentComment = '';
+      currentCommentLines = [];
       continue;
     }
 
@@ -31,18 +35,21 @@ export function parseEnvFile(content: string): EnvVariable[] {
       let value = trimmed.substring(equalIndex + 1).trim();
 
       // 移除引号
-      if ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))) {
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
         value = value.substring(1, value.length - 1);
       }
 
       variables.push({
         key,
         value,
-        comment: currentComment || undefined,
+        comment: currentCommentLines.length ? currentCommentLines.join('\n') : undefined,
       });
 
-      currentComment = '';
+      // 重置注释缓冲，下一条变量重新开始
+      currentCommentLines = [];
     }
   }
 
@@ -56,15 +63,30 @@ export function serializeEnvFile(variables: EnvVariable[]): string {
   const lines: string[] = [];
 
   for (const variable of variables) {
-    // 添加注释
+    // 添加注释：支持多行，逐行加上 #
     if (variable.comment) {
-      lines.push(`# ${variable.comment}`);
+      const commentLines = variable.comment.split(/\r?\n/);
+      for (const c of commentLines) {
+        const text = c.trim();
+        if (text) {
+          lines.push(`# ${text}`);
+        } else {
+          lines.push('#');
+        }
+      }
     }
 
     // 添加变量（如果值包含空格或特殊字符，加引号）
     const needsQuotes = /[\s#]/.test(variable.value);
     const value = needsQuotes ? `"${variable.value}"` : variable.value;
     lines.push(`${variable.key}=${value}`);
+    // 在每个配置块之间保留一个空行以增强可读性
+    lines.push('');
+  }
+
+  // 去掉最后可能多余的空行
+  while (lines.length > 0 && lines[lines.length - 1] === '') {
+    lines.pop();
   }
 
   return lines.join('\n') + '\n';

@@ -11,7 +11,8 @@ import {
   IoSunny,
   IoMoon,
   IoApps,
-  IoReload
+  IoReload,
+  IoBookOutline,
 } from 'react-icons/io5';
 import { BsController } from 'react-icons/bs';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -28,6 +29,7 @@ interface MenuBarProps {
   onToggleTheme: () => void;
   showDock: boolean;
   onToggleDock: () => void;
+  onOpenDeepWiki: () => void;
 }
 
 const Clock: React.FC = () => {
@@ -54,7 +56,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   theme,
   onToggleTheme,
   showDock,
-  onToggleDock
+  onToggleDock,
+  onOpenDeepWiki
 }) => {
   const [activeMenu, setActiveMenu] = useState<number | null>(null);
   const [showControlCenter, setShowControlCenter] = useState(false);
@@ -151,6 +154,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
           </div>
           <div className={styles.menuItem} onClick={() => setShowControlCenter(!showControlCenter)}>
             <BsController size={18} />
+          </div>
+          <div
+            className={styles.menuItem}
+            onClick={(e) => { e.stopPropagation(); onOpenDeepWiki(); }}
+            title="打开 DeepWiki · Sentra Agent 文档与助手"
+          >
+            <IoBookOutline size={18} />
           </div>
           <div
             className={styles.menuItem}

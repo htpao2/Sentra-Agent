@@ -62,7 +62,8 @@ export const getDisplayName = (name: string): string => {
   const n = name.toLowerCase();
   const mapping: Record<string, string> = {
     '.': '对话配置',
-    'sentra-config-ui': 'Webui配置',
+    'sentra-config-ui': 'WebUI配置',
+    'dev-center': '开发中心',
     'utils/emoji-stickers': '表情包配置',
     'agent-presets': '预设撰写',
     'av_transcribe': '音频转录',
@@ -140,6 +141,7 @@ export const getIconForType = (name: string, type: 'module' | 'plugin'): React.R
   if (n.includes('sentra-emo')) return <AppIconWrapper bg="linear-gradient(135deg, #f093fb 0%, #f5576c 100%)"><FcStart /></AppIconWrapper>;
   if (n.includes('sentra-adapter')) return <AppIconWrapper bg="linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)"><FcSettings /></AppIconWrapper>;
   if (n.includes('sentra-rag')) return <AppIconWrapper bg="linear-gradient(135deg, #fa709a 0%, #fee140 100%)"><FcMindMap /></AppIconWrapper>;
+  if (n.includes('dev-center')) return <AppIconWrapper bg="linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%)"><IoApps color="white" /></AppIconWrapper>;
   if (n.includes('redis') || n.includes('agent-redis')) return <AppIconWrapper bg="linear-gradient(135deg, #ff512f 0%, #dd2476 100%)"><IoServer color="white" /></AppIconWrapper>;
 
   // Search & Web - Different shades of blue/green

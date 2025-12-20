@@ -144,7 +144,7 @@ export const RedisEditor: React.FC<RedisEditorProps> = React.memo(({ theme, stat
     const renderValue = useMemo(() => {
         if (!keyValue) return null;
 
-        // For editing mode
+        // 编辑模式：直接用 Monaco 编辑器
         if (editMode && (keyType === 'string' || keyType === 'hash')) {
             return (
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -158,6 +158,9 @@ export const RedisEditor: React.FC<RedisEditorProps> = React.memo(({ theme, stat
                             minimap: { enabled: false },
                             fontSize: 13,
                             wordWrap: 'on',
+                            find: {
+                                addExtraSpaceOnTop: true,
+                            },
                         }}
                     />
                     <div style={{ padding: '10px 0', display: 'flex', gap: 8 }}>
@@ -168,7 +171,7 @@ export const RedisEditor: React.FC<RedisEditorProps> = React.memo(({ theme, stat
             );
         }
 
-        // Visual preview for different types
+        // 不同类型的只读预览
         if (keyType === 'hash' && typeof keyValue === 'object') {
             return (
                 <div className={styles.hashView}>
@@ -233,7 +236,7 @@ export const RedisEditor: React.FC<RedisEditorProps> = React.memo(({ theme, stat
             );
         }
 
-        // String type - check if JSON
+        // String：优先按 JSON 高亮展示
         if (keyType === 'string') {
             const strValue = String(keyValue);
             if (isJSON(strValue)) {
@@ -251,11 +254,16 @@ export const RedisEditor: React.FC<RedisEditorProps> = React.memo(({ theme, stat
                                     minimap: { enabled: false },
                                     fontSize: 13,
                                     wordWrap: 'on',
+                                    find: {
+                                        addExtraSpaceOnTop: true,
+                                    },
                                 }}
                             />
                         </div>
                     );
-                } catch { }
+                } catch {
+                    // fall through to plain textarea
+                }
             }
             return <textarea value={strValue} readOnly className={styles.valueContent} />;
         }
@@ -264,7 +272,7 @@ export const RedisEditor: React.FC<RedisEditorProps> = React.memo(({ theme, stat
     }, [keyValue, keyType, editMode, editedValue, theme, handleSaveValue, isJSON]);
 
     return (
-        <div className={styles.container} data-theme={theme}>
+        <div className={`${styles.container} ${styles.desktopRoot}`} data-theme={theme}>
             {/* Sidebar */}
             <div className={styles.sidebar}>
                 <div className={styles.sidebarHeader}>

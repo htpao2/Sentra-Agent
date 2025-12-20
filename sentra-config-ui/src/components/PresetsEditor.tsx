@@ -74,7 +74,7 @@ export const PresetsEditor: React.FC<PresetsEditorProps> = ({ theme, state }) =>
     };
 
     return (
-        <div className={styles.container} data-theme={theme}>
+        <div className={`${styles.container} ${styles.desktopRoot}`} data-theme={theme}>
             <div className={styles.sidebar}>
                 <div className={styles.sidebarHeader}>
                     <div className={styles.searchWrapper}>

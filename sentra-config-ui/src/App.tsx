@@ -163,6 +163,9 @@ function App() {
 
   // Presets Editor State via hook
   const presetsState = usePresetsEditor(addToast, isAuthenticated);
+  // 开发中心默认不打开，由 Dock / 启动台显式唤起
+  const [devCenterOpen, setDevCenterOpen] = useState(false);
+  const [deepWikiOpen, setDeepWikiOpen] = useState(false);
   const [presetsEditorOpen, setPresetsEditorOpen] = useState(false);
   const [iosPresetsEditorOpen, setIosPresetsEditorOpen] = useState(false);
   const [fileManagerOpen, setFileManagerOpen] = useState(false);
@@ -215,6 +218,7 @@ function App() {
     handleOpenPresets,
     handleOpenFileManager,
     handleOpenRedis,
+    () => setDevCenterOpen(true),
   );
 
   // Desktop folders (for desktop view)
@@ -380,6 +384,14 @@ function App() {
       isOpen: redisState.redisEditorOpen,
       onClick: handleOpenRedis,
       onClose: () => redisState.setRedisEditorOpen(false)
+    },
+    {
+      id: 'dev-center-app',
+      name: '开发中心',
+      icon: getIconForType('dev-center', 'module'),
+      isOpen: devCenterOpen,
+      onClick: () => setDevCenterOpen(true),
+      onClose: () => setDevCenterOpen(false)
     },
     ...dockFavorites.map(favId => {
       const item = allItems.find(i => `${i.type}-${i.name}` === favId);
@@ -568,6 +580,10 @@ function App() {
         presetsState={presetsState}
         redisState={redisState}
         addToast={addToast}
+        devCenterOpen={devCenterOpen}
+        setDevCenterOpen={setDevCenterOpen}
+        deepWikiOpen={deepWikiOpen}
+        setDeepWikiOpen={setDeepWikiOpen}
       />
     </Suspense>
   );

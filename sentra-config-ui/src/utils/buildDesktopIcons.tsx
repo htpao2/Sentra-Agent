@@ -9,7 +9,8 @@ import {
     IoPlay,
     IoDocumentText,
     IoHappy,
-    IoServer
+    IoServer,
+    IoApps
 } from 'react-icons/io5';
 import { IoFolderOpen } from 'react-icons/io5';
 
@@ -223,6 +224,7 @@ export function buildDesktopIcons(
     handleOpenPresets: () => void,
     handleOpenFileManager: () => void,
     handleOpenRedis: () => void,
+    handleOpenDevCenter: () => void,
 ): DesktopIcon[] {
     const iconSize = 56;
     const gap = 100;
@@ -258,6 +260,21 @@ export function buildDesktopIcons(
             onClick: () => {
                 recordUsage('app:redis');
                 handleOpenRedis();
+            }
+        },
+        {
+            id: 'desktop-dev-center',
+            name: '开发中心',
+            icon: <AppIconWrapper
+                bg="linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%)"
+                shadow="0 8px 16px rgba(102, 126, 234, 0.4), inset 0 1px 2px rgba(255,255,255,0.3)"
+            >
+                <IoApps color="white" size={iconSize} />
+            </AppIconWrapper>,
+            position: { x: startX + gap * 2, y: startY },
+            onClick: () => {
+                recordUsage('app:dev-center');
+                handleOpenDevCenter();
             }
         },
         {

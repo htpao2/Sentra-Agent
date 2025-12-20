@@ -17,6 +17,30 @@ interface ScriptProcess {
     emitter: EventEmitter;
 }
 
+function commandExists(cmd: string): boolean {
+    try {
+        if (os.platform() === 'win32') {
+            execSync(`where ${cmd}`, { stdio: 'ignore' });
+        } else {
+            execSync(`command -v ${cmd}`, { stdio: 'ignore' });
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function resolveSentimentRunner(runtimeEnv: Record<string, string>): 'uv' | 'python' {
+    const prefer = (runtimeEnv.SENTRA_EMO_RUNNER || process.env.SENTRA_EMO_RUNNER || 'auto').toString().toLowerCase();
+    const hasUv = commandExists('uv');
+
+    if (prefer === 'uv') return hasUv ? 'uv' : 'python';
+    if (prefer === 'python') return 'python';
+
+    // auto: prefer uv when available, otherwise fall back to python
+    return hasUv ? 'uv' : 'python';
+}
+
 export class ScriptRunner {
     private processes: Map<string, ScriptProcess> = new Map();
 
@@ -49,23 +73,35 @@ export class ScriptRunner {
 
         let proc;
         if (scriptName === 'sentiment') {
-            // Special handling for python script
+            // Special handling for Sentra Emo (Python FastAPI service)
             const scriptPath = 'run.py';
             // Assuming sentra-config-ui is in the root, so sentra-emo is a sibling
             const cwd = path.join(process.cwd(), '..', 'sentra-emo');
 
-            proc = spawn('python', [scriptPath, ...args], {
-                cwd,
-                env: {
-                    ...process.env,
-                    ...runtimeEnv,
-                    FORCE_COLOR: '3',
-                    CLICOLOR_FORCE: '1',
-                    TERM: 'xterm-256color',
-                    COLORTERM: 'truecolor',
-                    PYTHONUNBUFFERED: '1'
-                },
-            });
+            const runner = resolveSentimentRunner(runtimeEnv);
+            const baseEnv = {
+                ...process.env,
+                ...runtimeEnv,
+                FORCE_COLOR: '3',
+                CLICOLOR_FORCE: '1',
+                TERM: 'xterm-256color',
+                COLORTERM: 'truecolor',
+                PYTHONUNBUFFERED: '1',
+            };
+
+            if (runner === 'uv') {
+                // Prefer uv when available: uv run python run.py [...args]
+                proc = spawn('uv', ['run', 'python', scriptPath, ...args], {
+                    cwd,
+                    env: baseEnv,
+                });
+            } else {
+                // Fallback: plain Python
+                proc = spawn('python', [scriptPath, ...args], {
+                    cwd,
+                    env: baseEnv,
+                });
+            }
         } else {
             // Standard node scripts
             const scriptPath = path.join(process.cwd(), 'scripts', `${scriptName}.mjs`);
@@ -145,20 +181,22 @@ export class ScriptRunner {
         try {
             // Special handling for PM2-managed start script
             if (record.name === 'start') {
-                try {
-                    // Kill the wrapper process first
-                    if (os.platform() === 'win32') {
-                        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
-                    } else {
-                        try { process.kill(pid, 'SIGTERM'); } catch { }
-                    }
+                // Kill the wrapper process first
+                if (os.platform() === 'win32') {
+                    execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+                } else {
+                    try { process.kill(pid, 'SIGTERM'); } catch { }
+                }
 
-                    // Then delete the PM2 process
-                    execSync('pm2 delete sentra-agent', { stdio: 'ignore' });
-                    console.log('[ScriptRunner] Deleted PM2 process: sentra-agent');
-                } catch (pm2Error) {
-                    console.error('[ScriptRunner] Failed to delete PM2 process:', pm2Error);
-                    // Continue anyway since wrapper is killed
+                // If pm2 is installed, also delete any lingering PM2 process
+                if (commandExists('pm2')) {
+                    try {
+                        execSync('pm2 delete sentra-agent', { stdio: 'ignore' });
+                        console.log('[ScriptRunner] Deleted PM2 process: sentra-agent');
+                    } catch (pm2Error) {
+                        console.error('[ScriptRunner] Failed to delete PM2 process:', pm2Error);
+                        // Continue anyway since wrapper is killed
+                    }
                 }
             } else {
                 // Normal process termination for other scripts

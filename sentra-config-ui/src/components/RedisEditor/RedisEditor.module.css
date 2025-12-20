@@ -6,31 +6,31 @@
 }
 
 .container[data-theme='dark'] {
-    --bg-primary: #1e1e1e;
-    --bg-secondary: #252526;
-    --bg-tertiary: #2d2d30;
-    --border-color: #3e3e42;
-    --text-primary: #cccccc;
-    --text-secondary: #969696;
-    --hover-bg: #2a2d2e;
-    --active-bg: #094771;
-    --input-bg: #3c3c3c;
-    --button-primary: #0e639c;
-    --button-danger: #f48771;
+    --bg-primary: #0b1120;
+    --bg-secondary: #020617;
+    --bg-tertiary: #111827;
+    --border-color: #1f2937;
+    --text-primary: #e5e7eb;
+    --text-secondary: #9ca3af;
+    --hover-bg: #111827;
+    --active-bg: #1d4ed8;
+    --input-bg: #020617;
+    --button-primary: #38bdf8;
+    --button-danger: #f97373;
 }
 
 .container[data-theme='light'] {
-    --bg-primary: #ffffff;
-    --bg-secondary: #f3f3f3;
-    --bg-tertiary: #e8e8e8;
-    --border-color: #e0e0e0;
-    --text-primary: #333333;
-    --text-secondary: #888888;
-    --hover-bg: #f0f0f0;
-    --active-bg: #0078d4;
+    --bg-primary: #f9fafb;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #e5e7eb;
+    --border-color: #d1d5db;
+    --text-primary: #111827;
+    --text-secondary: #6b7280;
+    --hover-bg: #f3f4f6;
+    --active-bg: #0ea5e9;
     --input-bg: #ffffff;
-    --button-primary: #0078d4;
-    --button-danger: #e74856;
+    --button-primary: #0ea5e9;
+    --button-danger: #ef4444;
 }
 
 /* Sidebar */
@@ -753,4 +753,55 @@
     flex: 1;
     display: flex;
     flex-direction: column;
+}
+
+/* Mac 桌面模式：卡片化布局 */
+.desktopRoot {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    background: var(--bg-primary);
+}
+
+.desktopRoot .sidebar {
+    margin-right: 0;
+    border-radius: 0;
+    border-right: 1px solid var(--border-color);
+    box-shadow: none;
+}
+
+.desktopRoot .mainContent {
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    background: var(--bg-primary);
+}
+
+.desktopRoot .connectionForm {
+    max-width: 640px;
+    margin: 32px auto;
+    padding: 24px 28px 28px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 16px 32px rgba(15, 23, 42, 0.25);
+    background: var(--bg-secondary);
+}
+
+.desktopRoot .toolbar {
+    padding: 8px 16px;
+    background: var(--bg-secondary);
+}
+
+.desktopRoot .tab {
+    border-radius: 0;
+}
+
+.desktopRoot .contentArea {
+    padding: 0;
+}
+
+.desktopRoot .valueViewer {
+    border-radius: 0;
+    border: none;
+    background: transparent;
 }
