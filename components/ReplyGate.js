@@ -22,6 +22,11 @@ function getBotNames() {
   }
 }
 
+function getReplyGateAccumBaseline() {
+  const raw = parseFloat(getEnv('REPLY_GATE_ACCUM_BASELINE', '0.1'));
+  return Number.isFinite(raw) ? raw : 0.1;
+}
+
 let sharedConversationAnalyzer = null;
 
 /**
@@ -162,7 +167,11 @@ export function assessReplyWorth(msg, signals = {}, options = {}) {
     // 去掉每条消息的随机抽样，改为确定性决策：
     // - 概率极低时直接视为噪声，忽略
     // - 其余情况统一交给上层（会话级累积 + LLM）决策
-    const veryLowThreshold = 0.02;
+    let veryLowThreshold = 0.02;
+    if (signals && signals.isFollowupAfterBotReply && !(signals.mentionedByAt || signals.mentionedByName)) {
+      const baseline = getReplyGateAccumBaseline();
+      veryLowThreshold = clamp01(Math.max(veryLowThreshold, baseline));
+    }
     if (finalProbability <= veryLowThreshold) {
       decision = 'ignore';
       reasonBase = 'below_min_threshold';

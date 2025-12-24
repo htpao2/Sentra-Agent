@@ -21,6 +21,55 @@ export function setupSocketHandlers(ctx) {
     completeTask
   } = ctx;
 
+  const incomingDedupTtlMsRaw = getEnvInt('INCOMING_MESSAGE_DEDUP_TTL_MS', 60000);
+  const incomingDedupTtlMs =
+    Number.isFinite(incomingDedupTtlMsRaw) && incomingDedupTtlMsRaw > 0 ? incomingDedupTtlMsRaw : 60000;
+  const incomingDedupMaxRaw = getEnvInt('INCOMING_MESSAGE_DEDUP_MAX', 5000);
+  const incomingDedupMax =
+    Number.isFinite(incomingDedupMaxRaw) && incomingDedupMaxRaw > 0 ? incomingDedupMaxRaw : 5000;
+  const recentIncomingByConv = new Map();
+
+  const shouldDropDuplicateIncoming = (conversationKey, messageId) => {
+    const convKey = String(conversationKey || '');
+    const mid = messageId != null ? String(messageId) : '';
+    if (!convKey || !mid) return false;
+
+    const now = Date.now();
+    let bucket = recentIncomingByConv.get(convKey);
+    if (!bucket) {
+      bucket = new Map();
+      recentIncomingByConv.set(convKey, bucket);
+    }
+
+    const prev = bucket.get(mid);
+    if (typeof prev === 'number' && now - prev <= incomingDedupTtlMs) {
+      return true;
+    }
+
+    bucket.set(mid, now);
+
+    if (bucket.size > incomingDedupMax) {
+      const cutoff = now - incomingDedupTtlMs;
+      for (const [k, ts] of bucket.entries()) {
+        if (typeof ts !== 'number' || ts < cutoff) {
+          bucket.delete(k);
+        }
+        if (bucket.size <= incomingDedupMax) break;
+      }
+      if (bucket.size > incomingDedupMax) {
+        const extra = bucket.size - incomingDedupMax;
+        let removed = 0;
+        for (const k of bucket.keys()) {
+          bucket.delete(k);
+          removed += 1;
+          if (removed >= extra) break;
+        }
+      }
+    }
+
+    return false;
+  };
+
   socket.on('message', async (data) => {
     try {
       const payload = JSON.parse(data.toString());
@@ -77,6 +126,18 @@ export function setupSocketHandlers(ctx) {
             userid = String(msg?.target_id ?? '');
           }
         }
+
+        const conversationKey = msg?.group_id ? `G:${msg.group_id}` : `U:${userid}`;
+        if (shouldDropDuplicateIncoming(conversationKey, msg?.message_id)) {
+          logger.info('重复消息去重: 已丢弃重复投递的 incoming message', {
+            conversationKey,
+            sender_id: userid,
+            group_id: msg?.group_id || null,
+            message_id: msg?.message_id != null ? String(msg.message_id) : null
+          });
+          return;
+        }
+
         const username = (isPoke && !msg.group_id && msg.self_id && msg.sender_id === msg.self_id)
           ? (msg?.target_name || '')
           : (msg?.sender_name || '');
@@ -98,7 +159,7 @@ export function setupSocketHandlers(ctx) {
         if (userid && emoText && emo && shouldAnalyzeEmotion(emoText, userid)) {
           emo.analyze(emoText, { userid, username }).catch(() => {});
         }
-        const groupId = msg?.group_id ? `G:${msg.group_id}` : `U:${userid}`;
+        const groupId = conversationKey;
         const summary =
           (typeof msg?.objective === 'string' && msg.objective.trim())
             ? msg.objective
@@ -114,10 +175,14 @@ export function setupSocketHandlers(ctx) {
           });
         }
 
-        // 检查是否有活跃任务（针对该用户），交给聚合模块决定如何处理
-        const activeCount = getActiveTaskCount(userid);
+        const taskConversationId = msg?.group_id
+          ? `group_${msg.group_id}_sender_${userid}`
+          : `private_${userid}`;
 
-        const incomingDecision = await handleIncomingMessage(userid, msg, { activeCount });
+        // 检查是否有活跃任务（针对该会话），交给聚合模块决定如何处理
+        const activeCount = getActiveTaskCount(taskConversationId);
+
+        const incomingDecision = await handleIncomingMessage(taskConversationId, msg, { activeCount });
         if (incomingDecision.action === 'pending_queued') {
           // 已有活跃任务，新消息进入延迟聚合队列：由轻量 LLM 判断是否“改主意”，决定是否取消当前任务
           if (activeCount > 0 && typeof decideOverrideIntent === 'function') {
@@ -154,7 +219,7 @@ export function setupSocketHandlers(ctx) {
                   });
 
                   if (overrideDecision && overrideDecision.shouldCancel) {
-                    markTasksCancelledForSender(userid);
+                    markTasksCancelledForSender(taskConversationId);
                     // 仅取消当前会话（群/私聊）下、在当前消息之前启动的运行
                     cancelRunsForSender(userid, groupId, { cutoffTs: Date.now() });
                     logger.info(
@@ -177,7 +242,7 @@ export function setupSocketHandlers(ctx) {
         }
 
         // start_bundle: 作为一轮新会话的起点，先等待聚合窗口结束拿到合并后的消息，再做智能回复决策
-        const bundledMsg = await collectBundleForSender(userid);
+        const bundledMsg = await collectBundleForSender(taskConversationId);
         if (!bundledMsg) {
           logger.debug('聚合结果为空，跳过本次消息');
           return;
@@ -195,16 +260,13 @@ export function setupSocketHandlers(ctx) {
 
         const replyDecision = await shouldReply(bundledMsg, { decisionContext });
         const taskId = replyDecision.taskId;
-        logger.info(
-          `回复决策: ${replyDecision.reason} (mandatory=${replyDecision.mandatory}, probability=${(replyDecision.probability * 100).toFixed(1)}%, taskId=${
-            taskId || 'null'
-          })`
-        );
 
         if (!replyDecision.needReply) {
           logger.debug('跳过回复: 根据智能策略，本次不回复（已完成本轮聚合）');
           return;
         }
+
+        logger.debug(`进入回复流程: taskId=${taskId || 'null'}`);
 
         if (bundledMsg.type === 'group' && typeof handleGroupReplyCandidate === 'function') {
           await handleGroupReplyCandidate(

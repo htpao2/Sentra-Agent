@@ -31,6 +31,25 @@ export function createDelayJobRunJob(ctx) {
     enqueueProactiveCandidate
   } = ctx;
 
+  function getContextMemoryEnabled() {
+    try {
+      return typeof CONTEXT_MEMORY_ENABLED === 'function'
+        ? !!CONTEXT_MEMORY_ENABLED()
+        : !!CONTEXT_MEMORY_ENABLED;
+    } catch {
+      return false;
+    }
+  }
+
+  function getMainAiModel() {
+    try {
+      const v = typeof MAIN_AI_MODEL === 'function' ? MAIN_AI_MODEL() : MAIN_AI_MODEL;
+      return typeof v === 'string' && v.trim() ? v.trim() : 'gpt-3.5-turbo';
+    } catch {
+      return 'gpt-3.5-turbo';
+    }
+  }
+
   function getPromiseConfig() {
     const privateMinSilentSecRaw = getEnvInt('PROMISE_PRIVATE_MIN_SILENT_SEC', 30);
     const groupMinSilentSecRaw = getEnvInt('PROMISE_GROUP_MIN_SILENT_SEC', 60);
@@ -97,8 +116,8 @@ export function createDelayJobRunJob(ctx) {
     }
 
     const activeCount =
-      typeof getActiveTaskCount === 'function' && userId
-        ? getActiveTaskCount(userId)
+      typeof getActiveTaskCount === 'function' && conversationKey
+        ? getActiveTaskCount(conversationKey)
         : 0;
 
     let timeSinceLastUserSec = null;
@@ -195,7 +214,7 @@ export function createDelayJobRunJob(ctx) {
       }
     } catch {}
     let memoryXml = '';
-    if (CONTEXT_MEMORY_ENABLED) {
+    if (getContextMemoryEnabled()) {
       try {
         memoryXml = await getDailyContextMemoryXml(groupIdKey);
       } catch {}
@@ -369,7 +388,7 @@ export function createDelayJobRunJob(ctx) {
 
           const progressPairId = await historyManager.startAssistantMessage(groupIdKey);
 
-          const llmRes = await chatWithRetry(conversations, MAIN_AI_MODEL, groupIdKey);
+          const llmRes = await chatWithRetry(conversations, getMainAiModel(), groupIdKey);
           if (!llmRes || !llmRes.success) {
             logger.error('DelayJobWorker: AI 生成延迟进度回复失败', {
               groupId: groupIdKey,
@@ -475,7 +494,7 @@ export function createDelayJobRunJob(ctx) {
 
         const pairId = await historyManager.startAssistantMessage(groupIdKey);
 
-        const llmRes = await chatWithRetry(conversations, MAIN_AI_MODEL, groupIdKey);
+        const llmRes = await chatWithRetry(conversations, getMainAiModel(), groupIdKey);
         if (!llmRes || !llmRes.success) {
           logger.error('DelayJobWorker: AI 生成延迟任务回复失败', {
             groupId: groupIdKey,

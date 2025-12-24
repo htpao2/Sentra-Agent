@@ -231,13 +231,11 @@ export async function generatePlan(objective, mcpcore, context = {}, conversatio
   const usePT = !!config.flags?.planUsePreThought;
   const preThought = usePT ? (await getPreThought(objective, manifest, conversation)) : '';
 
-  // 重排序：使用 judge.operations 数组
+  // 重排序：仅使用 objective
   try {
-    const judgeOperations = context?.judge?.operations || context?.judgeOperations;
-    if ((judgeOperations || objective) && (config.rerank?.enable !== false)) {
+    if (objective && (config.rerank?.enable !== false)) {
       const ranked = await rerankManifest({ 
         manifest, 
-        judgeOperations,  // operations 数组
         objective, 
         candidateK: config.rerank?.candidateK, 
         topN: config.rerank?.topN 
@@ -246,7 +244,7 @@ export async function generatePlan(objective, mcpcore, context = {}, conversatio
         manifest = ranked.manifest;
         if (config.flags.enableVerboseSteps) {
           const tops = manifest.slice(0, Math.min(5, manifest.length)).map(x => x.aiName);
-          logger.info('规划前重排序Top工具', { label: 'RERANK', top: tops, operations: judgeOperations?.length || 0 });
+          logger.info('规划前重排序Top工具', { label: 'RERANK', top: tops });
         }
       }
     }
@@ -255,7 +253,27 @@ export async function generatePlan(objective, mcpcore, context = {}, conversatio
   }
 
   // 枚举合法 aiName，限制模型只能选择清单内工具（此时 manifest 已是 Top-N）
-  const allowedAiNames = (manifest || []).map((m) => m.aiName).filter(Boolean);
+  // 如果上游传入了 judgeToolNames，则优先使用它做白名单过滤，减少规划期“污染/跑偏”。
+  const allowedAiNamesAll = (manifest || []).map((m) => m.aiName).filter(Boolean);
+  const judgeToolNames = (context?.judge && Array.isArray(context.judge.toolNames))
+    ? context.judge.toolNames
+    : (Array.isArray(context?.judgeToolNames) ? context.judgeToolNames : []);
+
+  const judgeToolSet = new Set((judgeToolNames || []).filter(Boolean));
+  const allowedByJudge = (judgeToolSet.size > 0)
+    ? allowedAiNamesAll.filter((n) => judgeToolSet.has(n))
+    : [];
+  const allowedAiNames = (judgeToolSet.size > 0 && allowedByJudge.length > 0)
+    ? allowedByJudge
+    : allowedAiNamesAll;
+
+  if (judgeToolSet.size > 0) {
+    // 同步缩减 manifest，保证后续 allowedAiNames 与 manifest 一致
+    const filtered = (manifest || []).filter((m) => m && m.aiName && judgeToolSet.has(m.aiName));
+    if (filtered.length > 0) {
+      manifest = filtered;
+    }
+  }
   const validNames = new Set(allowedAiNames || []);
 
   // force LLM to emit a plan via function call (schema/tool loaded from JSON via loader)
@@ -1320,7 +1338,7 @@ export async function planThenExecute({ objective, context = {}, mcpcore, conver
   // 步骤2：判断是否需要工具（使用原始工具列表）
   const judgeFunc = (config.llm?.toolStrategy || 'auto') === 'fc' ? judgeToolNecessityFC : judgeToolNecessity;
   const judge = await judgeFunc(objective, manifest0, conversation, context);
-  await HistoryStore.append(runId, { type: 'judge', need: judge.need, summary: judge.summary, operations: judge.operations, ok: judge.ok !== false });
+  await HistoryStore.append(runId, { type: 'judge', need: judge.need, summary: judge.summary, toolNames: judge.toolNames, ok: judge.ok !== false });
   if (judge && judge.ok === false) {
     const plan = { manifest: manifest0, steps: [] };
     await HistoryStore.setPlan(runId, plan);
@@ -1480,8 +1498,8 @@ export async function* planThenExecuteStream({ objective, context = {}, mcpcore,
       // 步骤2：判断是否需要工具（使用原始工具列表）
       const judgeFunc = (config.llm?.toolStrategy || 'auto') === 'fc' ? judgeToolNecessityFC : judgeToolNecessity;
       const judge = await judgeFunc(objective, manifest0, conversation, context);
-      emitRunEvent(runId, { type: 'judge', need: judge.need, summary: judge.summary, operations: judge.operations, ok: judge.ok !== false });
-      await HistoryStore.append(runId, { type: 'judge', need: judge.need, summary: judge.summary, operations: judge.operations, ok: judge.ok !== false });
+      emitRunEvent(runId, { type: 'judge', need: judge.need, summary: judge.summary, toolNames: judge.toolNames, ok: judge.ok !== false });
+      await HistoryStore.append(runId, { type: 'judge', need: judge.need, summary: judge.summary, toolNames: judge.toolNames, ok: judge.ok !== false });
       if (judge && judge.ok === false) {
         const plan = { manifest: manifest0, steps: [] };
         await HistoryStore.setPlan(runId, plan);
@@ -1724,22 +1742,12 @@ export async function* planThenExecuteStream({ objective, context = {}, mcpcore,
             // 生成补充计划（不拼接历史；由规划器基于 runId 内部加载）
             const supplementConversation = Array.isArray(conversation) ? conversation : [];
             
-            // 构建补充操作列表（用于重排序，替代原始 objective）
-            const supplementOperations = limitedSupplements.map(s => s.operation);
-            
             const supplementPlan = await generatePlan(supplementObjective, mcpcore, { 
               ...context, 
               runId, 
               isReflectionSupplement: true,
               originalPlan: plan,
-              completedSteps: completedTools,
-              // 传递补充操作列表用于重排序（而不是用原始 objective）
-              supplementOperations,
-              // 覆盖 judge，使用补充操作作为 operations
-              judge: {
-                ...context?.judge,
-                operations: supplementOperations
-              }
+              completedSteps: completedTools
             }, supplementConversation);
             
             if (Array.isArray(supplementPlan?.steps) && supplementPlan.steps.length > 0) {
@@ -1833,6 +1841,19 @@ export async function* planThenExecuteStream({ objective, context = {}, mcpcore,
           // Reflection 失败不应阻止总结，继续执行
         }
       }
+
+      emitRunEvent(runId, {
+        type: 'completed',
+        exec,
+        evaluation: evalObj?.result || null,
+        summaryPending: true
+      });
+      await HistoryStore.append(runId, {
+        type: 'completed',
+        exec,
+        evaluation: evalObj?.result || null,
+        summaryPending: true
+      });
       
       // 总结步骤，支持失败反馈
       const summaryResult = await summarizeToolHistory(runId, '', context);
@@ -1878,7 +1899,7 @@ export async function* planThenExecuteStream({ objective, context = {}, mcpcore,
   try {
     for await (const ev of sub) {
       yield ev;
-      if (ev?.type === 'summary') break;
+      if (ev?.type === 'completed' || ev?.type === 'summary') break;
     }
   } finally {
     try { await sub.return?.(); } catch {}

@@ -829,6 +829,8 @@ export class ConversationAnalyzer {
 
     function add(name, val, weight) { if (debug) breakdown.push({ name, val, weight, contrib: (val || 0) * (weight || 0) }); return (val || 0) * (weight || 0); }
 
+    const followupBonusInput = 0;
+
     let z = 0;
     z += add('intercept', 1, w.intercept);
     z += add('question', qScore, w.question);
@@ -859,7 +861,7 @@ export class ConversationAnalyzer {
     z += add('groupFatiguePenalty', result.features.groupFatigue || 0, w.groupFatiguePenalty);
     z += add('senderReplyRatePenalty', result.features.senderReplyRate || 0, w.senderReplyRatePenalty);
     z += add('groupReplyRatePenalty', result.features.groupReplyRate || 0, w.groupReplyRatePenalty);
-    z += add('followupBonus', result.features.followup || 0, w.followupBonus);
+    z += add('followupBonus', followupBonusInput, w.followupBonus);
     z += add('explicitMentionBonus', result.features.explicitMention || 0, w.explicitMentionBonus);
     z += add('sessionValence', result.features.sessionValence || 0, w.sessionValence);
     z += add('sessionSaturationPenalty', result.features.sessionSaturation || 0, w.sessionSaturationPenalty);

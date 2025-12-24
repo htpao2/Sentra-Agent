@@ -31,7 +31,7 @@
 }
 
 .root *::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
+  background: var(--scrollbar-thumb-hover);
   background-clip: content-box;
 }
 
@@ -385,6 +385,7 @@
   --dw-border: #40444b;
   --dw-text: #dcddde;
   --dw-muted: #8e9297;
+  --dw-scrollbar-thumb: var(--scrollbar-thumb);
   --dw-bubble-assistant: rgba(54, 57, 63, 0.95);
   --dw-bubble-user: rgba(88, 101, 242, 0.95);
   --dw-bubble-error: rgba(237, 66, 69, 0.16);
@@ -451,6 +452,7 @@
   --dw-border: #e5e7eb;
   --dw-text: #111827;
   --dw-muted: #6b7280;
+  --dw-scrollbar-thumb: var(--scrollbar-thumb);
   --dw-bubble-assistant: #ffffff;
   --dw-bubble-user: #2563eb;
   --dw-bubble-error: rgba(220, 38, 38, 0.12);
@@ -693,7 +695,7 @@
 }
 
 .messagesWrapper::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
+  background: var(--scrollbar-thumb-hover);
 }
 
 .messagesList {
@@ -1039,7 +1041,7 @@
 }
 
 .codePre::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
+  background: var(--scrollbar-thumb-hover);
 }
 
 .root[data-theme='light'] .codePre::-webkit-scrollbar-thumb {
@@ -2128,7 +2130,7 @@
  }
 
  .timelinePre::-webkit-scrollbar-thumb:hover {
-   background: rgba(148, 163, 184, 0.45);
+   background: var(--scrollbar-thumb-hover);
  }
 
  .timelinePre code {
@@ -2435,7 +2437,7 @@
  }
 
  .agentEventPre::-webkit-scrollbar-thumb:hover {
-   background: rgba(148, 163, 184, 0.45);
+   background: var(--scrollbar-thumb-hover);
  }
 
  .agentEventPre code {

@@ -4,7 +4,7 @@ import { getEnv, getEnvInt, getEnvBool } from './envHotReloader.js';
 import { initAgentPresetCore } from '../components/AgentPresetInitializer.js';
 import { loadPrompt } from '../prompts/loader.js';
 import { chatWithRetry as chatWithRetryCore } from '../components/ChatWithRetry.js';
-import { parseSentraResponse } from './protocolUtils.js';
+import { parseReplyGateDecisionFromSentraTools, parseSendFusionFromSentraTools, parseSentraResponse } from './protocolUtils.js';
 
 const logger = createLogger('ReplyIntervention');
 
@@ -12,12 +12,137 @@ let cachedPresetContextForDecision = null;
 let presetInitPromiseForDecision = null;
 
 const REPLY_DECISION_PROMPT_NAME = 'reply_decision';
-const REPLY_DEDUP_PROMPT_NAME = 'reply_dedup';
+const REPLY_FUSION_PROMPT_NAME = 'reply_fusion';
 const REPLY_OVERRIDE_PROMPT_NAME = 'reply_override';
 
 let cachedReplyDecisionSystemPrompt = null;
-let cachedReplyDedupSystemPrompt = null;
+let cachedReplyFusionSystemPrompt = null;
 let cachedReplyOverrideSystemPrompt = null;
+
+function parseEnterMainFlowDecision(rawText) {
+  const t = typeof rawText === 'string' ? rawText : String(rawText ?? '');
+  if (!t) return null;
+  const m = t.match(/<enter_main_flow>\s*(true|false)\s*<\/enter_main_flow>/i);
+  if (!m) return null;
+  return m[1].toLowerCase() === 'true';
+}
+
+export async function decideSendFusionBatch(payload) {
+  if (!isReplyInterventionEnabled()) {
+    return null;
+  }
+
+  const enabled = getEnvBool('SEND_FUSION_ENABLED', false);
+  if (!enabled) {
+    return null;
+  }
+
+  const agent = getAgent();
+  if (!agent) {
+    return null;
+  }
+
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  const groupId = payload?.groupId ? String(payload.groupId) : '';
+  const userQuestion = (payload?.userQuestion || '').trim();
+
+  const cleaned = candidates
+    .map((c) => {
+      const text = (c?.text || '').trim();
+      const taskId = c?.taskId != null ? String(c.taskId) : '';
+      return { text, taskId };
+    })
+    .filter((c) => !!c.text);
+
+  if (cleaned.length < 2) {
+    return null;
+  }
+
+  try {
+    const mainModel = getEnv('MAIN_AI_MODEL', getEnv('MODEL_NAME', 'gpt-4o-mini'));
+    const model = mainModel;
+    const maxTokens = 260;
+    const systemPrompt = await getReplyFusionSystemPrompt();
+
+    const rdLines = [];
+    rdLines.push('<sentra-root-directive>');
+    rdLines.push('  <id>send_fusion_v1</id>');
+    rdLines.push('  <type>send_fusion</type>');
+    rdLines.push('  <scope>assistant_reply</scope>');
+    rdLines.push('  <objective>');
+    rdLines.push('    你收到多条“同一轮对话的候选机器人回复”，它们往往啰嗦重复或相互补充。');
+    rdLines.push('    你的任务：把这些候选回复压缩融合为一条最终回复，只发送一次，且不丢失重要信息。');
+    rdLines.push('  </objective>');
+
+    rdLines.push('  <constraints>');
+    rdLines.push('    <item>禁止输出 <sentra-response>；必须输出一个 tools invoke: send_fusion。</item>');
+    rdLines.push('    <item>融合后的回复要自然像聊天，不要提“候选/融合/工具/系统”等词。</item>');
+    rdLines.push('    <item>去重冗余，但保留不同候选里重要的事实、步骤、提醒、结论与约束。</item>');
+    rdLines.push('  </constraints>');
+
+    rdLines.push('  <send_fusion_input>');
+    if (userQuestion) {
+      rdLines.push('    <user_question>');
+      rdLines.push(`      ${escapeXmlText(userQuestion)}`);
+      rdLines.push('    </user_question>');
+    }
+    rdLines.push('    <candidates>');
+    for (let i = 0; i < cleaned.length; i++) {
+      const idx = i + 1;
+      rdLines.push(`      <candidate index="${idx}">`);
+      if (cleaned[i].taskId) {
+        rdLines.push(`        <task_id>${escapeXmlText(cleaned[i].taskId)}</task_id>`);
+      }
+      rdLines.push('        <text>');
+      rdLines.push(`          ${escapeXmlText(cleaned[i].text)}`);
+      rdLines.push('        </text>');
+      rdLines.push('      </candidate>');
+    }
+    rdLines.push('    </candidates>');
+    rdLines.push('  </send_fusion_input>');
+    rdLines.push('</sentra-root-directive>');
+
+    const userContent = rdLines.join('\n');
+
+    const conversations = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent }
+    ];
+
+    const result = await chatWithRetryCore(
+      agent,
+      conversations,
+      { model, maxTokens, __sentraExpectedOutput: 'send_fusion_tools' },
+      groupId || 'send_fusion'
+    );
+
+    if (!result || !result.success || !result.response) {
+      logger.warn('SendFusion: chatWithRetry 返回失败结果，将回退为本地规则', {
+        reason: result?.reason || 'unknown'
+      });
+      return null;
+    }
+
+    const rawText =
+      typeof result.response === 'string'
+        ? result.response
+        : String(result.response ?? '');
+
+    const fusion = parseSendFusionFromSentraTools(rawText);
+    if (!fusion || !Array.isArray(fusion.textSegments) || fusion.textSegments.length === 0) {
+      logger.warn('SendFusion: 解析 send_fusion tools 失败，将回退为本地规则', {
+        snippet: rawText.slice(0, 400)
+      });
+      return null;
+    }
+
+    logger.info(`SendFusion: 融合完成，segments=${fusion.textSegments.length}, reason=${fusion.reason || ''}`);
+    return { textSegments: fusion.textSegments, reason: fusion.reason || '', raw: rawText };
+  } catch (e) {
+    logger.warn('SendFusion: 调用 LLM 融合失败，将回退为本地规则', { err: String(e) });
+    return null;
+  }
+}
 
 async function getDecisionAgentPresetContext() {
   if (cachedPresetContextForDecision !== null) {
@@ -127,23 +252,23 @@ async function getReplyDecisionSystemPrompt() {
   return '<role>reply_decision_classifier</role>';
 }
 
-async function getReplyDedupSystemPrompt() {
+async function getReplyFusionSystemPrompt() {
   try {
-    if (cachedReplyDedupSystemPrompt) {
-      return cachedReplyDedupSystemPrompt;
+    if (cachedReplyFusionSystemPrompt) {
+      return cachedReplyFusionSystemPrompt;
     }
-    const data = await loadPrompt(REPLY_DEDUP_PROMPT_NAME);
+    const data = await loadPrompt(REPLY_FUSION_PROMPT_NAME);
     const system = data && typeof data.system === 'string' ? data.system : '';
     if (system) {
-      cachedReplyDedupSystemPrompt = system;
+      cachedReplyFusionSystemPrompt = system;
       return system;
     }
   } catch (e) {
-    logger.warn('ReplyIntervention: 加载 reply_dedup prompt 失败，将使用简化回退文案', {
+    logger.warn('ReplyIntervention: 加载 reply_fusion prompt 失败，将使用简化回退文案', {
       err: String(e)
     });
   }
-  return '<role>send_dedup_judge</role>';
+  return '<role>send_fusion_planner</role>';
 }
 
 async function getReplyOverrideSystemPrompt() {
@@ -438,21 +563,18 @@ export async function planGroupReplyDecision(msg, options = {}) {
   rdLines.push(
     '    你需要综合考虑：这条消息主要是在跟谁说话（是否显式 @ 你、是否用你的昵称/别称直接称呼你）、对话现在在讨论什么、你上一轮是否刚刚发言，以及群聊礼仪和不打扰原则。'
   );
-  rdLines.push(
-    '    你的最终决策通过 <sentra-response> 是否为空来表达：'
-  );
-  rdLines.push(
-    '    - 当你认定“本轮需要你参与”（例如：需要你回答问题、澄清信息、针对你上一轮的回答做跟进，或以轻量方式加入气氛）时，应输出一个非空的 <sentra-response>，其中的 <textN> 文本只用于向平台解释你做出该判断的核心理由，不会直接展示给用户。'
-  );
-  rdLines.push(
-    '    - 当你认定“本轮保持沉默或仅作为旁观者更合适”时，请输出一个完全空的 <sentra-response> 块（不包含任何 <textN>、<resources>、<emoji>），表示本轮不进入主对话/MCP 流程，由系统静默记录为内部观察。'
-  );
+  rdLines.push('    你的最终决策必须通过输出一个 <sentra-tools> 决策调用来表达：');
+  rdLines.push('    - 你必须输出且只能输出 1 个 <sentra-tools> 块，并且其中必须包含 1 个 <invoke name="reply_gate_decision">。');
+  rdLines.push('    - 该 invoke 必须包含两个参数：');
+  rdLines.push('      - <parameter name="enter"><boolean>true|false</boolean></parameter>  表示是否进入主对话/MCP 流程。');
+  rdLines.push('      - <parameter name="reason"><string>...</string></parameter>  用 1-2 句自然语言解释原因（内部用，不直接展示给用户）。');
+  rdLines.push('    - 当 enter=false 时，表示本轮保持沉默，不进入主对话/MCP 流程。');
   rdLines.push(
     '    在本 root 指令下，你不负责生成正式的用户可见回复内容，也不负责调用工具；你只是做一次“是否需要由你发声、以及是否值得进入完整主对话流程”的价值判断。'
   );
   rdLines.push('  </objective>');
 
-  rdLines.push('  <allow_tools>false</allow_tools>');
+  rdLines.push('  <allow_tools>true</allow_tools>');
 
   rdLines.push('  <constraints>');
   rdLines.push('    <item>优先遵循平台关于群聊礼仪和不打扰原则：如果没有明确需要你发言的信号，应默认保持安静，而不是对每条群消息都给出评价。</item>');
@@ -461,7 +583,7 @@ export async function planGroupReplyDecision(msg, options = {}) {
   rdLines.push('    <item>当 is_followup_after_bot_reply=true 且本条消息在语义上明显是基于你上一轮回答进行的追问、补充条件或指正错误时，应更倾向于认为需要继续对话；但如果只是简单致谢或短促寒暄（如“谢谢”“收到啦”“好耶”），尤其在你近期回复频繁时，可以选择保持沉默，以免刷屏。</item>');
   rdLines.push('    <item>请结合 senderReplyCountWindow / groupReplyCountWindow、senderFatigue / groupFatigue 等信号理解近期负载：在高频场景下，你只有在信号特别明确（显式点名、清晰问题、明显纠错）时才应继续发言；否则应优先选择沉默，或在极少数合适场景下仅以表情/轻量资源旁观。</item>');
   rdLines.push('    <item>如果当前消息主要是群成员之间的闲聊、内部梗、彼此互动，而你介入只会打断气氛或让对话变得机械，请判定为“本轮保持沉默”；只有当你能明显带来信息价值或积极情绪反馈时，才判断为需要参与。</item>');
-  rdLines.push('    <item>你在本轮不负责真正写出发给用户看的正式聊天内容，也不负责规划工具调用；你只需在 <sentra-response> 中用一到数条简短的 <textN>，以自然语言向平台解释“为什么需要/不需要让你说话”，这些说明仅供内部使用，不会直接展示给用户。</item>');
+  rdLines.push('    <item>你在本轮不负责真正写出发给用户看的正式聊天内容，也不负责调用外部工具；你只需通过 reply_gate_decision 的 reason 参数用 1-2 句话解释“为什么进入/不进入主流程”，该原因仅供内部日志与调试使用，不会直接展示给用户。</item>');
   rdLines.push('  </constraints>');
 
   rdLines.push('  <meta>');
@@ -482,7 +604,15 @@ export async function planGroupReplyDecision(msg, options = {}) {
     const presetContext = await getDecisionAgentPresetContext();
     const systemPrompt = await getReplyDecisionSystemPrompt();
 
-    const systemContent = [systemPrompt, presetContext].filter(Boolean).join('\n\n');
+    const toolDecisionConstraint = [
+      '<sentra-protocol>',
+      'You MUST output exactly one <sentra-tools> block containing exactly one invoke:',
+      '<invoke name="reply_gate_decision"> with parameters enter(boolean) and reason(string).',
+      'Do NOT output any user-facing <sentra-response> in this decision task.',
+      '</sentra-protocol>'
+    ].join('\n');
+
+    const systemContent = [toolDecisionConstraint, systemPrompt, presetContext].filter(Boolean).join('\n\n');
     const conversations = [
       { role: 'system', content: systemContent },
       { role: 'user', content: userContent }
@@ -492,7 +622,7 @@ export async function planGroupReplyDecision(msg, options = {}) {
     const result = await chatWithRetryCore(
       agent,
       conversations,
-      { model, maxTokens },
+      { model, maxTokens, __sentraExpectedOutput: 'reply_gate_decision_tools' },
       groupIdForLog
     );
 
@@ -516,18 +646,44 @@ export async function planGroupReplyDecision(msg, options = {}) {
         ? result.response
         : String(result.response ?? '');
 
+    const toolDecision = parseReplyGateDecisionFromSentraTools(rawText);
+    if (toolDecision && typeof toolDecision.enter === 'boolean') {
+      const shouldReply = toolDecision.enter;
+      const confidence = shouldReply ? 1.0 : 0.0;
+      const reasonText = toolDecision.reason
+        ? `ReplyGate(sentra-tools): ${toolDecision.reason}`
+        : (shouldReply ? 'ReplyGate(sentra-tools): enter main flow' : 'ReplyGate(sentra-tools): stay silent');
+
+      logger.info(
+        `ReplyIntervention 判定: shouldReply=${shouldReply}, tool=reply_gate_decision, reason=${reasonText}`
+      );
+
+      return {
+        shouldReply,
+        confidence,
+        reason: reasonText,
+        priority: 'normal',
+        shouldQuote: false,
+        raw: {
+          text: rawText,
+          toolDecision
+        }
+      };
+    }
+
+    // Backward-compatible fallback (legacy output)
     let parsed;
     try {
       parsed = parseSentraResponse(rawText);
     } catch (e) {
-      logger.warn('ReplyIntervention: 解析 <sentra-response> 失败，将默认判定为无需回复', {
+      logger.warn('ReplyIntervention: 解析 sentra 输出失败，将默认判定为无需回复', {
         err: String(e),
         snippet: rawText.slice(0, 500)
       });
       return {
         shouldReply: false,
         confidence: 0.0,
-        reason: 'parseSentraResponse failed',
+        reason: 'parse sentra output failed',
         priority: 'normal',
         shouldQuote: false,
         raw: { error: String(e), snippet: rawText.slice(0, 200) }
@@ -535,38 +691,40 @@ export async function planGroupReplyDecision(msg, options = {}) {
     }
 
     const shouldSkip = !!parsed.shouldSkip;
-    const shouldReply = !shouldSkip;
+    const explicitDecision = parseEnterMainFlowDecision(rawText);
 
-    let preview = '';
-    if (Array.isArray(parsed.textSegments) && parsed.textSegments.length > 0) {
-      preview = parsed.textSegments
-        .map((s) => (s || '').trim())
-        .filter(Boolean)
-        .join(' ')
-        .slice(0, 120);
+    let shouldReply = false;
+    if (typeof explicitDecision === 'boolean') {
+      shouldReply = explicitDecision;
+    } else if (shouldSkip) {
+      shouldReply = false;
+    } else {
+      shouldReply = false;
+      logger.warn('ReplyIntervention: 缺失 reply_gate_decision 且缺失 <enter_main_flow>，保守默认不进入主对话流程', {
+        replyMode: parsed.replyMode || 'none'
+      });
     }
 
-    const reasonText = preview
-      ? `ReplyGate(sentra-response): ${preview}`
-      : shouldReply
-        ? 'ReplyGate(sentra-response): 模型判定值得进入主对话流程'
-        : 'ReplyGate(sentra-response): 模型判定本轮保持沉默';
-
-    const confidence = shouldReply ? 1.0 : 1.0;
-    const priority = 'normal';
-    const shouldQuote = false;
+    const confidence = shouldReply ? 1.0 : 0.0;
+    const reasonText = shouldReply
+      ? 'ReplyGate(legacy): enter main flow'
+      : 'ReplyGate(legacy): stay silent';
 
     logger.info(
-      `ReplyIntervention 判定: shouldReply=${shouldReply}, shouldSkip=${shouldSkip}, replyMode=${parsed.replyMode || 'none'}, reason=${reasonText}`
+      `ReplyIntervention 判定(legacy): shouldReply=${shouldReply}, shouldSkip=${shouldSkip}, explicitDecision=${explicitDecision}, replyMode=${parsed.replyMode || 'none'}, reason=${reasonText}`
     );
 
     return {
       shouldReply,
       confidence,
       reason: reasonText,
-      priority,
-      shouldQuote,
-      raw: rawText
+      priority: 'normal',
+      shouldQuote: false,
+      raw: {
+        text: rawText,
+        explicitDecision,
+        shouldSkip
+      }
     };
   } catch (e) {
     logger.warn('ReplyIntervention: 调用 LLM 决策失败，将默认判定为无需回复', { err: String(e) });
@@ -578,173 +736,6 @@ export async function planGroupReplyDecision(msg, options = {}) {
       shouldQuote: false,
       raw: { error: String(e) }
     };
-  }
-}
-
-export async function decideSendDedupPair(baseText, candidateText) {
-  if (!isReplyInterventionEnabled()) {
-    return null;
-  }
-
-  const agent = getAgent();
-  if (!agent) {
-    return null;
-  }
-
-  const a = (baseText || '').trim();
-  const b = (candidateText || '').trim();
-  if (!a || !b) {
-    return null;
-  }
-
-  try {
-    const { model, maxTokens } = getDecisionConfig();
-    const systemPrompt = await getReplyDedupSystemPrompt();
-
-    const rdLines = [];
-    rdLines.push('<sentra-root-directive>');
-    rdLines.push('  <id>send_dedup_v1</id>');
-    rdLines.push('  <type>send_dedup</type>');
-    rdLines.push('  <scope>assistant_reply</scope>');
-    rdLines.push('  <objective>');
-    rdLines.push(
-      '    给定同一轮对话中的两条候选机器人回复 A(基准) 和 B(候选)，请站在用户视角判断：如果已经发送了 A，是否还有必要再发送 B。'
-    );
-    rdLines.push(
-      '    如果 B 在事实、约束、语气和主要意图上已经充分覆盖了 A（即用户收到 B 后不会再需要看到 A），则视为语义重复，可以只保留 B。'
-    );
-    rdLines.push(
-      '    如果 A 和 B 含有不同的重要信息、不同的建议、或相互补充的内容，则视为非重复，两者均有价值。'
-    );
-    rdLines.push(
-      '    你的任务只是做“是否重复/是否可以只发送 B”这一价值判断，不会直接把任何回复发给用户。'
-    );
-    rdLines.push('  </objective>');
-
-    rdLines.push('  <constraints>');
-    rdLines.push('    <item>忽略轻微的措辞差异、语气词、表情符号或简短寒暄，这些通常不构成新的信息。</item>');
-    rdLines.push('    <item>如果 B 只是对 A 做了更精炼或更顺滑的表达，但核心事实和建议完全一样，也可视为重复。</item>');
-    rdLines.push('    <item>如果 B 引入了新的事实、步骤、警告或与 A 相矛盾的结论，则应视为非重复。</item>');
-    rdLines.push('    <item>你可以在不确定时输出空的 &lt;sentra-response&gt;（不含任何 &lt;textN&gt; 和资源），表示“无决策，交给本地规则处理”。</item>');
-    rdLines.push('  </constraints>');
-
-    rdLines.push('  <meta>');
-    rdLines.push('    <note>下面的 &lt;send_dedup_input&gt; 给出了候选回复 A/B 文本，仅用于内部判断，不会直接展示给用户。</note>');
-    rdLines.push('  </meta>');
-
-    rdLines.push('  <send_dedup_input>');
-    rdLines.push('    <base_text>');
-    rdLines.push(escapeXmlText(a));
-    rdLines.push('    </base_text>');
-    rdLines.push('    <candidate_text>');
-    rdLines.push(escapeXmlText(b));
-    rdLines.push('    </candidate_text>');
-    rdLines.push('  </send_dedup_input>');
-    rdLines.push('</sentra-root-directive>');
-
-    const userContent = rdLines.join('\n');
-
-    const conversations = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userContent }
-    ];
-
-    const result = await chatWithRetryCore(
-      agent,
-      conversations,
-      { model, maxTokens },
-      'send_dedup'
-    );
-
-    if (!result || !result.success || !result.response) {
-      const reason = `chatWithRetry failed: ${result?.reason || 'unknown'}`;
-      logger.warn('SendDedup: chatWithRetry 返回失败结果，将回退为仅基于向量相似度判断', {
-        reason
-      });
-      return null;
-    }
-
-    const rawText =
-      typeof result.response === 'string'
-        ? result.response
-        : String(result.response ?? '');
-
-    let parsed;
-    try {
-      parsed = parseSentraResponse(rawText);
-    } catch (e) {
-      logger.warn('SendDedup: 解析 <sentra-response> 失败，将回退为仅基于向量相似度判断', {
-        err: String(e),
-        snippet: rawText.slice(0, 500)
-      });
-      return null;
-    }
-
-    if (parsed.shouldSkip) {
-      logger.info('SendDedup: 模型选择输出空 sentra-response，视为无决策，回退为仅基于向量相似度判断');
-      return null;
-    }
-
-    const segments = Array.isArray(parsed.textSegments) ? parsed.textSegments : [];
-    let areSimilar = null;
-    let similarity = null;
-    let reason = '';
-
-    for (const seg of segments) {
-      const s = (seg || '').trim();
-      if (!s) continue;
-
-      if (areSimilar === null) {
-        const m = s.match(/\bARE_SIMILAR\s*=\s*(true|false)\b/i);
-        if (m) {
-          areSimilar = m[1].toLowerCase() === 'true';
-          continue;
-        }
-      }
-
-      if (similarity == null) {
-        const m2 = s.match(/\bSIMILARITY\s*=\s*([0-9]+(?:\.[0-9]+)?)\b/i);
-        if (m2) {
-          const n = parseFloat(m2[1]);
-          if (!Number.isNaN(n)) {
-            similarity = Math.min(1, Math.max(0, n));
-          }
-          continue;
-        }
-      }
-
-      if (!reason) {
-        reason = s;
-      }
-    }
-
-    if (areSimilar === null) {
-      logger.warn('SendDedup: sentra-response 中未找到 ARE_SIMILAR= 标记，将回退为仅基于向量相似度判断', {
-        snippet: rawText.slice(0, 200)
-      });
-      return null;
-    }
-
-    if (!reason) {
-      reason = areSimilar ? '模型判定为重复回复' : '模型判定为非重复回复';
-    }
-
-    if (similarity != null && !Number.isNaN(similarity)) {
-      similarity = Math.min(1, Math.max(0, similarity));
-    } else {
-      similarity = null;
-    }
-
-    logger.info(
-      `SendDedup 判定: areSimilar=${areSimilar}, similarity=${
-        similarity != null ? similarity.toFixed(3) : 'null'
-      }, reason=${reason}`
-    );
-
-    return { areSimilar, similarity, reason, raw: rawText };
-  } catch (e) {
-    logger.warn('SendDedup: 调用 LLM 决策失败，将回退为仅基于向量相似度判断', { err: String(e) });
-    return null;
   }
 }
 export async function decideOverrideIntent(payload) {

@@ -281,13 +281,32 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
   let manifest = buildPlanningManifest(mcpcore);
   const usePT = !!config.flags?.planUsePreThought;
   const preThought = usePT ? (await getPreThought(objective, manifest, conversation)) : '';
-  // 中文：在 FC 规划前执行工具重排序（使用 judge.operations 数组）
+
+  // Judge 白名单过滤：如果 Judge 已经明确选择了需要调用的工具，则优先收敛到这部分工具。
+  // 目的：减少规划阶段看到全量工具导致的“污染/跑偏”，并提升速度与稳定性。
   try {
-    const judgeOperations = context?.judge?.operations || context?.judgeOperations;
-    if ((judgeOperations || objective) && (config.rerank?.enable !== false)) {
+    const judgeToolNames = (context?.judge && Array.isArray(context.judge.toolNames))
+      ? context.judge.toolNames
+      : (Array.isArray(context?.judgeToolNames) ? context.judgeToolNames : []);
+    const judgeToolSet = new Set((judgeToolNames || []).filter(Boolean));
+    if (judgeToolSet.size > 0) {
+      const filtered = (manifest || []).filter((m) => m && m.aiName && judgeToolSet.has(m.aiName));
+      if (filtered.length > 0) {
+        manifest = filtered;
+      }
+      if (config.flags.enableVerboseSteps) {
+        logger.info('FC 规划：Judge 白名单过滤', { label: 'PLAN', selectedCount: judgeToolSet.size, manifestCount: manifest.length });
+      }
+    }
+  } catch (e) {
+    logger.warn?.('FC 规划：Judge 白名单过滤失败（忽略并继续）', { label: 'PLAN', error: String(e) });
+  }
+
+  // 中文：在 FC 规划前执行工具重排序（仅使用 objective）
+  try {
+    if (objective && (config.rerank?.enable !== false)) {
       const ranked = await rerankManifest({ 
         manifest, 
-        judgeOperations,  // operations 数组
         objective, 
         candidateK: config.rerank?.candidateK, 
         topN: config.rerank?.topN 
@@ -296,7 +315,7 @@ export async function generatePlanViaFC(objective, mcpcore, context = {}, conver
         manifest = ranked.manifest;
         if (config.flags.enableVerboseSteps) {
           const tops = manifest.slice(0, Math.min(5, manifest.length)).map(x => x.aiName);
-          logger.info('FC 规划前重排序Top工具', { label: 'RERANK', top: tops, operations: judgeOperations?.length || 0 });
+          logger.info('FC 规划前重排序Top工具', { label: 'RERANK', top: tops });
         }
       }
     }

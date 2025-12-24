@@ -20,15 +20,24 @@ import logger from '../../logger/index.js';
  * @param {Array} manifest - 工具清单
  * @param {Array} conversation - 对话历史
  * @param {Object} context - 上下文信息
- * @returns {Promise<{need: boolean, summary: string, operations: string[]}>}
+ * @returns {Promise<{need: boolean, summary: string, toolNames: string[]}>}
  */
 export async function judgeToolNecessityFC(objective, manifest, conversation, context = {}) {
   try {
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const allowedToolNames = Array.from(
+      new Set((Array.isArray(manifest) ? manifest : []).map((m) => m?.aiName).filter(Boolean))
+    );
     const toolDef = await loadToolDef({
       baseDir: __dirname,
       toolPath: '../tools/internal/emit_decision.tool.json',
       schemaPath: '../tools/internal/emit_decision.schema.json',
+      mutateSchema: (schema) => {
+        const items = schema?.properties?.tool_names?.items;
+        if (items && Array.isArray(allowedToolNames) && allowedToolNames.length > 0) {
+          items.enum = allowedToolNames;
+        }
+      },
       fallbackTool: { 
         type: 'function', 
         function: { 
@@ -39,9 +48,9 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
             properties: { 
               need_tools: { type: 'boolean' }, 
               summary: { type: 'string' },
-              operations: { type: 'array', items: { type: 'string' } }
+              tool_names: { type: 'array', items: { type: 'string' } }
             }, 
-            required: ['need_tools'], 
+            required: ['need_tools', 'tool_names'], 
             additionalProperties: true 
           } 
         } 
@@ -51,9 +60,9 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
         properties: { 
           need_tools: { type: 'boolean' }, 
           summary: { type: 'string' },
-          operations: { type: 'array', items: { type: 'string' } }
+          tool_names: { type: 'array', items: { type: 'string' } }
         }, 
-        required: ['need_tools'], 
+        required: ['need_tools', 'tool_names'], 
         additionalProperties: true 
       },
     });
@@ -143,9 +152,9 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
       if (!parsed) throw new Error('judge_fc_parse_failed');
       const need = !!parsed.need_tools;
       const summary = String(parsed.summary || '').trim();
-      const operations = Array.isArray(parsed.operations) ? parsed.operations.filter(Boolean) : [];
-      logger.info?.('Judge结果（FC模式）', { need, summary, operations: operations.length > 0 ? operations : '(无)', model: modelName, label: 'JUDGE' });
-      return { need, summary, operations, ok: true };
+      const toolNames = Array.isArray(parsed.tool_names) ? parsed.tool_names.filter(Boolean) : [];
+      logger.info?.('Judge结果（FC模式）', { need, summary, toolNames: toolNames.length > 0 ? toolNames : '(无)', model: modelName, label: 'JUDGE' });
+      return { need, summary, toolNames, ok: true };
     };
     // 并发尝试多个 Judge 模型（FC 模式）：第一个成功返回的结果获胜
     if (models.length === 1) {
@@ -157,7 +166,7 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
         logger.warn?.('Judge FC 模型尝试失败', { label: 'JUDGE', model: models[0], error: String(e) });
       }
       logger.error?.('Judge阶段异常（FC模式）', { label: 'JUDGE', error: 'single judge model failed' });
-      return { need: false, summary: 'Judge阶段异常（FC）', operations: [], ok: false };
+      return { need: false, summary: 'Judge阶段异常（FC）', toolNames: [], ok: false };
     }
 
     const tasks = models.map((modelName) => (async () => {
@@ -178,9 +187,9 @@ export async function judgeToolNecessityFC(objective, manifest, conversation, co
       logger.error?.('Judge阶段异常（FC模式）：所有模型均失败', { label: 'JUDGE', error: String(e) });
     }
 
-    return { need: false, summary: 'Judge阶段异常（FC）', operations: [], ok: false };
+    return { need: false, summary: 'Judge阶段异常（FC）', toolNames: [], ok: false };
   } catch (e) {
     logger.error?.('Judge阶段异常（FC模式）', { label: 'JUDGE', error: String(e) });
-    return { need: false, summary: 'Judge阶段异常（FC）', operations: [], ok: false };
+    return { need: false, summary: 'Judge阶段异常（FC）', toolNames: [], ok: false };
   }
 }

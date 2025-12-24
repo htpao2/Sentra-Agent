@@ -3,7 +3,7 @@ import { config } from '../config/index.js';
 export const Governance = {
   isAllowed(tool, options = {}) {
     const scope = tool.scope || config.governance.defaultScope;
-    const tenant = tool.tenant || config.governance.defaultTenantId;
+    const tenant = tool.tenant;
     const reqTenant = options.tenantId || config.governance.defaultTenantId;
     // Simple tenant isolation: require match
     if (tenant && reqTenant && tenant !== reqTenant && tenant !== 'any') {

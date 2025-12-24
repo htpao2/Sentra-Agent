@@ -19,7 +19,7 @@ import { fileURLToPath } from 'url';
 import { extractXMLTag, extractAllXMLTags } from './xmlUtils.js';
 import { createLogger } from './logger.js';
 import { repairSentraPersona } from './formatRepair.js';
-import { getEnv, getEnvInt, getEnvBool } from './envHotReloader.js';
+import { getEnv, getEnvInt, getEnvBool, onEnvReload } from './envHotReloader.js';
 import { loadPrompt } from '../prompts/loader.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,22 +42,21 @@ class UserPersonaManager {
     if (!this.agent) {
       throw new Error('UserPersonaManager requires an agent instance');
     }
+    this.enabled = true;
     this.dataDir = options.dataDir || path.join(process.cwd(), 'userData');
     
-    // 时间间隔控制（毫秒）- 默认 10 分钟
-    this.updateIntervalMs = options.updateIntervalMs || getEnvInt('PERSONA_UPDATE_INTERVAL_MS', 600000);
-    
-    // 消息阈值 - 距离上次更新至少需要积累的消息数
-    this.minMessagesForUpdate = options.minMessagesForUpdate || getEnvInt('PERSONA_MIN_MESSAGES', 10);
-    
-    this.maxHistorySize = options.maxHistorySize || 100; // 最多保留历史消息数
-    this.model = options.model || getEnv('PERSONA_MODEL', 'gpt-4.1-mini');
-    this.recentMessagesCount = options.recentMessagesCount || getEnvInt('PERSONA_RECENT_MESSAGES', 40);
-    this.halfLifeMs = options.halfLifeMs || getEnvInt('PERSONA_HALFLIFE_MS', 172800000);
-    this.maxTraits = options.maxTraits || getEnvInt('PERSONA_MAX_TRAITS', 6);
-    this.maxInterests = options.maxInterests || getEnvInt('PERSONA_MAX_INTERESTS', 8);
-    this.maxPatterns = options.maxPatterns || getEnvInt('PERSONA_MAX_PATTERNS', 6);
-    this.maxInsights = options.maxInsights || getEnvInt('PERSONA_MAX_INSIGHTS', 6);
+    this.updateIntervalMs = 600000;
+    this.minMessagesForUpdate = 10;
+    this.maxHistorySize = 100;
+    this.model = 'gpt-4.1-mini';
+    this.recentMessagesCount = 40;
+    this.halfLifeMs = 172800000;
+    this.maxTraits = 6;
+    this.maxInterests = 8;
+    this.maxPatterns = 6;
+    this.maxInsights = 6;
+
+    this._applyConfig(this._getRuntimeDefaults(), options);
     
     // 内存缓存 - 减少文件读写
     this.cache = new Map(); // sender_id -> { persona, messages, messageCount }
@@ -67,6 +66,14 @@ class UserPersonaManager {
     
     // 确保数据目录存在
     this._ensureDataDir();
+
+    onEnvReload(() => {
+      try {
+        this._applyConfig(this._getRuntimeDefaults(), {});
+      } catch (e) {
+        logger.warn('画像配置热更新失败（已忽略）', { err: String(e) });
+      }
+    });
     
     logger.config('用户画像管理器初始化', {
       '数据目录': this.dataDir,
@@ -88,6 +95,74 @@ class UserPersonaManager {
       fs.mkdirSync(this.dataDir, { recursive: true });
       logger.success(`创建数据目录: ${this.dataDir}`);
     }
+  }
+
+  _getRuntimeDefaults() {
+    return {
+      enabled: getEnvBool('ENABLE_USER_PERSONA', true),
+      dataDir: getEnv('PERSONA_DATA_DIR', './userData'),
+      updateIntervalMs: getEnvInt('PERSONA_UPDATE_INTERVAL_MS', 600000),
+      minMessagesForUpdate: getEnvInt('PERSONA_MIN_MESSAGES', 10),
+      maxHistorySize: getEnvInt('PERSONA_MAX_HISTORY', 100),
+      model: getEnv('PERSONA_MODEL', 'gpt-4.1-mini'),
+      recentMessagesCount: getEnvInt('PERSONA_RECENT_MESSAGES', 40),
+      halfLifeMs: getEnvInt('PERSONA_HALFLIFE_MS', 172800000),
+      maxTraits: getEnvInt('PERSONA_MAX_TRAITS', 6),
+      maxInterests: getEnvInt('PERSONA_MAX_INTERESTS', 8),
+      maxPatterns: getEnvInt('PERSONA_MAX_PATTERNS', 6),
+      maxInsights: getEnvInt('PERSONA_MAX_INSIGHTS', 6)
+    };
+  }
+
+  _applyConfig(defaults, overrides) {
+    const cfg = { ...(defaults || {}), ...(overrides || {}) };
+
+    this.enabled = !!cfg.enabled;
+
+    const nextDir = typeof cfg.dataDir === 'string' && cfg.dataDir.trim()
+      ? cfg.dataDir.trim()
+      : this.dataDir;
+    if (nextDir && nextDir !== this.dataDir) {
+      this.dataDir = nextDir;
+      this._ensureDataDir();
+    }
+
+    const nextUpdateIntervalMs = Number(cfg.updateIntervalMs);
+    this.updateIntervalMs = Number.isFinite(nextUpdateIntervalMs) && nextUpdateIntervalMs > 0
+      ? nextUpdateIntervalMs
+      : this.updateIntervalMs;
+
+    const nextMinMessages = Number(cfg.minMessagesForUpdate);
+    this.minMessagesForUpdate = Number.isFinite(nextMinMessages) && nextMinMessages > 0
+      ? nextMinMessages
+      : this.minMessagesForUpdate;
+
+    const nextMaxHistorySize = Number(cfg.maxHistorySize);
+    this.maxHistorySize = Number.isFinite(nextMaxHistorySize) && nextMaxHistorySize > 0
+      ? nextMaxHistorySize
+      : this.maxHistorySize;
+
+    const nextModel = typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model.trim() : this.model;
+    this.model = nextModel;
+
+    const nextRecentMessagesCount = Number(cfg.recentMessagesCount);
+    this.recentMessagesCount = Number.isFinite(nextRecentMessagesCount) && nextRecentMessagesCount > 0
+      ? nextRecentMessagesCount
+      : this.recentMessagesCount;
+
+    const nextHalfLifeMs = Number(cfg.halfLifeMs);
+    this.halfLifeMs = Number.isFinite(nextHalfLifeMs) && nextHalfLifeMs > 0
+      ? nextHalfLifeMs
+      : this.halfLifeMs;
+
+    const nextMaxTraits = Number(cfg.maxTraits);
+    this.maxTraits = Number.isFinite(nextMaxTraits) && nextMaxTraits > 0 ? nextMaxTraits : this.maxTraits;
+    const nextMaxInterests = Number(cfg.maxInterests);
+    this.maxInterests = Number.isFinite(nextMaxInterests) && nextMaxInterests > 0 ? nextMaxInterests : this.maxInterests;
+    const nextMaxPatterns = Number(cfg.maxPatterns);
+    this.maxPatterns = Number.isFinite(nextMaxPatterns) && nextMaxPatterns > 0 ? nextMaxPatterns : this.maxPatterns;
+    const nextMaxInsights = Number(cfg.maxInsights);
+    this.maxInsights = Number.isFinite(nextMaxInsights) && nextMaxInsights > 0 ? nextMaxInsights : this.maxInsights;
   }
 
   /**
@@ -170,6 +245,7 @@ class UserPersonaManager {
    * @param {object} message - 消息对象 { text, timestamp, senderName, groupId, etc. }
    */
   async recordMessage(senderId, message) {
+    if (!this.enabled) return;
     const userData = this._loadUserData(senderId);
     if (!userData) return;
 
@@ -790,6 +866,7 @@ class UserPersonaManager {
    * 格式化画像为 Sentra XML（用于插入到 AI 上下文）
    */
   formatPersonaForContext(senderId) {
+    if (!this.enabled) return '';
     const persona = this.getPersona(senderId);
     if (!persona) return '';
     return this._serializePersonaToXML(persona, senderId);

@@ -41,7 +41,7 @@ export class MCPExternalManager {
   }
 
   async connect(def) {
-    const { id, type, command, args = [], url } = def;
+    const { id, type, command, args = [], url, headers } = def;
     if (!id) throw new Error('External MCP server missing id');
 
     let transport;
@@ -51,6 +51,17 @@ export class MCPExternalManager {
     } else if (type === 'websocket') {
       if (!url) throw new Error(`MCP server ${id} websocket requires url`);
       transport = new WebSocketClientTransport({ url });
+    } else if (type === 'http' || type === 'streamable_http') {
+      if (!url) throw new Error(`MCP server ${id} ${type} requires url`);
+      let StreamableHTTPClientTransport;
+      try {
+        ({ StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js'));
+      } catch (e) {
+        throw new Error(`Streamable HTTP client transport not available in current @modelcontextprotocol/sdk. ${String(e)}`);
+      }
+      const init = { url };
+      if (headers && typeof headers === 'object') init.headers = headers;
+      transport = new StreamableHTTPClientTransport(init);
     } else {
       throw new Error(`Unsupported MCP server type: ${type}`);
     }

@@ -21,15 +21,24 @@ import logger from '../../logger/index.js';
  * @param {Array} manifest - 工具清单
  * @param {Array} conversation - 对话历史
  * @param {Object} context - 上下文信息
- * @returns {Promise<{need: boolean, summary: string, operations: string[]}>}
+ * @returns {Promise<{need: boolean, summary: string, toolNames: string[]}>}
  */
 export async function judgeToolNecessity(objective, manifest, conversation, context = {}) {
   try {
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const allowedToolNames = Array.from(
+      new Set((Array.isArray(manifest) ? manifest : []).map((m) => m?.aiName).filter(Boolean))
+    );
     const toolDef = await loadToolDef({
       baseDir: __dirname,
       toolPath: '../tools/internal/emit_decision.tool.json',
       schemaPath: '../tools/internal/emit_decision.schema.json',
+      mutateSchema: (schema) => {
+        const items = schema?.properties?.tool_names?.items;
+        if (items && Array.isArray(allowedToolNames) && allowedToolNames.length > 0) {
+          items.enum = allowedToolNames;
+        }
+      },
       fallbackTool: { 
         type: 'function', 
         function: { 
@@ -40,9 +49,9 @@ export async function judgeToolNecessity(objective, manifest, conversation, cont
             properties: { 
               need_tools: { type: 'boolean' }, 
               summary: { type: 'string' },
-              operations: { type: 'array', items: { type: 'string' } }
+              tool_names: { type: 'array', items: { type: 'string' } }
             }, 
-            required: ['need_tools'], 
+            required: ['need_tools', 'tool_names'], 
             additionalProperties: true 
           } 
         } 
@@ -52,9 +61,9 @@ export async function judgeToolNecessity(objective, manifest, conversation, cont
         properties: { 
           need_tools: { type: 'boolean' }, 
           summary: { type: 'string' },
-          operations: { type: 'array', items: { type: 'string' } }
+          tool_names: { type: 'array', items: { type: 'string' } }
         }, 
-        required: ['need_tools'], 
+        required: ['need_tools', 'tool_names'], 
         additionalProperties: true 
       },
     });
@@ -67,20 +76,22 @@ export async function judgeToolNecessity(objective, manifest, conversation, cont
     const baseSystem = composeSystem(jp.system, [overlayGlobal, overlayJud].filter(Boolean).join('\n\n'));
     const manifestBullet = manifestToBulletedText(manifest);
     
-    // 新格式：使用结构化输出
+    // 新格式：Judge 只做工具选择（不生成参数）
     const outputFormat = `【输出格式要求】
 - need_tools: 布尔值，判断是否需要调用工具
 - summary: 1-2句话简要总结用户需求和关键信息
-- operations: 字符串数组，每个元素是一个简短的操作描述（2-6个字，动词短语）
+- tool_names: 字符串数组，工具名称（aiName），只允许从工具清单中选择
 
 例如：
 {
   "need_tools": true,
   "summary": "用户需要抓取网页内容并生成CSV文件",
-  "operations": ["抓取网页", "解析表格", "生成CSV"]
+  "tool_names": ["local__read_url_content", "local__write_to_file"]
 }
 
-重要：工具清单已按相关性排序，前面的工具更可能是你需要的。请重点关注排在前面的工具。`;
+重要：
+1) Judge 阶段只需要选择要调用的工具，不要生成任何工具参数。
+2) 工具清单已按相关性排序，前面的工具更可能是你需要的。请重点关注排在前面的工具。`;
     
     const systemContent = [
       baseSystem,
@@ -130,9 +141,9 @@ export async function judgeToolNecessity(objective, manifest, conversation, cont
       if (!parsed) throw new Error('judge_parse_failed');
       const need = !!parsed.need_tools;
       const summary = String(parsed.summary || '').trim();
-      const operations = Array.isArray(parsed.operations) ? parsed.operations.filter(Boolean) : [];
-      logger.info?.('Judge结果', { need, summary, operations: operations.length > 0 ? operations : '(无)', model: modelName, label: 'JUDGE' });
-      return { need, summary, operations, ok: true };
+      const toolNames = Array.isArray(parsed.tool_names) ? parsed.tool_names.filter(Boolean) : [];
+      logger.info?.('Judge结果', { need, summary, toolNames: toolNames.length > 0 ? toolNames : '(无)', model: modelName, label: 'JUDGE' });
+      return { need, summary, toolNames, ok: true };
     };
 
     // 并发尝试多个 Judge 模型：第一个成功返回的结果获胜
@@ -144,7 +155,7 @@ export async function judgeToolNecessity(objective, manifest, conversation, cont
       } catch (e) {
         logger.warn?.('Judge模型尝试失败', { label: 'JUDGE', model: models[0], error: String(e) });
       }
-      return { need: false, summary: 'Judge阶段异常', operations: [], ok: false };
+      return { need: false, summary: 'Judge阶段异常', toolNames: [], ok: false };
     }
 
     const tasks = models.map((modelName) => (async () => {
@@ -165,8 +176,8 @@ export async function judgeToolNecessity(objective, manifest, conversation, cont
       logger.error?.('Judge阶段异常：所有模型均失败', { label: 'JUDGE', error: String(e) });
     }
 
-    return { need: false, summary: 'Judge阶段异常', operations: [], ok: false };
+    return { need: false, summary: 'Judge阶段异常', toolNames: [], ok: false };
   } catch (e) {
-    return { need: false, summary: 'Judge阶段异常', operations: [], ok: false };
+    return { need: false, summary: 'Judge阶段异常', toolNames: [], ok: false };
   }
 }

@@ -26,6 +26,16 @@
   /* Fixed height for container */
 }
 
+.performanceMode {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.performanceItem {
+  width: 50px;
+}
+
 .dockItem {
   position: relative;
   display: flex;

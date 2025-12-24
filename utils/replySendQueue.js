@@ -4,18 +4,26 @@
  */
 
 import { createLogger } from './logger.js';
-import { getEnvInt, getEnvBool } from './envHotReloader.js';
+import { getEnvInt, getEnvBool, onEnvReload } from './envHotReloader.js';
 import { judgeReplySimilarity } from './replySimilarityJudge.js';
+import { decideSendFusionBatch } from './replyIntervention.js';
+import { parseSentraResponse } from './protocolUtils.js';
 
 const logger = createLogger('ReplySendQueue');
-const PURE_REPLY_SKIP_THRESHOLD = getEnvInt('PURE_REPLY_SKIP_THRESHOLD', 3);
-const PURE_REPLY_SKIP_COOLDOWN_MS = getEnvInt('PURE_REPLY_SKIP_COOLDOWN_MS', 300000);
 
-// 最近已发送去重配置：跨批次/跨轮，防止同一会话短时间内复读
-const RECENT_DEDUP_ENABLED = getEnvBool('SEND_RECENT_DEDUP_ENABLED', true);
-const RECENT_DEDUP_TTL_MS = getEnvInt('SEND_RECENT_DEDUP_TTL_MS', 600000); // 默认10分钟窗口
-const RECENT_DEDUP_MAX_PER_GROUP = getEnvInt('SEND_RECENT_DEDUP_MAX_PER_GROUP', 20);
-const RECENT_DEDUP_STRICT_FOR_PRIVATE = getEnvBool('SEND_RECENT_DEDUP_STRICT_FOR_PRIVATE', true);
+function getSendQueueRuntimeConfig() {
+  return {
+    sendDelayMs: getEnvInt('REPLY_SEND_DELAY_MS', 20000),
+    pureReplySkipThreshold: getEnvInt('PURE_REPLY_SKIP_THRESHOLD', 3),
+    pureReplySkipCooldownMs: getEnvInt('PURE_REPLY_SKIP_COOLDOWN_MS', 300000),
+    sendFusionEnabled: getEnvBool('SEND_FUSION_ENABLED', false),
+    sendFusionMinBatch: getEnvInt('SEND_FUSION_MIN_BATCH', 2),
+    recentDedupEnabled: getEnvBool('SEND_RECENT_FUSION_ENABLED', true),
+    recentDedupTtlMs: getEnvInt('SEND_RECENT_FUSION_TTL_MS', 600000),
+    recentDedupMaxPerGroup: getEnvInt('SEND_RECENT_FUSION_MAX_PER_GROUP', 20),
+    recentDedupStrictForPrivate: getEnvBool('SEND_RECENT_FUSION_STRICT_FOR_PRIVATE', true)
+  };
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -23,10 +31,18 @@ class ReplySendQueue {
   constructor() {
     this.queue = [];
     this.isProcessing = false;
-    this.sendDelayMs = getEnvInt('REPLY_SEND_DELAY_MS', 2000); // 默认2秒
+    this.sendDelayMs = getEnvInt('REPLY_SEND_DELAY_MS', 20000); // 默认20秒
     this.pureReplyCooldown = new Map();
-    this.recentSentByGroup = new Map(); // Map<groupId, Array<{ text, question, resources, ts }>>
+    this.recentSentByGroup = new Map(); // Map<groupId, Array<{ text, resources, ts }>>
     logger.info(`回复发送队列初始化 - 发送间隔: ${this.sendDelayMs}ms`);
+
+    onEnvReload(() => {
+      const nextDelay = getEnvInt('REPLY_SEND_DELAY_MS', 20000);
+      if (Number.isFinite(nextDelay) && nextDelay > 0 && nextDelay !== this.sendDelayMs) {
+        this.sendDelayMs = nextDelay;
+        logger.info(`发送队列配置热更新: REPLY_SEND_DELAY_MS=${this.sendDelayMs}ms`);
+      }
+    });
   }
 
   /**
@@ -63,6 +79,8 @@ class ReplySendQueue {
       const batch = [first];
       const groupId = first?.meta?.groupId ? String(first.meta.groupId) : null;
 
+      const runtimeCfg = getSendQueueRuntimeConfig();
+
       // 在发送前等待一个窗口，收集同一会话的其他待发送任务，用于语义去重
       if (groupId) {
         logger.debug(`等待 ${this.sendDelayMs}ms 收集同一会话的待发送回复用于去重 (groupId=${groupId})...`);
@@ -83,22 +101,138 @@ class ReplySendQueue {
 
       let selectedIndices = null;
 
-      // 纯文本连续回复（无工具调用）优化：在同一批次内，如果全部都是 hasTool=false 且数量达到阈值，
-      // 并且未处于冷却期，则直接仅保留最新一条，跳过语义去重（embedding + 轻量 LLM）。
       if (
         groupId &&
-        PURE_REPLY_SKIP_THRESHOLD > 0 &&
-        batch.length >= PURE_REPLY_SKIP_THRESHOLD
+        runtimeCfg.sendFusionEnabled &&
+        runtimeCfg.sendFusionMinBatch > 1 &&
+        batch.length >= runtimeCfg.sendFusionMinBatch
       ) {
+        try {
+          const candidates = [];
+          const resources = [];
+          let emoji = null;
+          let hasTool = false;
+
+          for (let i = 0; i < batch.length; i++) {
+            const item = batch[i];
+            const meta = item?.meta || {};
+            const raw = typeof meta.response === 'string' ? meta.response : '';
+            let parsed = null;
+            try {
+              parsed = parseSentraResponse(raw);
+            } catch {
+              parsed = null;
+            }
+
+            const segments = parsed && Array.isArray(parsed.textSegments)
+              ? parsed.textSegments.map((t) => (t || '').trim()).filter(Boolean)
+              : [];
+
+            if (segments.length > 0) {
+              candidates.push({ taskId: item?.taskId || '', text: segments.join('\n') });
+            }
+
+            const rs = parsed && Array.isArray(parsed.resources) ? parsed.resources : [];
+            for (const r of rs) {
+              if (!r || !r.type || !r.source) continue;
+              resources.push(r);
+            }
+
+            if (parsed && parsed.emoji && parsed.emoji.source) {
+              emoji = parsed.emoji;
+            }
+
+            if (meta && meta.hasTool === true) {
+              hasTool = true;
+            }
+          }
+
+          const fusion = await decideSendFusionBatch({ groupId, userQuestion: '', candidates });
+          if (fusion && Array.isArray(fusion.textSegments) && fusion.textSegments.length > 0) {
+            const uniqRes = [];
+            const seenRes = new Set();
+            for (const r of resources) {
+              const k = `${r.type}|${r.source}`;
+              if (seenRes.has(k)) continue;
+              seenRes.add(k);
+              uniqRes.push(r);
+            }
+
+            const lines = [];
+            lines.push('<sentra-response>');
+            for (let i = 0; i < fusion.textSegments.length; i++) {
+              const idx = i + 1;
+              lines.push(`  <text${idx}>${fusion.textSegments[i]}</text${idx}>`);
+            }
+
+            if (uniqRes.length > 0) {
+              lines.push('  <resources>');
+              for (const r of uniqRes) {
+                lines.push('    <resource>');
+                lines.push(`      <type>${r.type}</type>`);
+                lines.push(`      <source>${r.source}</source>`);
+                if (r.caption) {
+                  lines.push(`      <caption>${r.caption}</caption>`);
+                }
+                lines.push('    </resource>');
+              }
+              lines.push('  </resources>');
+            } else {
+              lines.push('  <resources></resources>');
+            }
+
+            if (emoji && emoji.source) {
+              lines.push('  <emoji>');
+              lines.push(`    <source>${emoji.source}</source>`);
+              if (emoji.caption) {
+                lines.push(`    <caption>${emoji.caption}</caption>`);
+              }
+              lines.push('  </emoji>');
+            }
+
+            lines.push('</sentra-response>');
+            const fusedResponse = lines.join('\n');
+
+            const selectedIndex = batch.length - 1;
+            const selected = batch[selectedIndex];
+            if (selected && selected.meta) {
+              selected.meta.response = fusedResponse;
+              selected.meta.textForDedup = fusion.textSegments.join('\n');
+              selected.meta.resourceKeys = uniqRes.map((r) => `${r.type}|${r.source}`);
+              if (emoji && emoji.source) {
+                selected.meta.resourceKeys = Array.from(new Set([...selected.meta.resourceKeys, `emoji|${emoji.source}`]));
+              }
+              selected.meta.hasTool = hasTool;
+              selected.meta.allowReply = true;
+            }
+
+            for (let i = 0; i < batch.length; i++) {
+              if (i === selectedIndex) continue;
+              if (batch[i] && batch[i].meta) {
+                batch[i].meta.allowReply = false;
+              }
+            }
+
+            selectedIndices = [selectedIndex];
+            logger.info(`发送阶段融合触发: groupId=${groupId}, 批次大小=${batch.length}, 仅发送=1`);
+          }
+        } catch (e) {
+          logger.warn('发送阶段融合失败，将回退为去重/逐条发送', { err: String(e) });
+        }
+      }
+
+      // 纯文本连续回复（无工具调用）优化：在同一批次内，如果全部都是 hasTool=false 且数量达到阈值，
+      // 并且未处于冷却期，则直接仅保留最新一条，跳过语义去重（embedding + 轻量 LLM）。
+      if (groupId && runtimeCfg.pureReplySkipThreshold > 0 && batch.length >= runtimeCfg.pureReplySkipThreshold) {
         const now = Date.now();
         const cooldownUntil = this.pureReplyCooldown.get(groupId) || 0;
         const allNoTool = batch.every((item) => item?.meta && item.meta.hasTool === false);
 
         if (allNoTool && now >= cooldownUntil) {
           selectedIndices = [batch.length - 1];
-          this.pureReplyCooldown.set(groupId, now + PURE_REPLY_SKIP_COOLDOWN_MS);
+          this.pureReplyCooldown.set(groupId, now + runtimeCfg.pureReplySkipCooldownMs);
           logger.info(
-            `纯文本连续回复优化触发: groupId=${groupId}, 批次大小=${batch.length}, 阈值=${PURE_REPLY_SKIP_THRESHOLD}, 冷却=${PURE_REPLY_SKIP_COOLDOWN_MS}ms`
+            `纯文本连续回复优化触发: groupId=${groupId}, 批次大小=${batch.length}, 阈值=${runtimeCfg.pureReplySkipThreshold}, 冷却=${runtimeCfg.pureReplySkipCooldownMs}ms`
           );
         }
       }
@@ -133,20 +267,13 @@ class ReplySendQueue {
           : (meta?.groupId ? String(meta.groupId) : null);
         const textForRecent = (meta?.textForDedup || '').trim();
         const resourcesForRecent = Array.isArray(meta?.resourceKeys) ? meta.resourceKeys : [];
-        const questionForRecent = (meta?.questionForDedup || '').trim();
         const hasTextOrResourceForRecent = !!textForRecent || resourcesForRecent.length > 0;
 
         // 跨批次/跨轮的最近已发送去重：仅在资源集合完全一致的前提下，避免在同一会话里前后两轮说几乎一样的话
         if (groupIdForRecent && hasTextOrResourceForRecent) {
           try {
-            const recentDup = await this._isRecentDuplicate(
-              groupIdForRecent,
-              textForRecent,
-              resourcesForRecent,
-              meta?.hasTool,
-              questionForRecent
-            );
-            if (recentDup) {
+            const recentAction = await this._applyRecentDedupAndMaybeRewrite(groupIdForRecent, meta);
+            if (recentAction) {
               logger.info(
                 `最近发送去重: 跳过任务 ${taskId} (groupId=${groupIdForRecent})`
               );
@@ -169,9 +296,8 @@ class ReplySendQueue {
           if (groupIdForRecent && hasTextOrResourceForRecent) {
             this._rememberRecentSent(
               groupIdForRecent,
-              textForRecent,
-              resourcesForRecent,
-              questionForRecent
+              (meta?.textForDedup || '').trim(),
+              Array.isArray(meta?.resourceKeys) ? meta.resourceKeys : []
             );
           }
           resolve(result);
@@ -219,68 +345,78 @@ class ReplySendQueue {
       const metaJ = batch[j]?.meta || {};
       const textJ = (metaJ.textForDedup || '').trim();
       const resourcesJ = Array.isArray(metaJ.resourceKeys) ? metaJ.resourceKeys : [];
-      const questionJ = (metaJ.questionForDedup || '').trim();
       const hasTextJ = !!textJ;
       const hasResJ = resourcesJ.length > 0;
 
       if (!hasTextJ && !hasResJ) continue;
 
+      if (!hasTextJ) {
+        const prevResources = new Set();
+        for (let i = 0; i < j; i++) {
+          if (!keep[i]) continue;
+          const metaI = batch[i]?.meta || {};
+          const resourcesI = Array.isArray(metaI.resourceKeys) ? metaI.resourceKeys : [];
+          for (const k of resourcesI) prevResources.add(k);
+        }
+        const diffKeys = resourcesJ.filter((k) => !prevResources.has(k));
+        if (diffKeys.length === 0) {
+          keep[j] = false;
+        } else {
+          metaJ.resourceKeys = diffKeys;
+          metaJ.response = this._buildResourcesOnlyResponse(metaJ.response, diffKeys);
+        }
+        continue;
+      }
+
+      let foundSimilar = false;
+      let bestSim = null;
+      let bestTaskId = '';
+      const prevUnionAll = new Set();
+
+      for (let i = 0; i < j; i++) {
+        if (!keep[i]) continue;
+        const metaI = batch[i]?.meta || {};
+        const resourcesI = Array.isArray(metaI.resourceKeys) ? metaI.resourceKeys : [];
+        for (const k of resourcesI) prevUnionAll.add(k);
+      }
+
       for (let i = 0; i < j; i++) {
         if (!keep[i]) continue;
         const metaI = batch[i]?.meta || {};
         const textI = (metaI.textForDedup || '').trim();
-        const resourcesI = Array.isArray(metaI.resourceKeys) ? metaI.resourceKeys : [];
-        const questionI = (metaI.questionForDedup || '').trim();
-        const hasTextI = !!textI;
-        const hasResI = resourcesI.length > 0;
+        if (!textI) continue;
 
-        if (!hasTextI && !hasResI) continue;
+        const r = await this._judgePairSimilarity(textI, textJ);
+        if (!r.areSimilar) continue;
 
-        // 资源集合必须完全一致，才允许进一步按文本语义做去重判断
-        const resourcesEqual = this._areResourceSetsEqual(resourcesI, resourcesJ);
-        if (!resourcesEqual) {
-          continue;
-        }
-
-        // 资源集合完全一致且双方都没有文本：视为纯资源重复，保留时间更晚的 j
-        if (!hasTextI && !hasTextJ) {
-          keep[i] = false;
-          continue;
-        }
-
-        // 一个有文本一个没文本：用途不同，不去重
-        if (!hasTextI || !hasTextJ) {
-          continue;
-        }
-
-        const { areSimilar, embeddingSim } = await this._judgePairSimilarity(textI, textJ);
-        if (!areSimilar) {
-          continue;
-        }
-
-        // question-aware: 仅在“问题明显不同”时才做批次去重；问题也相似时不去重
-        let questionSimilar = false;
-        if (questionI && questionJ) {
-          try {
-            const { areSimilar: qSimilar } = await this._judgePairSimilarity(questionI, questionJ);
-            questionSimilar = !!qSimilar;
-          } catch {
-            questionSimilar = false;
+        foundSimilar = true;
+        if (typeof r.embeddingSim === 'number' && !Number.isNaN(r.embeddingSim)) {
+          if (bestSim == null || r.embeddingSim > bestSim) {
+            bestSim = r.embeddingSim;
+            bestTaskId = batch[i]?.taskId || '';
           }
         }
 
-        if (questionSimilar) {
-          // 同一问题 + 相似回复：视为同一话题的多次回答，不在批次内互相吞掉
-          continue;
-        }
-
-        // 问题不同 + 回复相似：视为跨话题复读，仅保留时间更晚的 j
-        keep[i] = false;
-        batch[i].meta._dedupInfo = {
-          byTaskId: batch[j].taskId,
-          similarity: embeddingSim,
-        };
+        // prevUnionAll 已在上方统计，不需要重复收集
       }
+
+      if (!foundSimilar) {
+        continue;
+      }
+
+      const diffKeys = resourcesJ.filter((k) => !prevUnionAll.has(k));
+      if (diffKeys.length === 0) {
+        keep[j] = false;
+        metaJ._dedupInfo = {
+          byTaskId: bestTaskId,
+          similarity: bestSim,
+        };
+        continue;
+      }
+
+      metaJ.textForDedup = '';
+      metaJ.resourceKeys = diffKeys;
+      metaJ.response = this._buildResourcesOnlyResponse(metaJ.response, diffKeys);
     }
 
     const indices = [];
@@ -329,11 +465,11 @@ class ReplySendQueue {
     const g = String(groupId || '');
     if (!g) return;
 
-    const ttl = Number.isFinite(RECENT_DEDUP_TTL_MS) && RECENT_DEDUP_TTL_MS > 0
-      ? RECENT_DEDUP_TTL_MS
+    const ttl = Number.isFinite(getEnvInt('SEND_RECENT_FUSION_TTL_MS', 600000)) && getEnvInt('SEND_RECENT_FUSION_TTL_MS', 600000) > 0
+      ? getEnvInt('SEND_RECENT_FUSION_TTL_MS', 600000)
       : 600000;
-    const max = Number.isFinite(RECENT_DEDUP_MAX_PER_GROUP) && RECENT_DEDUP_MAX_PER_GROUP > 0
-      ? RECENT_DEDUP_MAX_PER_GROUP
+    const max = Number.isFinite(getEnvInt('SEND_RECENT_FUSION_MAX_PER_GROUP', 20)) && getEnvInt('SEND_RECENT_FUSION_MAX_PER_GROUP', 20) > 0
+      ? getEnvInt('SEND_RECENT_FUSION_MAX_PER_GROUP', 20)
       : 20;
 
     const list = this.recentSentByGroup.get(g) || [];
@@ -357,46 +493,54 @@ class ReplySendQueue {
     }
   }
 
-  _rememberRecentSent(groupId, text, resourceKeys, questionText, now = Date.now()) {
-    if (!RECENT_DEDUP_ENABLED) return;
+  _rememberRecentSent(groupId, text, resourceKeys, now = Date.now()) {
+    if (!getEnvBool('SEND_RECENT_FUSION_ENABLED', true)) return;
     const g = String(groupId || '');
     const t = this._normalizeRecentText(text || '');
-    const q = this._normalizeRecentText(questionText || '');
     const r = this._normalizeResourceKeys(resourceKeys);
     if (!g || (!t && r.length === 0)) return;
 
     const list = this.recentSentByGroup.get(g) || [];
-    list.push({ text: t, question: q, resources: r, ts: now });
+    list.push({ text: t, resources: r, ts: now });
     this.recentSentByGroup.set(g, list);
     this._pruneRecentList(g, now);
   }
 
-  async _isRecentDuplicate(groupId, text, resourceKeys, hasTool, questionText) {
-    if (!RECENT_DEDUP_ENABLED) return false;
+  async _applyRecentDedupAndMaybeRewrite(groupId, meta) {
+    if (!getEnvBool('SEND_RECENT_FUSION_ENABLED', true)) return false;
     const g = String(groupId || '');
-    const t = this._normalizeRecentText(text || '');
-    const q = this._normalizeRecentText(questionText || '');
-    const r = this._normalizeResourceKeys(resourceKeys);
+    const t = this._normalizeRecentText((meta?.textForDedup || '').trim());
+    const r = this._normalizeResourceKeys(Array.isArray(meta?.resourceKeys) ? meta.resourceKeys : []);
     if (!g || (!t && r.length === 0)) return false;
 
     const isPrivate = g.startsWith('U:');
-    if (isPrivate && !RECENT_DEDUP_STRICT_FOR_PRIVATE) {
-      // 私聊未启用严格去重时，只做简单 exact 匹配，但仍需资源集合一致；同时仍遵守 question-aware 语义
+    if (isPrivate && !getEnvBool('SEND_RECENT_FUSION_STRICT_FOR_PRIVATE', true)) {
+      // 私聊未启用严格去重时，只做简单 exact 匹配，但仍需资源集合一致
       const list = this.recentSentByGroup.get(g) || [];
-      return list.some((item) => {
-        if (!item) return false;
-        if (!this._areResourceSetsEqual(item.resources || [], r)) return false;
-        if (item.text !== t) return false;
+      let unionSeen = new Set();
+      let hasExact = false;
+      for (const item of list.slice(-3)) {
+        if (!item) continue;
+        const baseText = this._normalizeRecentText(item.text || '');
+        if (!baseText || baseText !== t) continue;
+        hasExact = true;
+        const baseResources = Array.isArray(item.resources) ? item.resources : [];
+        for (const k of baseResources) unionSeen.add(k);
+      }
 
-        const baseQ = this._normalizeRecentText(item.question || '');
-        // 如果能同时拿到两边的用户问题，并且问题文本也完全相同，则视为“同一话题的再次提问”，不去重
-        if (baseQ && q && baseQ === q) {
-          return false;
-        }
+      if (!hasExact) {
+        return false;
+      }
 
-        // 否则（问题不同或缺失）视为跨话题复读，执行去重
+      const diffKeys = r.filter((k) => !unionSeen.has(k));
+      if (diffKeys.length === 0) {
         return true;
-      });
+      }
+
+      meta.textForDedup = '';
+      meta.resourceKeys = diffKeys;
+      meta.response = this._buildResourcesOnlyResponse(meta.response, diffKeys);
+      return false;
     }
 
     const list = this.recentSentByGroup.get(g) || [];
@@ -411,65 +555,144 @@ class ReplySendQueue {
     // 只与最近几条对比即可，减少计算量
     const candidates = recent.slice(-3);
 
+    const unionRecentResourcesAll = new Set();
     for (const item of candidates) {
-      if (!item) continue;
+      const baseResources = Array.isArray(item?.resources) ? item.resources : [];
+      for (const k of baseResources) unionRecentResourcesAll.add(k);
+    }
 
-      const baseResources = Array.isArray(item.resources) ? item.resources : [];
-      // 资源集合不同，一律不视为重复
-      if (!this._areResourceSetsEqual(baseResources, r)) {
-        continue;
-      }
-
-      const baseText = this._normalizeRecentText(item.text || '');
-      const baseQuestion = this._normalizeRecentText(item.question || '');
-
-      // 资源集合完全一致且双方都没有文本：视为纯资源重复
-      if (!baseText && !t) {
+    if (!t) {
+      const diffKeys = r.filter((k) => !unionRecentResourcesAll.has(k));
+      if (diffKeys.length === 0) {
         return true;
       }
+      meta.resourceKeys = diffKeys;
+      meta.response = this._buildResourcesOnlyResponse(meta.response, diffKeys);
+      return false;
+    }
 
-      // 一个有文本一个没文本：不视为重复
-      if (!baseText || !t) {
-        continue;
-      }
+    const unionSeenForSimilarText = new Set();
 
-      // 先判断回复文本是否高度相似（包含 exact 与语义相似）
+    for (const item of candidates) {
+      if (!item) continue;
+      const baseText = this._normalizeRecentText(item.text || '');
+
+      if (!baseText) continue;
+
       let replySimilar = false;
-      let replySim = null;
       if (baseText === t) {
         replySimilar = true;
-        replySim = 1;
       } else {
         try {
-          const { areSimilar, embeddingSim } = await this._judgePairSimilarity(baseText, t);
+          const { areSimilar } = await this._judgePairSimilarity(baseText, t);
           replySimilar = !!areSimilar;
-          replySim = embeddingSim;
-        } catch {}
+        } catch {
+          replySimilar = false;
+        }
       }
 
-      if (!replySimilar) {
-        continue;
-      }
+      if (!replySimilar) continue;
 
-      // 再判断用户问题是否也高度相似：问题也相似时视为“正常重复提问”，不做去重
-      let questionSimilar = false;
-      if (baseQuestion && q) {
-        try {
-          const qr = await this._judgePairSimilarity(baseQuestion, q);
-          questionSimilar = !!qr.areSimilar;
-        } catch {}
-      }
+      const baseResources = Array.isArray(item.resources) ? item.resources : [];
+      for (const k of baseResources) unionSeenForSimilarText.add(k);
+    }
 
-      if (questionSimilar) {
-        // 用户问题与历史问题也高度相似：允许再次回复
-        continue;
-      }
+    if (unionSeenForSimilarText.size === 0) {
+      return false;
+    }
 
-      // 回复高度相似但问题并不相似：视为复读/误触，执行去重
+    const diffKeys = r.filter((k) => !unionRecentResourcesAll.has(k));
+    if (diffKeys.length === 0) {
       return true;
     }
 
+    meta.textForDedup = '';
+    meta.resourceKeys = diffKeys;
+    meta.response = this._buildResourcesOnlyResponse(meta.response, diffKeys);
     return false;
+  }
+
+  _buildResourcesOnlyResponse(originalResponse, allowedResourceKeys) {
+    const allowed = new Set(Array.isArray(allowedResourceKeys) ? allowedResourceKeys : []);
+    if (allowed.size === 0) {
+      return '<sentra-response>\n  <resources></resources>\n</sentra-response>';
+    }
+
+    let parsed = null;
+    try {
+      parsed = parseSentraResponse(typeof originalResponse === 'string' ? originalResponse : String(originalResponse ?? ''));
+    } catch {
+      parsed = null;
+    }
+
+    let resources = parsed && Array.isArray(parsed.resources) ? parsed.resources : [];
+    let emoji = parsed && parsed.emoji && parsed.emoji.source ? parsed.emoji : null;
+
+    // 容错：如果原始 response 无法解析，则仅根据 resourceKeys 反构建 resources/emoji
+    if ((!parsed || (!Array.isArray(parsed.resources) && !(parsed && parsed.emoji))) && allowed.size > 0) {
+      resources = [];
+      emoji = null;
+      for (const k of allowed) {
+        const key = String(k || '');
+        if (!key) continue;
+        if (key.startsWith('emoji|')) {
+          const src = key.slice('emoji|'.length);
+          if (src) {
+            emoji = { source: src };
+          }
+          continue;
+        }
+        const idx = key.indexOf('|');
+        if (idx <= 0) continue;
+        const type = key.slice(0, idx);
+        const source = key.slice(idx + 1);
+        if (type && source) {
+          resources.push({ type, source });
+        }
+      }
+    }
+
+    const filtered = [];
+    for (const r of resources) {
+      if (!r || !r.type || !r.source) continue;
+      const k = `${r.type}|${r.source}`;
+      if (allowed.has(k)) {
+        filtered.push(r);
+      }
+    }
+
+    const keepEmoji = !!(emoji && emoji.source && allowed.has(`emoji|${emoji.source}`));
+
+    const lines = [];
+    lines.push('<sentra-response>');
+
+    if (filtered.length > 0) {
+      lines.push('  <resources>');
+      for (const r of filtered) {
+        lines.push('    <resource>');
+        lines.push(`      <type>${r.type}</type>`);
+        lines.push(`      <source>${r.source}</source>`);
+        if (r.caption) {
+          lines.push(`      <caption>${r.caption}</caption>`);
+        }
+        lines.push('    </resource>');
+      }
+      lines.push('  </resources>');
+    } else {
+      lines.push('  <resources></resources>');
+    }
+
+    if (keepEmoji) {
+      lines.push('  <emoji>');
+      lines.push(`    <source>${emoji.source}</source>`);
+      if (emoji.caption) {
+        lines.push(`    <caption>${emoji.caption}</caption>`);
+      }
+      lines.push('  </emoji>');
+    }
+
+    lines.push('</sentra-response>');
+    return lines.join('\n');
   }
 
   /**

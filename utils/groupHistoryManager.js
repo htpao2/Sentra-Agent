@@ -96,6 +96,7 @@ function serializeHistory(history) {
 
       const assistant = typeof ctx.assistant === 'string' ? ctx.assistant : '';
       const userContent = typeof ctx.userContent === 'string' ? ctx.userContent : null;
+      const messages = Array.isArray(ctx.messages) ? ctx.messages : [];
       const createdAt = typeof ctx.createdAt === 'number' ? ctx.createdAt : 0;
       const lastUpdatedAt = typeof ctx.lastUpdatedAt === 'number'
         ? ctx.lastUpdatedAt
@@ -105,6 +106,7 @@ function serializeHistory(history) {
       activePairsObj[String(pairId)] = {
         assistant,
         userContent,
+        messages,
         createdAt,
         lastUpdatedAt,
         status
@@ -147,6 +149,7 @@ function deserializeHistory(data) {
         : createdAt;
       const assistant = typeof ctx.assistant === 'string' ? ctx.assistant : '';
       const userContent = typeof ctx.userContent === 'string' ? ctx.userContent : null;
+      const messages = Array.isArray(ctx.messages) ? ctx.messages : [];
       let status = typeof ctx.status === 'string' ? ctx.status : 'building';
       if (status !== 'building' && status !== 'finished' && status !== 'cancelled') {
         status = 'building';
@@ -155,6 +158,7 @@ function deserializeHistory(data) {
       activePairs.set(String(pairId), {
         assistant,
         userContent,
+        messages,
         createdAt,
         lastUpdatedAt,
         status
@@ -308,6 +312,7 @@ class GroupHistoryManager {
       const history = await this._getOrInitHistory(groupId);
       const senderId = String(msgObj.sender_id);
       const now = Date.now();
+      const messageId = msgObj && msgObj.message_id != null ? String(msgObj.message_id) : '';
       
       // 清理超时的sender消息（超过2分钟没有新消息）
       const cleanupResult = this._cleanupTimeoutMessages(history, now);
@@ -319,9 +324,61 @@ class GroupHistoryManager {
       history.senderLastMessageTime.set(senderId, now);
       
       // 添加消息到待回复队列
+      if (messageId) {
+        const existsInPending = (history.pendingMessages || []).some(
+          (pm) => pm && pm.msgObj && pm.msgObj.message_id != null && String(pm.msgObj.message_id) === messageId
+        );
+        const existsInProcessing = (history.processingMessages || []).some(
+          (pm) => pm && pm.msgObj && pm.msgObj.message_id != null && String(pm.msgObj.message_id) === messageId
+        );
+
+        if (existsInPending || existsInProcessing) {
+          logger.info(`待回复ADD去重: ${groupId} sender ${msgObj.sender_id}, msg ${messageId} 已存在，跳过重复入队`);
+          await saveHistoryToRedis(groupId, history);
+          return;
+        }
+      }
+
       history.pendingMessages.push({ summary, msgObj, timestamp: now });
       
-      logger.debug(`待回复ADD: ${groupId} sender ${msgObj.sender_id}, msg ${msgObj.message_id}, 当前${history.pendingMessages.length}条待回复`);
+      logger.debug(`待回复ADD: ${groupId} sender ${msgObj.sender_id}, msg ${messageId || msgObj.message_id}, 当前${history.pendingMessages.length}条待回复`);
+
+      await saveHistoryToRedis(groupId, history);
+    });
+  }
+
+  async appendToConversationPairMessages(groupId, pairId, role, content) {
+    return this._executeForGroup(groupId, async () => {
+      const history = await this._getOrInitHistory(groupId);
+      if (!history.activePairs || !(history.activePairs instanceof Map)) {
+        history.activePairs = new Map();
+      }
+
+      if (!pairId) {
+        logger.warn(`追加pair消息跳过: ${groupId} 未传入pairId (调用方状态异常)`);
+        return;
+      }
+
+      const ctx = history.activePairs.get(pairId);
+      const shortId = String(pairId).substring(0, 8);
+      if (!ctx) {
+        logger.debug(`追加pair消息跳过: ${groupId} pairId ${shortId} 不在活动列表中 (可能已完成/取消)`);
+        return;
+      }
+
+      if (ctx.status !== 'building') {
+        logger.debug(`追加pair消息跳过: ${groupId} pairId ${shortId} 状态为${ctx.status}`);
+        return;
+      }
+
+      if (!ctx.messages || !Array.isArray(ctx.messages)) {
+        ctx.messages = [];
+      }
+
+      const safeRole = role === 'assistant' ? 'assistant' : 'user';
+      const safeContent = typeof content === 'string' ? content : String(content ?? '');
+      ctx.messages.push({ role: safeRole, content: safeContent });
+      ctx.lastUpdatedAt = Date.now();
 
       await saveHistoryToRedis(groupId, history);
     });
@@ -479,26 +536,78 @@ class GroupHistoryManager {
       ...(history.processingMessages || [])
     ];
 
-    // 如果指定了 senderId，只保留该 sender 的消息
-    let contextMessages = allMessages;
+    // 如果指定了 senderId：
+    // - 私聊：保持原语义，仅返回该 sender 的历史消息（不包含最新一条）
+    // - 群聊：返回“全群上下文累计 + 该 sender 自身累计”两段，其他人的在上，该 sender 的在下
     if (senderId) {
-      contextMessages = allMessages.filter(pm => 
-        String(pm.msgObj.sender_id) === String(senderId)
-      );
-      
-      // 对于特定 sender，除了最后一条消息，其他都是历史上下文
-      if (contextMessages.length <= 1) {
-        return '';
+      const sid = String(senderId);
+      const isGroup = String(groupId || '').startsWith('G:');
+
+      const senderMsgs = allMessages.filter((pm) => String(pm?.msgObj?.sender_id) === sid);
+      const senderContext = senderMsgs.length <= 1 ? [] : senderMsgs.slice(0, -1);
+
+      if (!isGroup) {
+        if (senderContext.length === 0) return '';
+
+        let xml = '<sentra-pending-messages>\n';
+        xml += `  <total_count>${senderContext.length}</total_count>\n`;
+        xml += `  <note>以下是该用户的历史消息，仅供参考。当前需要回复的消息见 &lt;sentra-user-question&gt;</note>\n`;
+        xml += '  <context_messages>\n';
+
+        senderContext.forEach((pm, index) => {
+          const msg = pm.msgObj;
+          xml += `    <message index="${index + 1}">\n`;
+          xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
+          xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
+          xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+          xml += `    </message>\n`;
+        });
+
+        xml += '  </context_messages>\n';
+        xml += '</sentra-pending-messages>';
+        return xml;
       }
-      contextMessages = contextMessages.slice(0, -1);
-    } else {
-      // 如果没有指定 senderId，返回所有消息的历史（除了最后一条）
-      if (allMessages.length <= 1) {
-        return '';
-      }
-      contextMessages = allMessages.slice(0, -1);
+
+      const othersContext = allMessages.filter((pm) => String(pm?.msgObj?.sender_id) !== sid);
+      const total = othersContext.length + senderContext.length;
+      if (total === 0) return '';
+
+      let xml = '<sentra-pending-messages>\n';
+      xml += `  <total_count>${total}</total_count>\n`;
+      xml += '  <note>以下是群聊近期上下文累计（仅供参考）。为帮助你理解群聊氛围：上半部分是“其他成员的未回复消息”，下半部分是“该用户自己的累计消息（不含当前最新一条）”。当前需要回复的消息见 &lt;sentra-user-question&gt;</note>\n';
+
+      xml += '  <group_context_messages>\n';
+      othersContext.forEach((pm, index) => {
+        const msg = pm.msgObj;
+        xml += `    <message index="${index + 1}">\n`;
+        xml += `      <sender_id>${this._escapeXml(String(msg.sender_id || ''))}</sender_id>\n`;
+        xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
+        xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
+        xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+        xml += '    </message>\n';
+      });
+      xml += '  </group_context_messages>\n';
+
+      xml += '  <sender_context_messages>\n';
+      senderContext.forEach((pm, index) => {
+        const msg = pm.msgObj;
+        xml += `    <message index="${index + 1}">\n`;
+        xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
+        xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
+        xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+        xml += '    </message>\n';
+      });
+      xml += '  </sender_context_messages>\n';
+
+      xml += '</sentra-pending-messages>';
+      return xml;
     }
-    
+
+    // 如果没有指定 senderId，返回所有消息的历史（除了最后一条）
+    if (allMessages.length <= 1) {
+      return '';
+    }
+    const contextMessages = allMessages.slice(0, -1);
     if (contextMessages.length === 0) {
       return '';
     }
@@ -506,13 +615,9 @@ class GroupHistoryManager {
     // 构建 Sentra XML 格式（只包含历史上下文）
     let xml = '<sentra-pending-messages>\n';
     xml += `  <total_count>${contextMessages.length}</total_count>\n`;
-    if (senderId) {
-      xml += `  <note>以下是该用户的历史消息，仅供参考。当前需要回复的消息见 &lt;sentra-user-question&gt;</note>\n`;
-    } else {
-      xml += `  <note>以下是近期对话上下文，仅供参考。当前需要回复的消息见 &lt;sentra-user-question&gt;</note>\n`;
-    }
+    xml += `  <note>以下是近期对话上下文，仅供参考。当前需要回复的消息见 &lt;sentra-user-question&gt;</note>\n`;
     xml += '  <context_messages>\n';
-    
+
     contextMessages.forEach((pm, index) => {
       const msg = pm.msgObj;
       xml += `    <message index="${index + 1}">\n`;
@@ -521,10 +626,10 @@ class GroupHistoryManager {
       xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
       xml += `    </message>\n`;
     });
-    
+
     xml += '  </context_messages>\n';
     xml += '</sentra-pending-messages>';
-    
+
     return xml;
   }
 
@@ -764,6 +869,7 @@ class GroupHistoryManager {
       history.activePairs.set(pairId, {
         assistant: '',
         userContent: null,
+        messages: [],
         createdAt: now,
         lastUpdatedAt: now,
         status: 'building'
@@ -844,6 +950,7 @@ class GroupHistoryManager {
 
         ctx.assistant = '';
         ctx.userContent = null;
+        ctx.messages = [];
         ctx.status = 'cancelled';
         history.activePairs.delete(pairId);
       }
@@ -891,18 +998,22 @@ class GroupHistoryManager {
       }
 
       // 如果没有传入 userContent，使用旧的逻辑（简单拼接，已废弃）
-      if (!userContent) {
+      if (!userContent && (!ctx.messages || !Array.isArray(ctx.messages) || ctx.messages.length === 0)) {
         logger.warn(`保存检查: ${groupId} 未传入userContent，使用旧逻辑`);
         userContent = history.processingMessages.map(pm => pm.summary).join('\n\n');
       }
 
       const assistantMsg = ctx.assistant;
 
-      if (!userContent || userContent.trim().length === 0) {
+      const buffered = Array.isArray(ctx.messages) ? ctx.messages : [];
+      const willUseBuffered = buffered.length > 0;
+
+      if (!willUseBuffered && (!userContent || userContent.trim().length === 0)) {
         logger.warn(`保存跳过: ${groupId} pairId ${shortId} userContent为空`);
         ctx.status = 'cancelled';
         ctx.assistant = '';
         ctx.userContent = null;
+        ctx.messages = [];
         history.activePairs.delete(pairId);
         return false;
       }
@@ -912,6 +1023,7 @@ class GroupHistoryManager {
         ctx.status = 'cancelled';
         ctx.assistant = '';
         ctx.userContent = null;
+        ctx.messages = [];
         history.activePairs.delete(pairId);
         return false;
       }
@@ -920,12 +1032,29 @@ class GroupHistoryManager {
       const nowTs = typeof ctx.createdAt === 'number' && ctx.createdAt > 0
         ? ctx.createdAt
         : Date.now();
-      history.conversations.push(
-        { role: 'user', content: userContent, pairId, timestamp: nowTs },
-        { role: 'assistant', content: assistantMsg, pairId, timestamp: nowTs }
-      );
 
-      const pairCount = history.conversations.length / 2;
+      const toSave = [];
+      if (willUseBuffered) {
+        for (const m of buffered) {
+          if (!m || typeof m !== 'object') continue;
+          const r = m.role === 'assistant' ? 'assistant' : 'user';
+          const c = typeof m.content === 'string' ? m.content : String(m.content ?? '');
+          if (!c.trim()) continue;
+          toSave.push({ role: r, content: c, pairId, timestamp: nowTs });
+        }
+      } else {
+        toSave.push({ role: 'user', content: userContent, pairId, timestamp: nowTs });
+      }
+      toSave.push({ role: 'assistant', content: assistantMsg, pairId, timestamp: nowTs });
+
+      history.conversations.push(...toSave);
+
+      const seenPairIds = new Set();
+      for (const m of history.conversations) {
+        if (!m || !m.pairId) continue;
+        seenPairIds.add(String(m.pairId));
+      }
+      const pairCount = seenPairIds.size;
       const processingCount = history.processingMessages.length;
       const pendingCount = history.pendingMessages.length;
 
@@ -937,8 +1066,31 @@ class GroupHistoryManager {
       // 注意：只清空 processingMessages，保留 pendingMessages（这些是任务完成后才到达的新消息）
       history.processingMessages = [];
       ctx.status = 'finished';
-      ctx.userContent = userContent;
+      ctx.userContent = typeof userContent === 'string' ? userContent : ctx.userContent;
+      ctx.messages = [];
       history.activePairs.delete(pairId);
+
+      try {
+        const limit = this.maxConversationPairs;
+        if (Number.isFinite(limit) && limit > 0) {
+          const orderedPairIds = [];
+          const seen = new Set();
+          for (const m of history.conversations) {
+            const pid = m && m.pairId != null ? String(m.pairId) : '';
+            if (!pid) continue;
+            if (seen.has(pid)) continue;
+            seen.add(pid);
+            orderedPairIds.push(pid);
+          }
+          if (orderedPairIds.length > limit) {
+            const drop = new Set(orderedPairIds.slice(0, orderedPairIds.length - limit));
+            history.conversations = history.conversations.filter((m) => {
+              const pid = m && m.pairId != null ? String(m.pairId) : '';
+              return pid && !drop.has(pid);
+            });
+          }
+        }
+      } catch {}
       
       await saveHistoryToRedis(groupId, history);
 
@@ -974,6 +1126,7 @@ class GroupHistoryManager {
         ctx.status = 'cancelled';
         ctx.assistant = '';
         ctx.userContent = null;
+        ctx.messages = [];
         history.activePairs.delete(pairId);
         logger.debug(`撤销: ${groupId} 清空活动对话对 pairId ${shortId}`);
         touched = true;
@@ -1044,19 +1197,14 @@ class GroupHistoryManager {
       if (!pair) {
         pair = {
           pairId: pid,
-          user: null,
-          assistant: null,
+          messages: [],
           timestamp: typeof msg.timestamp === 'number' ? msg.timestamp : 0,
           order: idx
         };
         pairMap.set(pid, pair);
       }
 
-      if (msg.role === 'user') {
-        pair.user = msg;
-      } else if (msg.role === 'assistant') {
-        pair.assistant = msg;
-      }
+      pair.messages.push(msg);
 
       if (!pair.timestamp && typeof msg.timestamp === 'number') {
         pair.timestamp = msg.timestamp;
@@ -1159,11 +1307,10 @@ class GroupHistoryManager {
     // 展平为 [{ role, content }, ...]
     const conversationsForContext = [];
     for (const p of targetPairs) {
-      if (p.user) {
-        conversationsForContext.push({ role: p.user.role, content: p.user.content });
-      }
-      if (p.assistant) {
-        conversationsForContext.push({ role: p.assistant.role, content: p.assistant.content });
+      const msgs = Array.isArray(p.messages) ? p.messages : [];
+      for (const m of msgs) {
+        if (!m || typeof m !== 'object') continue;
+        conversationsForContext.push({ role: m.role, content: m.content });
       }
     }
 
@@ -1210,7 +1357,16 @@ class GroupHistoryManager {
    */
   getConversationPairCount(groupId) {
     const history = this.histories.get(groupId);
-    return history ? history.conversations.length / 2 : 0;
+    if (!history || !Array.isArray(history.conversations) || history.conversations.length === 0) {
+      return 0;
+    }
+    const seen = new Set();
+    for (const m of history.conversations) {
+      const pid = m && m.pairId != null ? String(m.pairId) : '';
+      if (!pid) continue;
+      seen.add(pid);
+    }
+    return seen.size;
   }
 
   /**
@@ -1237,19 +1393,14 @@ class GroupHistoryManager {
       if (!pair) {
         pair = {
           pairId: pid,
-          user: null,
-          assistant: null,
+          messages: [],
           timestamp: typeof msg.timestamp === 'number' ? msg.timestamp : 0,
           order: idx
         };
         pairMap.set(pid, pair);
       }
 
-      if (msg.role === 'user') {
-        pair.user = msg;
-      } else if (msg.role === 'assistant') {
-        pair.assistant = msg;
-      }
+      pair.messages.push(msg);
 
       if (!pair.timestamp && typeof msg.timestamp === 'number') {
         pair.timestamp = msg.timestamp;
@@ -1285,11 +1436,10 @@ class GroupHistoryManager {
 
     const conversationsForContext = [];
     for (const p of slicedPairs) {
-      if (p.user) {
-        conversationsForContext.push({ role: p.user.role, content: p.user.content });
-      }
-      if (p.assistant) {
-        conversationsForContext.push({ role: p.assistant.role, content: p.assistant.content });
+      const msgs = Array.isArray(p.messages) ? p.messages : [];
+      for (const m of msgs) {
+        if (!m || typeof m !== 'object') continue;
+        conversationsForContext.push({ role: m.role, content: m.content });
       }
     }
 
@@ -1340,7 +1490,16 @@ class GroupHistoryManager {
       }
 
       stats.groups[groupId] = {
-        conversationPairs: history.conversations.length / 2,
+        conversationPairs: (() => {
+          const seen = new Set();
+          const arr = Array.isArray(history.conversations) ? history.conversations : [];
+          for (const m of arr) {
+            const pid = m && m.pairId != null ? String(m.pairId) : '';
+            if (!pid) continue;
+            seen.add(pid);
+          }
+          return seen.size;
+        })(),
         pendingMessages: history.pendingMessages.length,
         isReplying
       };

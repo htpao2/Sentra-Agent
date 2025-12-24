@@ -12,6 +12,16 @@
     /* Transition removed to avoid conflict with Draggable/Framer Motion */
 }
 
+.window.maximized {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+}
+
+.window.maximized.active {
+    box-shadow: none;
+}
+
 .window.active {
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
     border-color: rgba(0, 0, 0, 0.15);
@@ -36,7 +46,7 @@
     display: flex;
     height: 100%;
     position: relative;
-    z-index: 20;
+    z-index: 30;
     /* Controls above everything in window */
 }
 
@@ -117,14 +127,15 @@
 /* Resize handles */
 .resizeHandle {
     position: absolute;
-    z-index: 5;
+    z-index: 15;
     background: transparent;
+    touch-action: none;
     /* enlarge hit area but invisible */
 }
 
 /* Edges */
 .n {
-    top: -2px;
+    top: 0;
     left: 8px;
     right: 8px;
     height: 8px;
@@ -132,7 +143,7 @@
 }
 
 .s {
-    bottom: -2px;
+    bottom: 0;
     left: 8px;
     right: 8px;
     height: 8px;
@@ -140,7 +151,7 @@
 }
 
 .e {
-    right: -2px;
+    right: 0;
     top: 8px;
     bottom: 8px;
     width: 8px;
@@ -148,7 +159,7 @@
 }
 
 .w {
-    left: -2px;
+    left: 0;
     top: 8px;
     bottom: 8px;
     width: 8px;
@@ -157,32 +168,32 @@
 
 /* Corners */
 .ne {
-    top: -2px;
-    right: -2px;
+    top: 0;
+    right: 0;
     width: 14px;
     height: 14px;
     cursor: nesw-resize;
 }
 
 .nw {
-    top: -2px;
-    left: -2px;
+    top: 0;
+    left: 0;
     width: 14px;
     height: 14px;
     cursor: nwse-resize;
 }
 
 .se {
-    bottom: -2px;
-    right: -2px;
+    bottom: 0;
+    right: 0;
     width: 14px;
     height: 14px;
     cursor: nwse-resize;
 }
 
 .sw {
-    bottom: -2px;
-    left: -2px;
+    bottom: 0;
+    left: 0;
     width: 14px;
     height: 14px;
     cursor: nesw-resize;

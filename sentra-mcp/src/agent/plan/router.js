@@ -26,29 +26,6 @@ function buildRerankUrl(baseURL) {
   return root + '/v1/rerank';                               // e.g. https://yuanplus.chat -> +/v1/rerank
 }
 
-/**
- * 从 judge.operations 数组中提取用于重排序的子查询
- * @param {Array} operations - judge.operations 数组
- * @param {string} fallbackQuery - 兜底查询
- * @param {number} maxSubqueries - 最大子查询数量
- * @returns {Array<string>} 子查询数组
- */
-function extractSubQueriesFromOperations(operations, fallbackQuery, maxSubqueries = 5) {
-  const fq = String(fallbackQuery || '').trim();
-  
-  if (Array.isArray(operations)) {
-    let parts = operations.map(s => String(s || '').trim()).filter(Boolean);
-    if (Number.isFinite(maxSubqueries) && maxSubqueries > 0) {
-      parts = parts.slice(0, maxSubqueries);
-    }
-    if (!parts.length && fq) return [fq];
-    return parts;
-  }
-  
-  // 非数组，返回兜底查询
-  return fq ? [fq] : [];
-}
-
 export async function rerankDocumentsSiliconFlow({ query, documents, baseURL, apiKey, model, topN, timeoutMs }) {
   const url = buildRerankUrl(baseURL);
   const docsClean = (documents || [])
@@ -95,21 +72,17 @@ export async function rerankDocumentsSiliconFlow({ query, documents, baseURL, ap
  * 重排序工具清单
  * @param {Object} params
  * @param {Array} params.manifest - 工具清单
- * @param {Array} params.judgeOperations - judge.operations 数组
  * @param {string} params.objective - 目标描述（兜底）
  * @param {number} params.candidateK - 候选数量
  * @param {number} params.topN - 返回Top N
  * @returns {Promise<{manifest: Array, indices: Array, scores: Array}>}
  */
-export async function rerankManifest({ manifest, judgeOperations, objective, candidateK, topN }) {
+export async function rerankManifest({ manifest, objective, candidateK, topN }) {
   if (!Array.isArray(manifest)) return { manifest: [], indices: [], scores: [] };
   const L = manifest.length;
   if (L === 0) return { manifest: [], indices: [], scores: [] };
 
-  // 使用 operations 数组的第一个作为主查询，兜底使用 objective
-  const query = (Array.isArray(judgeOperations) && judgeOperations.length > 0) 
-    ? judgeOperations[0]
-    : String(objective || '').trim();
+  const query = String(objective || '').trim();
   if (!query) return { manifest, indices: manifest.map((_, i) => i), scores: [] };
 
   // 构建工具文档
@@ -143,60 +116,25 @@ export async function rerankManifest({ manifest, judgeOperations, objective, can
     const finalTopN = (tnRaw <= 0) ? preDocs.length : Math.max(1, Math.min(tnRaw, preDocs.length));
     if (enable && apiKey) {
       try {
-        // 允许 RERANK_MAX_SUBQUERIES<=0 表示不限制：不要用 `|| 5` 覆盖 0
-        const maxSubsCfg = Number(config.rerank?.maxSubqueries);
-        const subQueries = extractSubQueriesFromOperations(judgeOperations, query, maxSubsCfg);
-        if (config.flags.enableVerboseSteps) {
-          // 打印全部子查询，避免误解为只支持前5个
-          logger.info('重排序子查询', { label: 'RERANK', count: subQueries.length, items: subQueries });
-        }
-
-        // 并发执行所有子查询的在线精排，并在全部完成后聚合
-        const combined = new Map(); // 原索引 -> { freq, sumScore, sumRR }
-        const calls = subQueries.map((sq) => rerankDocumentsSiliconFlow({
-          query: sq,
+        const results = await rerankDocumentsSiliconFlow({
+          query,
           documents: preDocs,
           baseURL: process.env.RERANK_BASE_URL || config.rerank?.baseURL,
           apiKey,
           model: process.env.RERANK_MODEL || config.rerank?.model,
           topN: finalTopN,
           timeoutMs: Number(process.env.RERANK_TIMEOUT_MS || config.rerank?.timeoutMs || 12000),
-        }));
-        const settled = await Promise.allSettled(calls);
-        let okCount = 0, failCount = 0;
-        for (const st of settled) {
-          if (st.status === 'fulfilled' && Array.isArray(st.value)) {
-            okCount += 1;
-            st.value.forEach((r, rankIdx) => {
-              const orig = prePairs[r.index]?.i;
-              if (!Number.isInteger(orig)) return;
-              const rr = 1 / (rankIdx + 1); // reciprocal rank
-              const prev = combined.get(orig) || { freq: 0, sumScore: 0, sumRR: 0 };
-              prev.freq += 1;
-              prev.sumScore += Number.isFinite(r.score) ? r.score : 0;
-              prev.sumRR += rr;
-              combined.set(orig, prev);
-            });
-          } else {
-            failCount += 1;
-          }
+        });
+        const rankedIndices = (results || [])
+          .filter((r) => Number.isInteger(r.index) && r.index >= 0)
+          .map((r) => prePairs[r.index]?.i)
+          .filter((i) => Number.isInteger(i));
+        const rankedManifest = rankedIndices.slice(0, finalTopN).map((i) => manifest[i]);
+        const rankedScores = rankedIndices.slice(0, finalTopN).map(() => 0);
+        logger.info?.('重排序完成', { label: 'RERANK', topN: rankedIndices.length, topAi: rankedManifest?.[0]?.aiName, query });
+        if (rankedManifest.length > 0) {
+          return { manifest: rankedManifest, indices: rankedIndices.slice(0, finalTopN), scores: rankedScores };
         }
-        if ((failCount > 0) && config.flags.enableVerboseSteps) {
-          logger.warn?.('部分子查询在线重排失败（已忽略失败项）', { label: 'RERANK', okCount, failCount });
-        }
-
-        // 计算综合得分并排序
-        const alpha = Number.isFinite(config.rerank?.aggAlpha) ? config.rerank.aggAlpha : 0.1;
-        const beta = Number.isFinite(config.rerank?.aggBeta) ? config.rerank.aggBeta : 0.5;
-        const gamma = Number.isFinite(config.rerank?.aggGamma) ? config.rerank.aggGamma : 0.4; // freq/score/rr 权重
-        const idxScore = Array.from(combined.entries())
-          .map(([i, agg]) => ({ i, s: alpha * agg.freq + beta * agg.sumScore + gamma * agg.sumRR }))
-          .sort((a, b) => b.s - a.s);
-        const rankedIndices = idxScore.slice(0, finalTopN).map((x) => x.i);
-        const rankedScores = idxScore.slice(0, finalTopN).map((x) => x.s);
-        const rankedManifest = rankedIndices.map((i) => manifest[i]);
-        logger.info?.('重排序完成', { label: 'RERANK', topN: rankedIndices.length, topAi: rankedManifest?.[0]?.aiName, topScore: rankedScores?.[0] });
-        return { manifest: rankedManifest, indices: rankedIndices, scores: rankedScores };
       } catch (e) {
         logger.warn?.('在线重排序失败，回退到余弦粗排', {
           label: 'RERANK',

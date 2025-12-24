@@ -52,7 +52,7 @@ function toXmlCatalog(items = []) {
   items.forEach((t, idx) => {
     if (!t) return;
     const index = idx + 1;
-    const aiName = t.aiName || t.name || '';
+    const aiName = t.aiName || '';
     const name = t.name || '';
     const provider = t.provider || '';
     const serverId = t.serverId || '';

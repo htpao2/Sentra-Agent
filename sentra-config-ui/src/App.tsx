@@ -130,6 +130,15 @@ function App() {
     });
   };
 
+  useEffect(() => {
+    try {
+      document.documentElement.setAttribute('data-theme', theme);
+      document.body.setAttribute('data-theme', theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
+
   // Terminal windows state via hook
   const {
     terminalWindows,

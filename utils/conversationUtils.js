@@ -12,15 +12,18 @@ const logger = createLogger('ConversationUtils');
 // 存储对话历史
 const conversationHistory = new Map();
 
-// Redis key 前缀配置（私聊 / 群聊分别使用独立前缀，不再兼容旧字段）
-const REDIS_CONV_PRIVATE_PREFIX = getEnv('REDIS_CONV_PRIVATE_PREFIX', 'sentra:conv:private:');
-const REDIS_CONV_GROUP_PREFIX = getEnv('REDIS_CONV_GROUP_PREFIX', 'sentra:conv:group:');
+function getConversationRedisRuntimeConfig() {
+  const convMaxMessagesRaw = getEnv('REDIS_CONV_MAX_MESSAGES', '0');
+  const convMaxMessagesParsed = parseInt(convMaxMessagesRaw, 10);
+  const maxMessages = Number.isNaN(convMaxMessagesParsed) ? 0 : convMaxMessagesParsed;
 
-// TTL 与最大条数配置
-const REDIS_CONV_TTL_SECONDS = getEnvInt('REDIS_CONV_TTL_SECONDS', 86400);
-const convMaxMessagesRaw = getEnv('REDIS_CONV_MAX_MESSAGES', '0');
-const convMaxMessagesParsed = parseInt(convMaxMessagesRaw, 10);
-const REDIS_CONV_MAX_MESSAGES = Number.isNaN(convMaxMessagesParsed) ? 0 : convMaxMessagesParsed; // <=0 表示不限制，仅由 TTL 控制
+  return {
+    privatePrefix: getEnv('REDIS_CONV_PRIVATE_PREFIX', 'sentra:conv:private:'),
+    groupPrefix: getEnv('REDIS_CONV_GROUP_PREFIX', 'sentra:conv:group:'),
+    ttlSeconds: getEnvInt('REDIS_CONV_TTL_SECONDS', 86400),
+    maxMessages
+  };
+}
 
 function buildConversationKey(msg) {
   return msg.type === 'private'
@@ -40,7 +43,8 @@ async function loadHistoryFromRedis(conversationKey, isPrivate) {
   const redis = getRedis();
   if (!redis) return null;
 
-  const prefix = isPrivate ? REDIS_CONV_PRIVATE_PREFIX : REDIS_CONV_GROUP_PREFIX;
+  const { privatePrefix, groupPrefix } = getConversationRedisRuntimeConfig();
+  const prefix = isPrivate ? privatePrefix : groupPrefix;
   const key = `${prefix}${conversationKey}`;
   try {
     const raw = await redis.get(key);
@@ -58,12 +62,13 @@ async function saveHistoryToRedis(conversationKey, isPrivate, history) {
   const redis = getRedis();
   if (!redis) return;
 
-  const prefix = isPrivate ? REDIS_CONV_PRIVATE_PREFIX : REDIS_CONV_GROUP_PREFIX;
+  const { privatePrefix, groupPrefix, ttlSeconds } = getConversationRedisRuntimeConfig();
+  const prefix = isPrivate ? privatePrefix : groupPrefix;
   const key = `${prefix}${conversationKey}`;
   try {
     const data = JSON.stringify(history);
-    if (Number.isFinite(REDIS_CONV_TTL_SECONDS) && REDIS_CONV_TTL_SECONDS > 0) {
-      await redis.set(key, data, 'EX', REDIS_CONV_TTL_SECONDS);
+    if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+      await redis.set(key, data, 'EX', ttlSeconds);
     } else {
       await redis.set(key, data);
     }
@@ -123,6 +128,7 @@ export async function getReplyableMessageId(msg) {
  */
 export async function updateConversationHistory(msg, messageId = null, isBot = false) {
   const { conversationKey, isPrivate, history } = await loadConversationHistory(msg);
+  const { maxMessages } = getConversationRedisRuntimeConfig();
 
   const now = Date.now();
 
@@ -130,15 +136,15 @@ export async function updateConversationHistory(msg, messageId = null, isBot = f
     // 记录机器人消息
     history.botMessages.push({ message_id: messageId, timestamp: now });
     // 可选：按条数裁剪（0 表示不限制）
-    if (REDIS_CONV_MAX_MESSAGES > 0 && history.botMessages.length > REDIS_CONV_MAX_MESSAGES) {
-      history.botMessages.splice(0, history.botMessages.length - REDIS_CONV_MAX_MESSAGES);
+    if (maxMessages > 0 && history.botMessages.length > maxMessages) {
+      history.botMessages.splice(0, history.botMessages.length - maxMessages);
     }
   } else {
     // 记录用户消息
     history.userMessages.push({ message_id: msg.message_id, timestamp: now });
     // 可选：按条数裁剪（0 表示不限制）
-    if (REDIS_CONV_MAX_MESSAGES > 0 && history.userMessages.length > REDIS_CONV_MAX_MESSAGES) {
-      history.userMessages.splice(0, history.userMessages.length - REDIS_CONV_MAX_MESSAGES);
+    if (maxMessages > 0 && history.userMessages.length > maxMessages) {
+      history.userMessages.splice(0, history.userMessages.length - maxMessages);
     }
   }
 

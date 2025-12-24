@@ -30,6 +30,7 @@ interface MenuBarProps {
   showDock: boolean;
   onToggleDock: () => void;
   onOpenDeepWiki: () => void;
+  performanceMode?: boolean;
 }
 
 const Clock: React.FC = () => {
@@ -57,7 +58,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onToggleTheme,
   showDock,
   onToggleDock,
-  onOpenDeepWiki
+  onOpenDeepWiki,
+  performanceMode = false
 }) => {
   const [activeMenu, setActiveMenu] = useState<number | null>(null);
   const [showControlCenter, setShowControlCenter] = useState(false);
@@ -101,7 +103,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
   return (
     <>
-      <div className={styles.menubar} onClick={e => e.stopPropagation()}>
+      <div className={`${styles.menubar} ${performanceMode ? styles.performanceMode : ''}`} onClick={e => e.stopPropagation()}>
         <div className={styles.left}>
           <div className={`${styles.menuItem} ${styles.appleIcon}`} onClick={onAppleClick}>
             <SentraIcon size={18} />

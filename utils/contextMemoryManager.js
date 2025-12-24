@@ -4,11 +4,15 @@ import { createLogger } from './logger.js';
 import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('ContextMemory');
-
-const MEMORY_PREFIX = getEnv('REDIS_CONTEXT_MEMORY_PREFIX', 'sentra:memory:');
-const MEMORY_TTL_SECONDS = getEnvInt('REDIS_CONTEXT_MEMORY_TTL_SECONDS', 0) || 0;
-const TIMEZONE = getEnv('CONTEXT_MEMORY_TIMEZONE', 'Asia/Shanghai');
 const CURSOR_SUFFIX = ':cursor';
+
+function getContextMemoryRuntimeConfig() {
+  return {
+    prefix: getEnv('REDIS_CONTEXT_MEMORY_PREFIX', 'sentra:memory:'),
+    ttlSeconds: getEnvInt('REDIS_CONTEXT_MEMORY_TTL_SECONDS', 0) || 0,
+    timezone: getEnv('CONTEXT_MEMORY_TIMEZONE', 'Asia/Shanghai')
+  };
+}
 
 function getRedisSafe() {
   const redis = getRedis();
@@ -19,19 +23,22 @@ function getRedisSafe() {
 }
 
 function formatDateFromMillis(ms) {
+  const { timezone } = getContextMemoryRuntimeConfig();
   try {
-    return DateTime.fromMillis(ms).setZone(TIMEZONE).toFormat('yyyy-LL-dd');
+    return DateTime.fromMillis(ms).setZone(timezone).toFormat('yyyy-LL-dd');
   } catch {
     return DateTime.fromMillis(ms).toUTC().toFormat('yyyy-LL-dd');
   }
 }
 
 function buildDailyKey(groupId, dateStr) {
-  return `${MEMORY_PREFIX}${groupId}:${dateStr}`;
+  const { prefix } = getContextMemoryRuntimeConfig();
+  return `${prefix}${groupId}:${dateStr}`;
 }
 
 function buildCursorKey(groupId) {
-  return `${MEMORY_PREFIX}${groupId}${CURSOR_SUFFIX}`;
+  const { prefix } = getContextMemoryRuntimeConfig();
+  return `${prefix}${groupId}${CURSOR_SUFFIX}`;
 }
 
 export async function getLastSummarizedPairCount(groupId) {
@@ -96,8 +103,9 @@ export async function saveContextMemoryItem(groupId, payload) {
 
   try {
     await redis.rpush(key, serialized);
-    if (Number.isFinite(MEMORY_TTL_SECONDS) && MEMORY_TTL_SECONDS > 0) {
-      await redis.expire(key, MEMORY_TTL_SECONDS);
+    const { ttlSeconds } = getContextMemoryRuntimeConfig();
+    if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+      await redis.expire(key, ttlSeconds);
     }
     logger.info(`saveContextMemoryItem: saved summary for ${groupId} date=${dateStr}`);
   } catch (e) {
@@ -111,7 +119,8 @@ function formatTimeRangeText(timeStart, timeEnd) {
   }
 
   try {
-    const fmt = (ms) => DateTime.fromMillis(ms).setZone(TIMEZONE).toFormat('yyyy-LL-dd HH:mm:ss');
+    const { timezone } = getContextMemoryRuntimeConfig();
+    const fmt = (ms) => DateTime.fromMillis(ms).setZone(timezone).toFormat('yyyy-LL-dd HH:mm:ss');
     const hasStart = typeof timeStart === 'number' && timeStart > 0;
     const hasEnd = typeof timeEnd === 'number' && timeEnd > 0;
 

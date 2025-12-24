@@ -4,7 +4,7 @@
  */
 
 import { z } from 'zod';
-import { jsonToXMLLines, extractXMLTag, extractAllXMLTags, extractFilesFromContent, valueToXMLString, USER_QUESTION_FILTER_KEYS, extractFullXMLTag, extractAllFullXMLTags, escapeXmlAttr } from './xmlUtils.js';
+import { jsonToXMLLines, extractXMLTag, extractAllXMLTags, extractFilesFromContent, valueToXMLString, USER_QUESTION_FILTER_KEYS, extractFullXMLTag, extractAllFullXMLTags, escapeXmlAttr, unescapeXml, stripTypedValueWrapper, extractXmlAttrValue, extractInnerXmlFromFullTag } from './xmlUtils.js';
 import { createLogger } from './logger.js';
 
 const logger = createLogger('ProtocolUtils');
@@ -29,19 +29,180 @@ function argsObjectToParamEntries(args = {}) {
   return out;
 }
 
-/**
- * 反转义 HTML 实体（处理模型可能输出的转义字符）
- * @param {string} text - 可能包含 HTML 实体的文本
- * @returns {string} 反转义后的文本
- */
-function unescapeHTML(text) {
-  if (!text || typeof text !== 'string') return text;
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'");
+function extractParameterValueFromInvoke(invokeXml, paramName) {
+  if (!invokeXml || typeof invokeXml !== 'string') return '';
+  const target = String(paramName || '').trim();
+  if (!target) return '';
+  try {
+    const params = extractAllFullXMLTags(invokeXml, 'parameter');
+    for (const p of params) {
+      const name = String(extractXmlAttrValue(p, 'name') || '').trim();
+      if (name !== target) continue;
+      const inner = extractInnerXmlFromFullTag(p, 'parameter');
+      return stripTypedValueWrapper(unescapeXml(inner || ''));
+    }
+  } catch {}
+  return '';
+}
+
+function extractAllParameterNamesFromInvoke(invokeXml) {
+  if (!invokeXml || typeof invokeXml !== 'string') return [];
+  const names = [];
+  try {
+    const params = extractAllFullXMLTags(invokeXml, 'parameter');
+    for (const p of params) {
+      const n = String(extractXmlAttrValue(p, 'name') || '').trim();
+      if (n) names.push(n);
+    }
+  } catch {}
+  return names;
+}
+
+function isPromiseToolsInvoke(invokeXml) {
+  // Promise marker definition: an invoke that contains a parameter named "reason".
+  // We additionally require that all parameter names are exactly ["reason"] to avoid
+  // accidentally treating real tool invocations as promise markers.
+  const names = extractAllParameterNamesFromInvoke(invokeXml);
+  if (names.length === 0) return false;
+  if (!names.includes('reason')) return false;
+  const unique = Array.from(new Set(names));
+  return unique.length === 1 && unique[0] === 'reason';
+}
+
+function parseBooleanLike(s) {
+  const t = String(s ?? '').trim().toLowerCase();
+  if (!t) return null;
+  if (t === 'true' || t === '1' || t === 'yes') return true;
+  if (t === 'false' || t === '0' || t === 'no') return false;
+  return null;
+}
+
+export function parseReplyGateDecisionFromSentraTools(text) {
+  const s = typeof text === 'string' ? text : '';
+  if (!s || !s.includes('<sentra-tools>')) return null;
+
+  let last = null;
+  try {
+    const toolsBlocks = extractAllFullXMLTags(s, 'sentra-tools');
+    for (const tb of toolsBlocks) {
+      const invokes = extractAllFullXMLTags(tb, 'invoke');
+      for (const invokeXml of invokes) {
+        const name = (extractXmlAttrValue(invokeXml, 'name') || '').trim();
+        if (name !== 'reply_gate_decision') continue;
+
+        let enter = null;
+        let reason = '';
+
+        const params = extractAllFullXMLTags(invokeXml, 'parameter');
+        for (const p of params) {
+          const pName = (extractXmlAttrValue(p, 'name') || '').trim();
+          if (!pName) continue;
+
+          const paramInner = extractInnerXmlFromFullTag(p, 'parameter');
+
+          if (pName === 'enter') {
+            const boolText = extractXMLTag(p, 'boolean');
+            const raw = boolText != null ? boolText : paramInner;
+            const parsed = parseBooleanLike(stripTypedValueWrapper(unescapeXml(raw || '')));
+            if (typeof parsed === 'boolean') {
+              enter = parsed;
+            }
+            continue;
+          }
+
+          if (pName === 'reason') {
+            const strText = extractXMLTag(p, 'string');
+            const raw = strText != null ? strText : paramInner;
+            reason = stripTypedValueWrapper(unescapeXml(raw || '')).trim();
+          }
+        }
+
+        if (typeof enter !== 'boolean') continue;
+        last = { enter, reason, invokeName: name };
+      }
+    }
+  } catch {}
+
+  return last;
+}
+
+export function parseSendFusionFromSentraTools(text) {
+  const s = typeof text === 'string' ? text : '';
+  if (!s || !s.includes('<sentra-tools>')) return null;
+
+  let last = null;
+  try {
+    const toolsBlocks = extractAllFullXMLTags(s, 'sentra-tools');
+    for (const tb of toolsBlocks) {
+      const invokes = extractAllFullXMLTags(tb, 'invoke');
+      for (const invokeXml of invokes) {
+        const name = (extractXmlAttrValue(invokeXml, 'name') || '').trim();
+        if (name !== 'send_fusion') continue;
+
+        const textSegments = [];
+        let reason = '';
+
+        const params = extractAllFullXMLTags(invokeXml, 'parameter');
+        for (const p of params) {
+          const pName = (extractXmlAttrValue(p, 'name') || '').trim();
+          if (!pName) continue;
+
+          const paramInner = extractInnerXmlFromFullTag(p, 'parameter');
+          const strText = extractXMLTag(p, 'string');
+          const raw = strText != null ? strText : paramInner;
+          const val = stripTypedValueWrapper(unescapeXml(raw || '')).trim();
+          if (!val) continue;
+
+          if (pName === 'reason') {
+            reason = val;
+            continue;
+          }
+
+          const m = pName.match(/^text(\d+)$/i);
+          if (m) {
+            const idx = parseInt(m[1], 10);
+            if (Number.isFinite(idx) && idx > 0) {
+              textSegments.push({ idx, val });
+            }
+          }
+        }
+
+        textSegments.sort((a, b) => a.idx - b.idx);
+        const merged = textSegments.map((x) => x.val);
+        if (merged.length === 0) continue;
+
+        last = { textSegments: merged, reason, invokeName: name };
+      }
+    }
+  } catch {}
+
+  return last;
+}
+
+function parsePromiseFromSentraTools(text) {
+  const s = typeof text === 'string' ? text : '';
+  if (!s || !s.includes('<sentra-tools>')) return null;
+  try {
+    const toolsBlocks = s.match(/<sentra-tools>[\s\S]*?<\/sentra-tools>/gi) || [];
+    for (const tb of toolsBlocks) {
+      const invRe = /<invoke\s+name="([^"]+)"\s*>[\s\S]*?<\/invoke>/gi;
+      let m;
+      while ((m = invRe.exec(tb)) !== null) {
+        const name = String(m[1] || '').trim();
+        const invokeXml = m[0];
+        if (!isPromiseToolsInvoke(invokeXml)) continue;
+        const reason = extractParameterValueFromInvoke(invokeXml, 'reason');
+        const objective = (reason || '').trim();
+        if (!objective) continue;
+        return {
+          hasPromise: true,
+          objective,
+          invokeName: name || ''
+        };
+      }
+    }
+  } catch {}
+  return null;
 }
 
 // Zod schema for resource validation
@@ -286,8 +447,8 @@ export function parseSentraResponse(response) {
     const textContent = extractXMLTag(responseContent, textTag);
     if (!textContent) break;
     
-    // 反转义 HTML 实体（处理模型可能输出的转义字符）
-    const unescapedText = unescapeHTML(textContent.trim());
+    // 反转义 XML/HTML 实体（处理模型可能输出的转义字符）
+    const unescapedText = unescapeXml(textContent.trim());
     textSegments.push(unescapedText);
     //logger.debug(`提取 <${textTag}>: ${unescapedText.slice(0, 80)}`);
     index++;
@@ -375,27 +536,13 @@ export function parseSentraResponse(response) {
     }
   }
 
-  // 提取 <meta> 承诺信息（可选）
-  const metaBlock = extractXMLTag(responseContent, 'meta');
+  // 承诺/补单：仅允许通过 <sentra-tools><invoke name="__promise_fulfill__"> 标记（不再兼容旧 <meta>）
   let hasPromise = null;
   let promiseObjective = null;
-
-  if (metaBlock && metaBlock.trim()) {
-    try {
-      const rawHas = (extractXMLTag(metaBlock, 'has_promise') || '').trim().toLowerCase();
-      if (rawHas === 'true' || rawHas === '1' || rawHas === 'yes') {
-        hasPromise = true;
-      } else if (rawHas === 'false' || rawHas === '0' || rawHas === 'no') {
-        hasPromise = false;
-      }
-
-      const rawObj = extractXMLTag(metaBlock, 'promise_objective');
-      if (rawObj && rawObj.trim()) {
-        promiseObjective = rawObj.trim();
-      }
-    } catch (e) {
-      logger.warn(`<meta> 承诺信息解析失败: ${e.message}`);
-    }
+  const promiseFromTools = parsePromiseFromSentraTools(response);
+  if (promiseFromTools && promiseFromTools.hasPromise === true) {
+    hasPromise = true;
+    promiseObjective = promiseFromTools.objective || '';
   }
   
   // 最终验证整体结构
@@ -412,7 +559,10 @@ export function parseSentraResponse(response) {
     if (hasPromise !== null || (promiseObjective && promiseObjective.trim())) {
       validated.promise = {
         hasPromise: hasPromise === true,
-        objective: promiseObjective || ''
+        objective: promiseObjective || '',
+        invokeName: promiseFromTools && typeof promiseFromTools.invokeName === 'string'
+          ? promiseFromTools.invokeName
+          : ''
       };
     }
 
@@ -462,49 +612,121 @@ export function convertHistoryToMCPFormat(historyConversations) {
   const mcpConversation = [];
   let convertedCount = 0;
   let skippedCount = 0;
-  
+
+  let bufferedTools = '';
+
+  const isPromiseToolsMarker = (toolsXml) => {
+    if (!toolsXml || typeof toolsXml !== 'string') return false;
+    if (!toolsXml.includes('<sentra-tools>')) return false;
+    // Treat as promise marker when every <invoke> has only one parameter named "reason".
+    // (Defensive: allow extra whitespace/newlines.)
+    try {
+      const invRe = /<invoke\s+name="([^"]+)"\s*>[\s\S]*?<\/invoke>/gi;
+      let m;
+      let found = false;
+      while ((m = invRe.exec(toolsXml)) !== null) {
+        found = true;
+        const invokeXml = m[0];
+        if (!isPromiseToolsInvoke(invokeXml)) return false;
+      }
+      return found;
+    } catch {
+      return false;
+    }
+  };
+
+  const pushStandardNoToolPair = (userMsg) => {
+    const pendingMessages = extractXMLTag(userMsg.content, 'sentra-pending-messages');
+    const uq = extractXMLTag(userMsg.content, 'sentra-user-question') || '';
+
+    if (uq) {
+      let userContent = '';
+      if (pendingMessages) {
+        userContent += `<sentra-pending-messages>\n${pendingMessages}\n</sentra-pending-messages>\n\n`;
+      }
+      userContent += `<sentra-user-question>\n${uq}\n</sentra-user-question>`;
+      mcpConversation.push({ role: 'user', content: userContent });
+    } else {
+      mcpConversation.push(userMsg);
+    }
+
+    let reasonText = extractXMLTag(uq, 'summary') || extractXMLTag(uq, 'text') || '';
+    reasonText = (reasonText || '').trim();
+    if (!reasonText) reasonText = 'No tool required for this message.';
+
+    const toolsXML = [
+      '<sentra-tools>',
+      '  <invoke name="none">',
+      '    <parameter name="no_tool">true</parameter>',
+      `    <parameter name="reason">${valueToXMLString(reasonText, 0)}</parameter>`,
+      '  </invoke>',
+      '</sentra-tools>'
+    ].join('\n');
+
+    const ev = {
+      type: 'tool_result',
+      aiName: 'none',
+      plannedStepIndex: 0,
+      reason: reasonText,
+      result: {
+        success: true,
+        code: 'NO_TOOL',
+        provider: 'system',
+        data: { no_tool: true, reason: reasonText }
+      }
+    };
+    const resultXML = buildSentraResultBlock(ev);
+    mcpConversation.push({ role: 'assistant', content: `${toolsXML}\n\n${resultXML}` });
+  };
+
   for (const msg of historyConversations) {
+    if (!msg || typeof msg !== 'object') continue;
     if (msg.role === 'system') {
-      // MCP 有自己的 system prompt，跳过
       skippedCount++;
       continue;
     }
-    
+
+    const content = typeof msg.content === 'string' ? msg.content : '';
+
+    // Skip assistant natural language responses in MCP context
+    if (msg.role === 'assistant' && content.includes('<sentra-response>')) {
+      skippedCount++;
+      continue;
+    }
+
+    // New format: assistant tools are already present in history
+    if (msg.role === 'assistant' && content.includes('<sentra-tools>')) {
+      // Skip internal promise markers; they are not real tool executions and should not pollute MCP context
+      if (isPromiseToolsMarker(content)) {
+        skippedCount++;
+        continue;
+      }
+      bufferedTools = content;
+      continue;
+    }
+
     if (msg.role === 'user') {
-      // 优先检查是否包含 <sentra-result-group>
-      const groupBlocks = extractAllXMLTags(msg.content, 'sentra-result-group') || [];
-      const singleResultContent = extractXMLTag(msg.content, 'sentra-result');
+      // Legacy combined (result embedded in user message)
+      const groupBlocks = extractAllXMLTags(content, 'sentra-result-group') || [];
+      const singleResultContent = extractXMLTag(content, 'sentra-result');
       if ((groupBlocks.length > 0) || singleResultContent) {
-        // 提取待回复上下文和用户问题
-        const pendingMessages = extractXMLTag(msg.content, 'sentra-pending-messages');
-        const userQuestion = extractXMLTag(msg.content, 'sentra-user-question');
-        
+        const pendingMessages = extractXMLTag(content, 'sentra-pending-messages');
+        const userQuestion = extractXMLTag(content, 'sentra-user-question');
+
         if (userQuestion) {
-          // 构建完整的 user 消息：pending-messages (如果有) + user-question
           let userContent = '';
-          
           if (pendingMessages) {
-            // 有对话上下文，放在前面
             userContent += `<sentra-pending-messages>\n${pendingMessages}\n</sentra-pending-messages>\n\n`;
           }
-          
           userContent += `<sentra-user-question>\n${userQuestion}\n</sentra-user-question>`;
-          
-          mcpConversation.push({
-            role: 'user',
-            content: userContent
-          });
+          mcpConversation.push({ role: 'user', content: userContent });
         }
-        
-        // 将历史中的结果转换为 MCP 工具调用 + 结果块：
-        // - 若存在 group：仅遍历组内 <sentra-result> 以生成 <invoke>，并保留完整的 <sentra-result-group> 作为结果块
-        // - 否则：处理所有单个 <sentra-result>，并保留其完整块
+
         const invocations = [];
         const seen = new Set();
         let resultBlocksFull = [];
         if (groupBlocks.length > 0) {
-          // 完整组块（保留属性和外层标签）
-          const groupFullBlocks = extractAllFullXMLTags(msg.content, 'sentra-result-group') || [];
+          const groupFullBlocks = extractAllFullXMLTags(content, 'sentra-result-group') || [];
           resultBlocksFull = groupFullBlocks;
           for (const gb of groupBlocks) {
             const items = extractAllXMLTags(gb, 'sentra-result') || [];
@@ -514,38 +736,32 @@ export function convertHistoryToMCPFormat(historyConversations) {
               let argsContent = argsJSONText || extractXMLTag(it, 'args');
               if (aiName && argsContent != null) {
                 const key = `${aiName}|${String(argsJSONText || argsContent).trim()}`;
-                if (seen.has(key)) continue; // 去重
+                if (seen.has(key)) continue;
                 seen.add(key);
                 invocations.push({ aiName, argsContent });
-                logger.debug(`转换工具调用: ${aiName}`);
               }
             }
           }
         } else if (singleResultContent) {
-          // 完整的单结果块（可能存在多个）
-          const singlesFull = extractAllFullXMLTags(msg.content, 'sentra-result') || [];
+          const singlesFull = extractAllFullXMLTags(content, 'sentra-result') || [];
           resultBlocksFull = singlesFull;
-          const singlesContents = extractAllXMLTags(msg.content, 'sentra-result') || [];
+          const singlesContents = extractAllXMLTags(content, 'sentra-result') || [];
           for (const it of singlesContents) {
             const aiName = extractXMLTag(it, 'aiName');
             let argsJSONText = extractXMLTag(it, 'arguments');
             let argsContent = argsJSONText || extractXMLTag(it, 'args');
             if (aiName && argsContent != null) {
               const key = `${aiName}|${String(argsJSONText || argsContent).trim()}`;
-              if (!seen.has(key)) {
-                seen.add(key);
-                invocations.push({ aiName, argsContent });
-                logger.debug(`转换工具调用: ${aiName}`);
-              }
+              if (seen.has(key)) continue;
+              seen.add(key);
+              invocations.push({ aiName, argsContent });
             }
           }
         }
 
-        // 组合单条 assistant 内容：<sentra-tools>（如有） + 结果完整块（如有）
         let combined = '';
         if (invocations.length > 0) {
-          const toolsXML = buildSentraToolsBatch(invocations);
-          combined = toolsXML;
+          combined = buildSentraToolsBatch(invocations);
           convertedCount += invocations.length;
         }
         if (resultBlocksFull.length > 0) {
@@ -555,75 +771,63 @@ export function convertHistoryToMCPFormat(historyConversations) {
         if (combined) {
           mcpConversation.push({ role: 'assistant', content: combined });
         }
-      } else {
-        // 没有 <sentra-result>：仍需生成一组标准化的 user + assistant，
-        // 明确“未调用工具”的判定，便于 AI 在 MCP 历史中看到完整决策轨迹
-        const pendingMessages = extractXMLTag(msg.content, 'sentra-pending-messages');
-        const uq = extractXMLTag(msg.content, 'sentra-user-question') || '';
 
-        if (uq) {
-          // 和有工具路径保持一致：仅注入 pending-messages + sentra-user-question
-          let userContent = '';
-          if (pendingMessages) {
-            userContent += `<sentra-pending-messages>\n${pendingMessages}\n</sentra-pending-messages>\n\n`;
-          }
-          userContent += `<sentra-user-question>\n${uq}\n</sentra-user-question>`;
-          mcpConversation.push({
-            role: 'user',
-            content: userContent
-          });
-        } else {
-          // 兼容旧历史：没有 sentra-user-question 时，直接保留原始 user 内容
-          mcpConversation.push(msg);
-        }
-
-        // 从 <sentra-user-question> 提取 summary/text 作为原因
-        let reasonText = extractXMLTag(uq, 'summary') || extractXMLTag(uq, 'text') || '';
-        reasonText = (reasonText || '').trim();
-        if (!reasonText) reasonText = 'No tool required for this message.';
-
-        // 构建占位 tools：name="none"，标记 no_tool=true 与原因
-        const toolsXML = [
-          '<sentra-tools>',
-          '  <invoke name="none">',
-          '    <parameter name="no_tool">true</parameter>',
-          `    <parameter name="reason">${valueToXMLString(reasonText, 0)}</parameter>`,
-          '  </invoke>',
-          '</sentra-tools>'
-        ].join('\n');
-
-        // 构建占位 result：tool="none"，code=NO_TOOL，data含原因
-        const ev = {
-          type: 'tool_result',
-          aiName: 'none',
-          plannedStepIndex: 0,
-          reason: reasonText,
-          result: {
-            success: true,
-            code: 'NO_TOOL',
-            provider: 'system',
-            data: { no_tool: true, reason: reasonText }
-          }
-        };
-        const resultXML = buildSentraResultBlock(ev);
-
-        const combined = `${toolsXML}\n\n${resultXML}`;
-        mcpConversation.push({ role: 'assistant', content: combined });
-      }
-    }
-    
-    if (msg.role === 'assistant') {
-      // 跳过旧格式响应与已存在的工具调用，避免重复
-      const hasResponse = typeof msg.content === 'string' && msg.content.includes('<sentra-response>');
-      const hasTools = typeof msg.content === 'string' && msg.content.includes('<sentra-tools>');
-      if (hasResponse || hasTools) {
-        skippedCount++;
+        bufferedTools = '';
         continue;
       }
-      // 纯文本或其他说明类 assistant 内容，保留
+
+      // New format user base context: contains <sentra-user-question> but no <sentra-result>
+      if (content.includes('<sentra-user-question>')) {
+        // If there was any buffered tools (especially promise marker), do not carry it across turns.
+        bufferedTools = '';
+        mcpConversation.push({ role: 'user', content });
+        continue;
+      }
+
+      // New format user results-only message
+      const hasResultOnly = content.includes('<sentra-result') || content.includes('<sentra-result-group');
+      if (hasResultOnly) {
+        const groupFullBlocks = extractAllFullXMLTags(content, 'sentra-result-group') || [];
+        const singlesFull = extractAllFullXMLTags(content, 'sentra-result') || [];
+        const resultBlocksFull = groupFullBlocks.length > 0 ? groupFullBlocks : singlesFull;
+        const resultsXML = resultBlocksFull.length > 0 ? resultBlocksFull.join('\n\n') : content;
+        const combined = bufferedTools ? `${bufferedTools}\n\n${resultsXML}` : resultsXML;
+        mcpConversation.push({ role: 'assistant', content: combined });
+        bufferedTools = '';
+        convertedCount++;
+        continue;
+      }
+
+      // Fallback: non-xml user content
       mcpConversation.push(msg);
+      continue;
+    }
+
+    // Any other assistant content: keep
+    if (msg.role === 'assistant') {
+      mcpConversation.push(msg);
+      continue;
     }
   }
+
+  // If we saw an orphan base user message without any tool/result, insert a standard no-tool pair
+  // (best-effort: scan tail)
+  try {
+    const last = historyConversations && historyConversations.length
+      ? historyConversations[historyConversations.length - 1]
+      : null;
+    if (last && last.role === 'user') {
+      const c = typeof last.content === 'string' ? last.content : '';
+      const hasUq = c.includes('<sentra-user-question>');
+      const hasRes = c.includes('<sentra-result') || c.includes('<sentra-result-group');
+      if (hasUq && !hasRes) {
+        const lastOut = mcpConversation.length ? mcpConversation[mcpConversation.length - 1] : null;
+        if (!lastOut || lastOut.role !== 'assistant') {
+          pushStandardNoToolPair(last);
+        }
+      }
+    }
+  } catch {}
 
   logger.debug(
     `MCP格式转换: ${historyConversations.length}条 → ${mcpConversation.length}条 (转换${convertedCount}个工具, 跳过${skippedCount}条)`
@@ -713,6 +917,40 @@ function buildTypedParameterBlock(name, jsValue) {
   lines.push(...renderTypedValueLinesForParam(jsValue, 3));
   lines.push('    </parameter>');
   return lines;
+}
+
+export function buildSentraToolsBlockFromArgsObject(aiName, argsObj) {
+  const xmlLines = ['<sentra-tools>'];
+  xmlLines.push(`  <invoke name="${escapeXmlAttr(String(aiName || ''))}">`);
+  if (argsObj && typeof argsObj === 'object') {
+    for (const [key, value] of Object.entries(argsObj)) {
+      const paramLines = buildTypedParameterBlock(key, value);
+      xmlLines.push(...paramLines);
+    }
+  }
+  xmlLines.push('  </invoke>');
+  xmlLines.push('</sentra-tools>');
+  return xmlLines.join('\n');
+}
+
+export function buildSentraToolsBlockFromInvocations(invocations) {
+  const xmlLines = ['<sentra-tools>'];
+  const items = Array.isArray(invocations) ? invocations : [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const aiName = item.aiName;
+    const argsObj = item.args;
+    xmlLines.push(`  <invoke name="${escapeXmlAttr(String(aiName || ''))}">`);
+    if (argsObj && typeof argsObj === 'object') {
+      for (const [key, value] of Object.entries(argsObj)) {
+        const paramLines = buildTypedParameterBlock(key, value);
+        xmlLines.push(...paramLines);
+      }
+    }
+    xmlLines.push('  </invoke>');
+  }
+  xmlLines.push('</sentra-tools>');
+  return xmlLines.join('\n');
 }
 
 /**

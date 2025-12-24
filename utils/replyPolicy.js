@@ -23,6 +23,81 @@ const groupReplyStats = new Map();  // groupKey -> { timestamps: number[] }
 const cancelledTasks = new Set();   // 记录被标记为取消的任务ID（taskId）
 const gateSessions = new Map();
 
+const REPLY_GATE_BASE_ZH = {
+  reply_gate_disabled: 'ReplyGate 已关闭：跳过本地预判，交给 LLM 决策',
+  non_group_message: '非群聊消息：ReplyGate 不参与（由上层策略处理）',
+  empty_text: '空文本：群消息没有可分析的文本内容',
+  analyzer_error: '本地分析器异常：已回退为 LLM 决策',
+  policy_blocked: '合规策略拦截：检测到风险内容，本轮不进入回复流程',
+  below_min_threshold: '价值极低：低于最小阈值，本轮直接忽略',
+  pass_to_llm: '通过本地预判：进入 LLM 决策阶段'
+};
+
+const REPLY_GATE_REASON_CODE_ZH = {
+  EMPTY_OR_INVALID_INPUT: '空内容或非法输入',
+  TEXT_TOO_SHORT: '文本过短（信息量不足）',
+  LOW_ENTROPY_GIBBERISH: '疑似乱码/灌水（熵过低）',
+  TOO_FEW_TOKENS: '有效词过少（信息量不足）',
+  LOW_SEMANTIC_VALUE: '语义信息量低（缺少明确意图）',
+  POLICY_BLOCKED: '合规拦截（辱骂/敏感/风险内容）',
+  POLICY_FLAGGED: '合规提示（存在轻度风险内容）',
+  HARD_REPEAT_SHRINK: '高度重复：与近期内容相似度过高，回复概率被强力下调',
+  REPETITIVE_CONTENT: '重复内容：与历史消息过于相似',
+  LOW_REPLY_PROBABILITY: '回复价值低：综合评估后概率偏低'
+};
+
+function parseReplyGateReason(reason) {
+  const raw = typeof reason === 'string' ? reason : String(reason ?? '');
+  if (!raw) return null;
+  const parts = raw.split(':');
+  if (parts.length < 2) return null;
+  const subsystem = parts[0] || '';
+  if (subsystem !== 'conversation_analyzer') return null;
+  const base = parts[1] || '';
+  const suffix = parts.slice(2).join(':');
+  const codes = suffix ? suffix.split('|').map((s) => s.trim()).filter(Boolean) : [];
+  const baseZh = REPLY_GATE_BASE_ZH[base] || base;
+  const codesZh = codes.map((c) => REPLY_GATE_REASON_CODE_ZH[c] || c);
+  return { subsystem, base, baseZh, codes, codesZh, raw };
+}
+
+function buildReplyGateExplainZh(gateResult) {
+  const parsed = parseReplyGateReason(gateResult?.reason);
+  if (!parsed) {
+    return {
+      summary: typeof gateResult?.reason === 'string' ? gateResult.reason : String(gateResult?.reason ?? ''),
+      parsed: null
+    };
+  }
+  const detail = parsed.codesZh.length ? `；细项：${parsed.codesZh.join('；')}` : '';
+  let policyDetail = '';
+  const policy = gateResult?.debug?.analyzer?.policy;
+  if (policy && typeof policy === 'object' && policy.action) {
+    const details = Array.isArray(policy.details) ? policy.details : [];
+    const brief = details
+      .map((d) => {
+        if (!d || typeof d !== 'object') return '';
+        const kind = d.kind ? String(d.kind) : '';
+        const score = typeof d.score === 'number' && Number.isFinite(d.score) ? d.score : null;
+        const matches = typeof d.matches === 'number' && Number.isFinite(d.matches) ? d.matches : null;
+        const bits = [];
+        if (kind) bits.push(kind);
+        if (score != null) bits.push(`score=${score.toFixed(3)}`);
+        if (matches != null) bits.push(`matches=${matches}`);
+        return bits.join(',');
+      })
+      .filter(Boolean)
+      .slice(0, 4);
+    if (brief.length) {
+      policyDetail = `；合规细节：${brief.join(' | ')}`;
+    }
+  }
+  return {
+    summary: `${parsed.baseZh}${detail}${policyDetail}`,
+    parsed
+  };
+}
+
 /**
  * 任务状态
  */
@@ -36,28 +111,29 @@ class Task {
   }
 }
 
-// 规范化 senderId，确保作为 Map key 一致
 function normalizeSenderId(senderId) {
   return String(senderId ?? '');
+}
+
+function buildConversationId(msg, senderId) {
+  const sid = normalizeSenderId(senderId ?? (msg && msg.sender_id));
+  if (msg && msg.group_id) {
+    return `group_${msg.group_id}_sender_${sid}`;
+  }
+  return `private_${sid}`;
 }
 
 function getGroupKey(groupId) {
   return `G:${groupId ?? ''}`;
 }
 
-function makeGateKey(groupId, senderId) {
-  const g = groupId != null ? String(groupId) : '';
-  const s = normalizeSenderId(senderId);
-  return `${g}::${s}`;
-}
-
-function resetGateSessionsForSender(senderId) {
-  const s = normalizeSenderId(senderId);
-  for (const [key, session] of gateSessions.entries()) {
-    if (key.endsWith(`::${s}`) && session) {
-      session.value = 0;
-      session.lastTs = 0;
-    }
+function resetGateSessionForConversationId(conversationId) {
+  const key = normalizeSenderId(conversationId);
+  if (!key) return;
+  const session = gateSessions.get(key);
+  if (session) {
+    session.value = 0;
+    session.lastTs = 0;
   }
 }
 
@@ -77,7 +153,7 @@ function updateGateSessionAndCheck(msg, senderId, config, gateProb, activeCount)
 
   const eff = gateProb - baseline;
   const now = Date.now();
-  const key = makeGateKey(msg.group_id, senderId);
+  const key = buildConversationId(msg, senderId);
   let session = gateSessions.get(key);
   if (!session) {
     session = { value: 0, lastTs: now };
@@ -405,7 +481,7 @@ export function clearCancelledTask(taskId) {
 
 export function resetReplyGateForSender(senderId) {
   if (!senderId) return;
-  resetGateSessionsForSender(senderId);
+  resetGateSessionForConversationId(senderId);
 }
 
 /**
@@ -418,7 +494,7 @@ function addActiveTask(senderId, taskId) {
   }
   activeTasks.get(key).add(taskId);
   logger.debug(`活跃任务+: ${key} 添加任务 ${taskId?.substring(0,8)}, 当前活跃数: ${activeTasks.get(key).size}`);
-  resetGateSessionsForSender(senderId);
+  resetGateSessionForConversationId(senderId);
 }
 
 /**
@@ -531,17 +607,22 @@ export async function completeTask(senderId, taskId) {
  */
 export async function shouldReply(msg, options = {}) {
   const config = getConfig();
-  const senderId = normalizeSenderId(msg.sender_id);
+  const senderIdRaw = normalizeSenderId(msg.sender_id);
   const decisionContext = options.decisionContext || null;
-  const source = options.source || null; // e.g. 'pending_merged'
+  const source = options && typeof options.source === 'string' ? options.source : '';
+
+  const conversationId = buildConversationId(msg, senderIdRaw);
+  const senderKey = conversationId;
   // 私聊：保持必回策略
   if (msg.type === 'private') {
     const taskId = randomUUID();
-    addActiveTask(senderId, taskId);
+    addActiveTask(senderKey, taskId);
     logger.info(`私聊消息，必须回复 (task=${taskId})`);
     return {
       needReply: true,
       reason: '私聊消息',
+      explainZh: '私聊消息：默认必回',
+      decisionSource: 'local_private',
       mandatory: true,
       probability: 1.0,
       taskId
@@ -549,19 +630,18 @@ export async function shouldReply(msg, options = {}) {
   }
 
   // 群聊：并发和队列控制 + 轻量 LLM 决策是否回复
-  const activeCount = getActiveTaskCount(senderId);
-  const conversationId = msg.group_id
-    ? `group_${msg.group_id}_sender_${senderId}`
-    : `private_${senderId}`;
+  const activeCount = getActiveTaskCount(senderKey);
 
   if (activeCount >= config.maxConcurrentPerSender) {
     const task = new Task(msg, conversationId);
-    const queue = getSenderQueue(senderId);
+    const queue = getSenderQueue(senderKey);
     queue.push(task);
-    logger.debug(`并发限制: sender=${senderId} 活跃=${activeCount}/${config.maxConcurrentPerSender}, 队列长度=${queue.length}`);
+    logger.debug(`并发限制: sender=${senderKey} 活跃=${activeCount}/${config.maxConcurrentPerSender}, 队列长度=${queue.length}`);
     return {
       needReply: false,
       reason: '并发限制，已加入队列',
+      explainZh: '并发限制：当前会话已有任务在处理，消息已进入队列等待',
+      decisionSource: 'local_concurrency_queue',
       mandatory: false,
       probability: 0.0,
       taskId: null
@@ -573,7 +653,7 @@ export async function shouldReply(msg, options = {}) {
   let attentionSession = null;
   if (isGroup && msg.group_id) {
     try {
-      const stats = await loadAttentionStats(msg.group_id, senderId);
+      const stats = await loadAttentionStats(msg.group_id, senderIdRaw);
       if (stats && typeof stats === 'object') {
         const considered = Number.isFinite(stats.consideredCount) ? stats.consideredCount : 0;
         const replied = Number.isFinite(stats.repliedCount) ? stats.repliedCount : 0;
@@ -600,7 +680,7 @@ export async function shouldReply(msg, options = {}) {
         };
       }
     } catch (e) {
-      logger.debug(`loadAttentionStats 失败: group ${msg.group_id} sender ${senderId}`, {
+      logger.debug(`loadAttentionStats 失败: group ${msg.group_id} sender ${senderIdRaw}`, {
         err: String(e)
       });
     }
@@ -627,13 +707,15 @@ export async function shouldReply(msg, options = {}) {
 
   let inAttentionList = true;
   if (isGroup && msg.group_id) {
-    inAttentionList = isSenderInAttentionList(msg, senderId, config);
+    inAttentionList = isSenderInAttentionList(msg, senderIdRaw, config);
     if (!inAttentionList && !isExplicitMention && !mentionedByName) {
       const reason = '群监听队列外且未提及Bot，跳过本轮群聊消息';
-      logger.info(`[${groupInfo}] 用户${senderId} 决策为不回复: ${reason}`);
+      logger.info(`[${groupInfo}] 用户${senderIdRaw} 决策为不回复: ${reason}`);
       return {
         needReply: false,
         reason,
+        explainZh: '注意力名单未覆盖该发送者，且未@/未提及机器人名称：跳过本轮消息',
+        decisionSource: 'local_attention_list',
         mandatory: false,
         probability: 0.0,
         conversationId,
@@ -643,15 +725,17 @@ export async function shouldReply(msg, options = {}) {
   }
 
   if (isGroup) {
-    const pass = shouldPassAttentionWindow(msg, senderId, config, {
+    const pass = shouldPassAttentionWindow(msg, senderIdRaw, config, {
       isExplicitMention: isExplicitMention || mentionedByName
     });
     if (!pass) {
       const reason = '注意力窗口已满，跳过本轮群聊消息';
-      logger.info(`[${groupInfo}] 用户${senderId} 决策为不回复: ${reason}`);
+      logger.info(`[${groupInfo}] 用户${senderIdRaw} 决策为不回复: ${reason}`);
       return {
         needReply: false,
         reason,
+        explainZh: '注意力窗口已满：当前时间窗内活跃发送者过多，为避免刷屏本轮跳过',
+        decisionSource: 'local_attention_window',
         mandatory: false,
         probability: 0.0,
         conversationId,
@@ -675,7 +759,7 @@ export async function shouldReply(msg, options = {}) {
     groupFatiguePass = !!gf.pass;
     groupFatigueReason = gf.reason || '';
 
-    const uf = evaluateSenderFatigue(msg, senderId, config, {
+    const uf = evaluateSenderFatigue(msg, senderIdRaw, config, {
       isExplicitMention,
       mentionedByName
     });
@@ -700,10 +784,12 @@ export async function shouldReply(msg, options = {}) {
   if (isGroup && config.pureLocalGating) {
     if (!groupFatiguePass) {
       const fatigueReason = groupFatigueReason || '群疲劳：短期内机器人在该群回复过多，进入退避窗口';
-      logger.info(`[${groupInfo}] 用户${senderId} 决策为不回复: ${fatigueReason}`);
+      logger.info(`[${groupInfo}] 用户${senderIdRaw} 决策为不回复: ${fatigueReason}`);
       return {
         needReply: false,
         reason: fatigueReason,
+        explainZh: fatigueReason,
+        decisionSource: 'local_group_fatigue',
         mandatory: false,
         probability: 0.0,
         conversationId,
@@ -712,10 +798,12 @@ export async function shouldReply(msg, options = {}) {
     }
     if (!senderFatiguePass) {
       const fatigueReason = senderFatigueReason || '用户疲劳：短期内机器人对该用户回复过多，进入退避窗口';
-      logger.info(`[${groupInfo}] 用户${senderId} 决策为不回复: ${fatigueReason}`);
+      logger.info(`[${groupInfo}] 用户${senderIdRaw} 决策为不回复: ${fatigueReason}`);
       return {
         needReply: false,
         reason: fatigueReason,
+        explainZh: fatigueReason,
+        decisionSource: 'local_sender_fatigue',
         mandatory: false,
         probability: 0.0,
         conversationId,
@@ -758,6 +846,20 @@ export async function shouldReply(msg, options = {}) {
   let mandatory = false;
   let shouldReplyFlag = true;
   let gateResult = null;
+  let explainZh = '';
+  let decisionSource = 'local_policy';
+  const decisionTrace = {
+    source,
+    isGroup,
+    isExplicitMention,
+    mentionedByName: !!mentionedByName,
+    isFollowupAfterBotReply,
+    pureLocalGating: !!config.pureLocalGating,
+    useLlmIntervention: null,
+    gate: null,
+    gateAccum: null,
+    llmDecision: null
+  };
 
   // 群聊 + 非显式 @ 的消息先通过 ReplyGate 进行价值预判：
   //  - decision = 'ignore'  => 直接不回
@@ -781,49 +883,74 @@ export async function shouldReply(msg, options = {}) {
         }
       );
 
+      if (gateResult && typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)) {
+        decisionTrace.gate = {
+          decision: gateResult.decision,
+          normalizedScore: gateResult.normalizedScore,
+          reason: gateResult.reason,
+          analyzerProb:
+            gateResult.debug && gateResult.debug.analyzer && typeof gateResult.debug.analyzer.probability === 'number'
+              ? gateResult.debug.analyzer.probability
+              : null
+        };
+      }
+
       if (gateResult && gateResult.decision === 'ignore') {
-        const reasonStr = typeof gateResult.reason === 'string' ? gateResult.reason : '';
-        const isPolicyBlocked = reasonStr.includes('policy_blocked');
-        if (!isFollowupAfterBotReply || isPolicyBlocked) {
-          const gateReason = `ReplyGate: ${gateResult.reason || 'low_interest_score'}`;
-          logger.info(`[${groupInfo}] 用户${senderId} 预判为不回复: ${gateReason}`);
-          if (isGroup && msg.group_id) {
-            try {
-              let analyzerProb = null;
-              if (
-                gateResult.debug &&
-                gateResult.debug.analyzer &&
-                typeof gateResult.debug.analyzer.probability === 'number'
-              ) {
-                analyzerProb = gateResult.debug.analyzer.probability;
-              }
-              const gateP =
-                typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)
-                  ? gateResult.normalizedScore
-                  : null;
-              await updateAttentionStatsAfterDecision({
-                groupId: msg.group_id,
-                senderId,
-                analyzerProb,
-                gateProb: gateP,
-                fusedProb: 0,
-                didReply: false
-              });
-            } catch (e) {
-              logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderId}`, {
-                err: String(e)
-              });
+        const gateReason = `ReplyGate: ${gateResult.reason || 'low_interest_score'}`;
+        const explain = buildReplyGateExplainZh(gateResult);
+        explainZh = explain?.summary || '';
+        decisionSource = 'local_reply_gate';
+        const gateProbPercent =
+          typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)
+            ? (gateResult.normalizedScore * 100).toFixed(1)
+            : '0.0';
+        const analyzerProbPercent =
+          gateResult.debug && gateResult.debug.analyzer && typeof gateResult.debug.analyzer.probability === 'number'
+            ? (gateResult.debug.analyzer.probability * 100).toFixed(1)
+            : 'null';
+
+        logger.info(
+          `[${groupInfo}] 用户${senderIdRaw} 预判为不回复: ${explainZh || '本地门禁判定无需回复'} (gateProb=${gateProbPercent}%, analyzerProb=${analyzerProbPercent}%, raw=${gateReason})`
+        );
+        if (isGroup && msg.group_id) {
+          try {
+            let analyzerProb = null;
+            if (
+              gateResult.debug &&
+              gateResult.debug.analyzer &&
+              typeof gateResult.debug.analyzer.probability === 'number'
+            ) {
+              analyzerProb = gateResult.debug.analyzer.probability;
             }
+            const gateP =
+              typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)
+                ? gateResult.normalizedScore
+                : null;
+            await updateAttentionStatsAfterDecision({
+              groupId: msg.group_id,
+              senderId: senderIdRaw,
+              analyzerProb,
+              gateProb: gateP,
+              fusedProb: 0,
+              didReply: false
+            });
+          } catch (e) {
+            logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderIdRaw}`, {
+              err: String(e)
+            });
           }
-          return {
-            needReply: false,
-            reason: gateReason,
-            mandatory: false,
-            probability: gateResult.normalizedScore ?? 0,
-            conversationId,
-            taskId: null
-          };
         }
+        return {
+          needReply: false,
+          reason: gateReason,
+          explainZh: explainZh || undefined,
+          decisionSource,
+          decisionTrace,
+          mandatory: false,
+          probability: gateResult.normalizedScore ?? 0,
+          conversationId,
+          taskId: null
+        };
       }
       // 其余情况（包括 gateResult.decision === 'llm' 或 gateResult 为空，
       // 以及 follow-up 但未被 policy_blocked 的 decision === 'ignore'）
@@ -831,12 +958,12 @@ export async function shouldReply(msg, options = {}) {
       if (gateResult && typeof gateResult.normalizedScore === 'number' && Number.isFinite(gateResult.normalizedScore)) {
         const p = gateResult.normalizedScore;
         gateProb = p < 0 ? 0 : p > 1 ? 1 : p;
-        if (config.pureLocalGating) {
+        if (config.pureLocalGating && !isFollowupAfterBotReply) {
           probability = gateProb;
         }
       }
     } catch (e) {
-      logger.debug(`ReplyGate 预判失败，回退为正常 LLM 决策: ${groupInfo} sender ${senderId}`, {
+      logger.debug(`ReplyGate 预判失败，回退为正常 LLM 决策: ${groupInfo} sender ${senderIdRaw}`, {
         err: String(e)
       });
     }
@@ -849,8 +976,9 @@ export async function shouldReply(msg, options = {}) {
     const skipAccumThrottling = source === 'pending_merged' || isFollowupAfterBotReply;
 
     if (!skipAccumThrottling) {
-      const allowByAccum = updateGateSessionAndCheck(msg, senderId, config, gateProb, activeCount);
+      const allowByAccum = updateGateSessionAndCheck(msg, senderIdRaw, config, gateProb, activeCount);
       if (!allowByAccum) {
+        decisionTrace.gateAccum = { allow: false, gateProb };
         try {
           let analyzerProb = null;
           if (
@@ -863,22 +991,27 @@ export async function shouldReply(msg, options = {}) {
           }
           await updateAttentionStatsAfterDecision({
             groupId: msg.group_id,
-            senderId,
+            senderId: senderIdRaw,
             analyzerProb,
             gateProb,
             fusedProb: 0,
             didReply: false
           });
         } catch (e) {
-          logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderId}`, {
+          logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderIdRaw}`, {
             err: String(e)
           });
         }
         const reasonAccum = 'ReplyGateAccum: below_threshold_or_busy';
-        logger.info(`[${groupInfo}] 用户${senderId} 决策为不回复: ${reasonAccum}`);
+        explainZh = '聚合门禁未通过：近期多条低价值消息累计不足阈值，或当前已有任务在处理（避免刷屏）';
+        decisionSource = 'local_reply_gate_accum';
+        logger.info(`[${groupInfo}] 用户${senderIdRaw} 决策为不回复: ${explainZh} (raw=${reasonAccum}, gateProb=${(gateProb * 100).toFixed(1)}%)`);
         return {
           needReply: false,
           reason: reasonAccum,
+          explainZh,
+          decisionSource,
+          decisionTrace,
           mandatory: false,
           probability: gateProb,
           conversationId,
@@ -886,6 +1019,7 @@ export async function shouldReply(msg, options = {}) {
         };
       }
     } else {
+      decisionTrace.gateAccum = { allow: true, gateProb, skip: true };
       // 仅记录一次统计，表明在高负载/节流场景下仍然尊重用户新的明确意图
       try {
         let analyzerProb = null;
@@ -899,24 +1033,30 @@ export async function shouldReply(msg, options = {}) {
         }
         await updateAttentionStatsAfterDecision({
           groupId: msg.group_id,
-          senderId,
+          senderId: senderIdRaw,
           analyzerProb,
           gateProb,
           fusedProb: probability,
           didReply: true
         });
       } catch (e) {
-        logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderId}`, {
+        logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderIdRaw}`, {
           err: String(e)
         });
       }
-      logger.info(`[${groupInfo}] 延迟聚合场景放宽 ReplyGateAccum: sender=${senderId}, gateProb=${gateProb}`);
+      logger.info(`[${groupInfo}] 延迟聚合场景放宽 ReplyGateAccum: sender=${senderIdRaw}, gateProb=${gateProb}`);
     }
   }
 
   const useLlmIntervention = isGroup && (!config.pureLocalGating || isExplicitMention || mentionedByName || isFollowupAfterBotReply);
+  decisionTrace.useLlmIntervention = useLlmIntervention;
+
+  logger.debug(
+    `[${groupInfo}] 决策路径: useLlm=${useLlmIntervention} (pureLocalGating=${!!config.pureLocalGating}, explicitAt=${isExplicitMention}, mentionedByName=${!!mentionedByName}, followup=${isFollowupAfterBotReply}, source=${source || 'direct'})`
+  );
 
   if (useLlmIntervention) {
+    decisionSource = 'llm_reply_intervention';
     const intervention = await planGroupReplyDecision(msg, {
       signals: {
         mentionedByAt: isExplicitMention,
@@ -937,6 +1077,14 @@ export async function shouldReply(msg, options = {}) {
 
     if (intervention && typeof intervention.shouldReply === 'boolean') {
       shouldReplyFlag = intervention.shouldReply;
+      decisionTrace.llmDecision = {
+        shouldReply: shouldReplyFlag,
+        confidence:
+          typeof intervention.confidence === 'number' && Number.isFinite(intervention.confidence)
+            ? intervention.confidence
+            : null,
+        reason: typeof intervention.reason === 'string' ? intervention.reason : null
+      };
 
       let interventionConfidence;
       if (typeof intervention.confidence === 'number' && Number.isFinite(intervention.confidence)) {
@@ -952,6 +1100,14 @@ export async function shouldReply(msg, options = {}) {
         : (shouldReplyFlag
             ? 'ReplyIntervention: LLM 判定应进入主对话流程'
             : 'ReplyIntervention: LLM 判定本轮不进入主对话流程');
+
+      if (typeof intervention.reason === 'string' && intervention.reason.trim()) {
+        explainZh = `LLM 决策：${intervention.reason.trim()}`;
+      } else {
+        explainZh = shouldReplyFlag
+          ? 'LLM 决策：建议进入主对话流程'
+          : 'LLM 决策：建议本轮不进入主对话流程';
+      }
     }
   }
 
@@ -962,6 +1118,8 @@ export async function shouldReply(msg, options = {}) {
     shouldReplyFlag = true;
     mandatory = true;
     reason = '显式@（配置必须回复）';
+    explainZh = '显式@且配置要求必须回复：强制覆盖为需要回复';
+    decisionSource = 'local_mandatory_mention';
     probability = 1.0;
   }
 
@@ -978,24 +1136,28 @@ export async function shouldReply(msg, options = {}) {
       }
       await updateAttentionStatsAfterDecision({
         groupId: msg.group_id,
-        senderId,
+        senderId: senderIdRaw,
         analyzerProb,
         gateProb,
         fusedProb: probability,
         didReply: shouldReplyFlag
       });
     } catch (e) {
-      logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderId}`, {
+      logger.debug(`updateAttentionStatsAfterDecision 失败: group ${msg.group_id} sender ${senderIdRaw}`, {
         err: String(e)
       });
     }
   }
 
   if (!shouldReplyFlag) {
-    logger.info(`[${groupInfo}] 用户${senderId} 决策为不回复: ${reason}`);
+    const zh = explainZh || (typeof reason === 'string' ? reason : '本轮不回复');
+    logger.info(`[${groupInfo}] 用户${senderIdRaw} 决策为不回复: ${zh} (raw=${reason}, p=${(probability * 100).toFixed(1)}%, src=${decisionSource})`);
     return {
       needReply: false,
       reason,
+      explainZh: zh,
+      decisionSource,
+      decisionTrace,
       mandatory: false,
       probability,
       conversationId,
@@ -1004,16 +1166,24 @@ export async function shouldReply(msg, options = {}) {
   }
 
   const taskId = randomUUID();
-  addActiveTask(senderId, taskId);
+  addActiveTask(senderKey, taskId);
   if (isGroup) {
-    markAttentionWindow(msg, senderId, config);
-    recordReplyForFatigue(msg, senderId, config);
+    markAttentionWindow(msg, senderIdRaw, config);
+    recordReplyForFatigue(msg, senderIdRaw, config);
   }
-  logger.info(`[${groupInfo}] 用户${senderId} 启动对话: ${reason}, task=${taskId}`);
+  if (!explainZh) {
+    explainZh = typeof reason === 'string' ? reason : '进入主对话流程';
+  }
+  logger.info(
+    `[${groupInfo}] 用户${senderIdRaw} 启动对话: ${explainZh} (raw=${reason}, mandatory=${mandatory}, p=${(probability * 100).toFixed(1)}%, src=${decisionSource}, task=${taskId})`
+  );
 
   return {
     needReply: true,
     reason,
+    explainZh,
+    decisionSource,
+    decisionTrace,
     mandatory,
     probability,
     conversationId,

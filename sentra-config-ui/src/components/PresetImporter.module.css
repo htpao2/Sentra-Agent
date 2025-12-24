@@ -653,7 +653,7 @@
 .sidebar,
 .chat,
 .preview {
-  scrollbar-color: rgba(255, 255, 255, 0.20) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
@@ -667,7 +667,7 @@
 .sidebar::-webkit-scrollbar-thumb,
 .chat::-webkit-scrollbar-thumb,
 .preview::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--scrollbar-thumb);
   border-radius: 999px;
   border: 3px solid transparent;
   background-clip: padding-box;
@@ -676,7 +676,7 @@
 .sidebar::-webkit-scrollbar-thumb:hover,
 .chat::-webkit-scrollbar-thumb:hover,
 .preview::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.20);
+  background: var(--scrollbar-thumb-hover);
   border: 3px solid transparent;
   background-clip: padding-box;
 }

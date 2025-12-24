@@ -74,7 +74,10 @@ async function finalizeGroup(groupKey, deps) {
   if (Array.isArray(rest) && rest.length > 0 && typeof completeTask === 'function') {
     for (const item of rest) {
       try {
-        await completeTask(item.senderId, item.taskId);
+        const g = item && item.msg && item.msg.group_id != null ? String(item.msg.group_id) : '';
+        const s = item && item.senderId != null ? String(item.senderId) : '';
+        const convKey = g ? `group_${g}_sender_${s}` : `private_${s}`;
+        await completeTask(convKey, item.taskId);
       } catch (e) {
         logger.debug('completeTask for merged sender failed', { err: String(e) });
       }

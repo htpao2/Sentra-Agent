@@ -430,8 +430,14 @@ export class Agent {
           if (event.type === 'tool_result' || event.type === 'args') {
             hadToolActivity = true;
           }
+          if (event.type === 'completed') {
+            finalResponse = String(event?.evaluation?.summary || '').trim();
+          }
           if (event.type === 'summary') {
-            finalResponse = event.summary;
+            // 兼容：summary 不再作为结束信号；如仍收到，则可作为补充文本
+            if (!finalResponse) {
+              finalResponse = String(event.summary || '').trim();
+            }
           }
         }
 
@@ -440,6 +446,12 @@ export class Agent {
           finalResponse = await this._llmReply(processedMessages);
         } else {
           yield { type: 'mcp', message: 'MCP执行完成' };
+        }
+
+        if (!finalResponse) {
+          // MCP 已完成但未产出可用文本（completed 没有 evaluation.summary，且没有收到 summary）
+          // 保底：回退到 LLM 生成回复，避免空响应
+          finalResponse = await this._llmReply(processedMessages);
         }
       } else {
         // 未启用 MCP，直接用 LLM 生成

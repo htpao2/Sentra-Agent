@@ -10,20 +10,20 @@
       "type": "string",
       "description": "Brief 1-2 sentence summary of the user's request and key information. Identify the main intent and any critical details (file paths, search queries, specific requirements)."
     },
-    "operations": { 
+    "tool_names": {
       "type": "array",
-      "description": "List of operations needed to complete the task, used for tool matching and reranking. Each operation should be a 2-6 word verb phrase (e.g., 'read image file', 'search web', 'generate report', 'send message'). Use English or match the user's language. If need_tools=false, output empty array [].",
+      "description": "Selected tool names (aiName) that should be invoked to complete the task. IMPORTANT: Only choose from the provided tool catalog. Do NOT generate or guess tool parameters in Judge. If need_tools=false, output an empty array []. NOTE: At runtime, this schema will be injected with an enum whitelist derived from the current tool catalog, so you can only pick allowed MCP tools.",
+      "uniqueItems": true,
       "items": {
         "type": "string"
       },
       "examples": [
-        ["read image file", "analyze content"],
-        ["search web", "summarize results"],
-        ["read file", "extract data", "generate report"],
+        ["local__read_file"],
+        ["local__search_web", "local__read_url_content"],
         []
       ]
     }
   },
-  "required": ["need_tools", "operations"],
+  "required": ["need_tools", "tool_names"],
   "additionalProperties": true
 }

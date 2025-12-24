@@ -38,6 +38,31 @@ export function unescapeXml(str) {
     .replace(/&amp;/g, '&');
 }
 
+export function stripTypedValueWrapper(text) {
+  const s = String(text || '').trim();
+  if (!s) return '';
+  const m = s.match(/^<(string|number|boolean|null)>[\s\S]*?<\/(string|number|boolean|null)>$/i);
+  if (!m) return s;
+  const inner = s.replace(/^<[^>]+>/, '').replace(/<\/[^>]+>$/i, '');
+  return String(inner || '').trim();
+}
+
+export function extractXmlAttrValue(tagXml, attrName) {
+  if (!tagXml || typeof tagXml !== 'string') return '';
+  const safe = String(attrName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\s${safe}="([^"]*)"`, 'i');
+  const m = String(tagXml).match(re);
+  return m && m[1] != null ? String(m[1]) : '';
+}
+
+export function extractInnerXmlFromFullTag(fullTagXml, tagName) {
+  if (!fullTagXml || typeof fullTagXml !== 'string') return '';
+  const safe = String(tagName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(fullTagXml)
+    .replace(new RegExp(`^<${safe}[^>]*>`, 'i'), '')
+    .replace(new RegExp(`<\\/${safe}>\\s*$`, 'i'), '');
+}
+
 /**
  * 检查是否为敏感字段
  */

@@ -1,4 +1,4 @@
-import { useState, useCallback, Suspense, lazy, type Dispatch, type SetStateAction, type ReactNode } from 'react';
+import { useState, useCallback, useRef, Suspense, lazy, type Dispatch, type SetStateAction, type ReactNode } from 'react';
 import { MenuBar } from '../components/MenuBar';
 import { MacWindow } from '../components/MacWindow';
 import { EnvEditor } from '../components/EnvEditor';
@@ -12,7 +12,7 @@ const PresetImporter = lazy(() => import('../components/PresetImporter').then(mo
 import { Dock } from '../components/Dock';
 import { Launchpad } from '../components/Launchpad';
 import { TerminalWindow } from '../components/TerminalWindow';
-import { TopTaskbar } from '../components/TopTaskbar';
+import { SideTaskbar } from '../components/SideTaskbar';
 import { ToastContainer, ToastMessage } from '../components/Toast';
 import { Dialog } from '../components/Dialog';
 import { Menu, Item, Submenu, useContextMenu } from 'react-contexify';
@@ -203,8 +203,40 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
 
   // Folder & window state
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
-  const [maximizedWindowIds, setMaximizedWindowIds] = useState<string[]>([]);
   const [activeUtilityId, setActiveUtilityId] = useState<string | null>(null);
+  const [maximizedWindowIds, setMaximizedWindowIds] = useState<string[]>([]);
+  const [utilityZMap, setUtilityZMap] = useState<Record<string, number>>({});
+  const utilityZNextRef = useRef(9850);
+
+  const [sideTabsCollapsed, setSideTabsCollapsed] = useState(() => {
+    try {
+      const saved = localStorage.getItem('sentra_side_tabs_collapsed');
+      if (saved != null) return saved === 'true';
+    } catch {
+      // ignore
+    }
+    return true;
+  });
+  const MENU_BAR_HEIGHT = 30;
+  const SIDE_TABS_COLLAPSED_WIDTH = 44;
+  const SIDE_TABS_EXPANDED_WIDTH = 220;
+  const BOTTOM_SAFE = 0;
+
+  const handleSideTabsCollapsedChange = useCallback((collapsed: boolean) => {
+    setSideTabsCollapsed(collapsed);
+    try {
+      localStorage.setItem('sentra_side_tabs_collapsed', String(collapsed));
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const desktopSafeArea = {
+    top: MENU_BAR_HEIGHT,
+    bottom: BOTTOM_SAFE,
+    left: 0,
+    right: 0,
+  };
 
   const handleWindowMaximize = (id: string, isMaximized: boolean) => {
     setMaximizedWindowIds(prev => {
@@ -216,7 +248,16 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
     });
   };
 
-  const hasMaximizedWindow = maximizedWindowIds.length > 0;
+  const performanceMode = maximizedWindowIds.length > 0;
+
+  const bringUtilityToFront = useCallback((id: string) => {
+    const base = utilityZNextRef.current;
+    const next = base + 1;
+    utilityZNextRef.current = next >= 9940 ? 9850 : next;
+    setUtilityZMap(prev => ({ ...prev, [id]: next }));
+    setActiveUtilityId(id);
+    setActiveWinId(null);
+  }, [setActiveWinId]);
 
   const renderTopTile = useCallback((key: string, label: string, icon: ReactNode, onClick: () => void) => {
     return (
@@ -277,7 +318,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       onActivate: () => {
         setDevCenterOpen(true);
         setDevCenterMinimized(false);
-        setActiveUtilityId('dev-center');
+        bringUtilityToFront('dev-center');
       },
       onClose: () => {
         setDevCenterOpen(false);
@@ -298,7 +339,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       onActivate: () => {
         setDeepWikiOpen(true);
         setDeepWikiMinimized(false);
-        setActiveUtilityId('deepwiki');
+        bringUtilityToFront('deepwiki');
       },
       onClose: () => {
         setDeepWikiOpen(false);
@@ -319,7 +360,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       onActivate: () => {
         setPresetsEditorOpen(true);
         setPresetsEditorMinimized(false);
-        setActiveUtilityId('presets-editor');
+        bringUtilityToFront('presets-editor');
       },
       onClose: () => {
         setPresetsEditorOpen(false);
@@ -340,7 +381,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       onActivate: () => {
         setFileManagerOpen(true);
         setFileManagerMinimized(false);
-        setActiveUtilityId('file-manager');
+        bringUtilityToFront('file-manager');
       },
       onClose: () => {
         setFileManagerOpen(false);
@@ -361,7 +402,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       onActivate: () => {
         redisState.setRedisEditorOpen(true);
         redisState.setMinimized(false);
-        setActiveUtilityId('redis-editor');
+        bringUtilityToFront('redis-editor');
       },
       onClose: () => {
         redisState.setRedisEditorOpen(false);
@@ -382,7 +423,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       onActivate: () => {
         setPresetImporterOpen(true);
         setPresetImporterMinimized(false);
-        setActiveUtilityId('preset-importer');
+        bringUtilityToFront('preset-importer');
       },
       onClose: () => {
         setPresetImporterOpen(false);
@@ -408,6 +449,8 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       onClick: () => {
         recordUsage('app:dev-center');
         setDevCenterOpen(true);
+        setDevCenterMinimized(false);
+        bringUtilityToFront('dev-center');
       }
     },
     {
@@ -417,7 +460,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
         recordUsage('app:presets');
         setPresetsEditorOpen(true);
         setPresetsEditorMinimized(false);
-        setActiveUtilityId('presets-editor');
+        bringUtilityToFront('presets-editor');
       }
     },
     {
@@ -427,7 +470,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
         recordUsage('app:preset-importer');
         setPresetImporterOpen(true);
         setPresetImporterMinimized(false);
-        setActiveUtilityId('preset-importer');
+        bringUtilityToFront('preset-importer');
       }
     },
     {
@@ -437,7 +480,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
         recordUsage('app:filemanager');
         setFileManagerOpen(true);
         setFileManagerMinimized(false);
-        setActiveUtilityId('file-manager');
+        bringUtilityToFront('file-manager');
       }
     },
     {
@@ -447,7 +490,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
         recordUsage('app:redis');
         redisState.setRedisEditorOpen(true);
         redisState.setMinimized(false);
-        setActiveUtilityId('redis-editor');
+        bringUtilityToFront('redis-editor');
       }
     },
     ...allItems.map(item => ({
@@ -475,6 +518,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
         onToggleTheme={toggleTheme}
         showDock={showDock}
         onToggleDock={toggleDock}
+        performanceMode={performanceMode}
         menus={[
           {
             label: '文件',
@@ -509,36 +553,38 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
         onOpenDeepWiki={() => {
           setDeepWikiOpen(true);
           setDeepWikiMinimized(false);
-          setActiveUtilityId('deepwiki');
+          bringUtilityToFront('deepwiki');
         }}
       />
 
-      {/* 顶部任务栏：在有窗口全屏时隐藏，避免遮挡应用右上角按钮 */}
-      {!hasMaximizedWindow && (
-        <TopTaskbar
-          openWindows={openWindows}
-          terminalWindows={terminalWindows}
-          activeWinId={activeWinId}
-          activeTerminalId={activeTerminalId}
-          onActivateWindow={(id) => {
-            bringToFront(id);
-            setActiveUtilityId(null);
-          }}
-          onActivateTerminal={(id) => {
-            bringTerminalToFront(id);
-            setActiveUtilityId(null);
-          }}
-          onCloseWindow={(id) => {
-            handleWindowMaximize(id, false);
-            handleClose(id);
-          }}
-          onCloseTerminal={(id) => {
-            handleWindowMaximize(id, false);
-            handleCloseTerminal(id);
-          }}
-          extraTabs={extraTabs}
-        />
-      )}
+      <SideTaskbar
+        openWindows={openWindows}
+        terminalWindows={terminalWindows}
+        activeWinId={activeWinId}
+        activeTerminalId={activeTerminalId}
+        onActivateWindow={(id) => {
+          bringToFront(id);
+          setActiveUtilityId(null);
+        }}
+        onActivateTerminal={(id) => {
+          bringTerminalToFront(id);
+          setActiveUtilityId(null);
+        }}
+        onCloseWindow={(id) => {
+          handleWindowMaximize(id, false);
+          handleClose(id);
+        }}
+        onCloseTerminal={(id) => {
+          handleWindowMaximize(id, false);
+          handleCloseTerminal(id);
+        }}
+        extraTabs={extraTabs}
+        collapsed={sideTabsCollapsed}
+        onCollapsedChange={handleSideTabsCollapsedChange}
+        topOffset={MENU_BAR_HEIGHT}
+        expandedWidth={SIDE_TABS_EXPANDED_WIDTH}
+        collapsedWidth={SIDE_TABS_COLLAPSED_WIDTH}
+      />
 
       {/* 桌面主区域：壁纸 + Dev Center 主窗口 + 所有 MacWindow / Dock / Launchpad 等 */}
       <div
@@ -572,8 +618,9 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             id="dev-center"
             title="开发中心"
             icon={getIconForType('dev-center', 'module')}
-            zIndex={80}
-            isActive={!activeWinId}
+            safeArea={desktopSafeArea}
+            zIndex={utilityZMap['dev-center'] ?? 2000}
+            isActive={activeUtilityId === 'dev-center'}
             isMinimized={devCenterMinimized}
             initialSize={{ width: 960, height: 620 }}
             onClose={() => {
@@ -587,7 +634,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
               setActiveUtilityId(null);
             }}
             onMaximize={(isMax) => handleWindowMaximize('dev-center', isMax)}
-            onFocus={() => { setActiveUtilityId('dev-center'); }}
+            onFocus={() => { bringUtilityToFront('dev-center'); }}
             onMove={() => { }}
           >
             <DevCenterV2
@@ -603,8 +650,9 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             id="preset-importer"
             title="预设导入"
             icon={getIconForType('preset-importer', 'module')}
-            zIndex={103}
-            isActive={true}
+            safeArea={desktopSafeArea}
+            zIndex={utilityZMap['preset-importer'] ?? 2003}
+            isActive={activeUtilityId === 'preset-importer'}
             isMinimized={presetImporterMinimized}
             initialSize={{ width: 980, height: 620 }}
             onClose={() => {
@@ -618,7 +666,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
               setActiveUtilityId(null);
             }}
             onMaximize={(isMax) => handleWindowMaximize('preset-importer', isMax)}
-            onFocus={() => { setActiveUtilityId('preset-importer'); }}
+            onFocus={() => { bringUtilityToFront('preset-importer'); }}
             onMove={() => { }}
           >
             <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888' }}>加载中...</div>}>
@@ -637,8 +685,9 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             id="deepwiki"
             title="DeepWiki · Sentra Agent"
             icon={<IoBookOutline style={{ color: '#2563eb' }} />}
-            zIndex={90}
-            isActive={!activeWinId}
+            safeArea={desktopSafeArea}
+            zIndex={utilityZMap['deepwiki'] ?? 2001}
+            isActive={activeUtilityId === 'deepwiki'}
             isMinimized={deepWikiMinimized}
             initialSize={{ width: 960, height: 640 }}
             onClose={() => {
@@ -652,7 +701,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
               setActiveUtilityId(null);
             }}
             onMaximize={(isMax) => handleWindowMaximize('deepwiki', isMax)}
-            onFocus={() => { setActiveUtilityId('deepwiki'); }}
+            onFocus={() => { bringUtilityToFront('deepwiki'); }}
             onMove={() => { }}
           >
             <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888' }}>加载 DeepWiki 助手...</div>}>
@@ -668,6 +717,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             id={w.id}
             title={`${getDisplayName(w.file.name)}`}
             icon={getIconForType(w.file.name, w.file.type)}
+            safeArea={desktopSafeArea}
             zIndex={w.z}
             isActive={activeWinId === w.id}
             isMinimized={w.minimized}
@@ -711,8 +761,9 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             id="presets-editor"
             title="预设撰写"
             icon={getIconForType('agent-presets', 'module')}
-            zIndex={100}
-            isActive={true}
+            safeArea={desktopSafeArea}
+            zIndex={utilityZMap['presets-editor'] ?? 2002}
+            isActive={activeUtilityId === 'presets-editor'}
             isMinimized={presetsEditorMinimized}
             initialSize={{ width: 900, height: 600 }}
             onClose={() => {
@@ -726,7 +777,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
               setActiveUtilityId(null);
             }}
             onMaximize={(isMax) => handleWindowMaximize('presets-editor', isMax)}
-            onFocus={() => { setActiveUtilityId('presets-editor'); }}
+            onFocus={() => { bringUtilityToFront('presets-editor'); }}
             onMove={() => { }}
           >
             <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888' }}>加载中...</div>}>
@@ -750,8 +801,9 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             id="file-manager"
             title="文件管理"
             icon={getIconForType('file-manager', 'module')}
-            zIndex={101}
-            isActive={true}
+            safeArea={desktopSafeArea}
+            zIndex={utilityZMap['file-manager'] ?? 2004}
+            isActive={activeUtilityId === 'file-manager'}
             isMinimized={fileManagerMinimized}
             initialSize={{ width: 1000, height: 700 }}
             onClose={() => {
@@ -765,7 +817,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
               setActiveUtilityId(null);
             }}
             onMaximize={(isMax) => handleWindowMaximize('file-manager', isMax)}
-            onFocus={() => { setActiveUtilityId('file-manager'); }}
+            onFocus={() => { bringUtilityToFront('file-manager'); }}
             onMove={() => { }}
           >
             <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888' }}>加载中...</div>}>
@@ -783,8 +835,9 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             id="redis-editor"
             title="Redis 连接编辑器"
             icon={getIconForType('redis-editor', 'module')}
-            zIndex={102}
-            isActive={true}
+            safeArea={desktopSafeArea}
+            zIndex={utilityZMap['redis-editor'] ?? 2005}
+            isActive={activeUtilityId === 'redis-editor'}
             isMinimized={!!redisState.minimized}
             initialSize={{ width: 1000, height: 650 }}
             onClose={() => {
@@ -798,7 +851,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
               setActiveUtilityId(null);
             }}
             onMaximize={(isMax) => handleWindowMaximize('redis-editor', isMax)}
-            onFocus={() => { setActiveUtilityId('redis-editor'); }}
+            onFocus={() => { bringUtilityToFront('redis-editor'); }}
             onMove={() => { }}
           >
             <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888' }}>加载中...</div>}>
@@ -904,6 +957,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
             title={terminal.title}
             icon={<span style={{ fontSize: '16px', display: 'flex', alignItems: 'center' }}>{terminal.title.includes('Bootstrap') ? <IoCubeOutline /> : <IoTerminalOutline />}</span>}
             initialPos={terminal.pos}
+            safeArea={desktopSafeArea}
             zIndex={terminal.z}
             isActive={activeTerminalId === terminal.id}
             isMinimized={terminal.minimized}
@@ -934,7 +988,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
           items={launchpadItems}
         />
 
-        {showDock && <Dock items={uniqueDockItems.slice(0, 16)} />}
+        {showDock && <Dock performanceMode={performanceMode} items={uniqueDockItems.slice(0, 16)} />}
 
         <ToastContainer toasts={toasts} removeToast={removeToast} />
 

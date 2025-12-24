@@ -1,11 +1,19 @@
 import { getEnvBool, getEnvInt } from '../utils/envHotReloader.js';
-import { parseSentraResponse } from '../utils/protocolUtils.js';
+import {
+  parseSentraResponse,
+  buildSentraToolsBlockFromArgsObject,
+  buildSentraToolsBlockFromInvocations
+} from '../utils/protocolUtils.js';
 import { judgeReplySimilarity } from '../utils/replySimilarityJudge.js';
 
 const swallowOnceStateByConversation = new Map();
 
-const SWALLOW_ON_SUPPLEMENT_ENABLED = getEnvBool('SWALLOW_ON_SUPPLEMENT_ENABLED', true);
-const SWALLOW_ON_SUPPLEMENT_MAX_WAIT_MS = getEnvInt('SWALLOW_ON_SUPPLEMENT_MAX_WAIT_MS', 0);
+function getSwallowOnSupplementRuntimeConfig() {
+  return {
+    enabled: getEnvBool('SWALLOW_ON_SUPPLEMENT_ENABLED', true),
+    maxWaitMs: getEnvInt('SWALLOW_ON_SUPPLEMENT_MAX_WAIT_MS', 0)
+  };
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -17,7 +25,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * - 受 SWALLOW_ON_SUPPLEMENT_ENABLED / SWALLOW_ON_SUPPLEMENT_MAX_WAIT_MS 控制，可通过 .env 开关与调参。
  */
 function shouldSwallowReplyForConversation(conversationId, hasSupplementDuringTask) {
-  if (!SWALLOW_ON_SUPPLEMENT_ENABLED || !conversationId || !hasSupplementDuringTask) return false;
+  const cfg = getSwallowOnSupplementRuntimeConfig();
+  if (!cfg.enabled || !conversationId || !hasSupplementDuringTask) return false;
 
   const existing = swallowOnceStateByConversation.get(conversationId);
   if (existing && existing.used) {
@@ -170,6 +179,10 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
   let hasReplied = false; // 引用控制标记：记录是否已经发送过第一次回复（只有第一次引用消息）
   let hasSupplementDuringTask = false; // 本次任务期间是否检测到补充消息，用于单次吞吐控制
   let endedBySchedule = false; // 当遇到 schedule 延迟任务并成功入队时，提前结束本轮事件循环
+  const pendingToolArgsByStepIndex = new Map();
+  const toolTurnInvocationSet = new Set();
+  const toolTurnInvocations = [];
+  const toolTurnResultEvents = [];
 
   // 从主动 root 指令 XML 中提取 <objective> 文本，用于 MCP 的 objective
   const extractObjectiveFromRoot = (xml) => {
@@ -332,6 +345,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
       // 后续主动回合：仅依赖 root 指令和系统上下文，不再重新注入用户问题
       currentUserContent = proactiveRootXml || '';
     } else {
+      // 群聊：pendingContextXml 会包含“其他成员消息(上) + 该用户累计消息(下)”两段；私聊：只包含该用户历史
       const pendingContextXml = historyManager.getPendingMessagesContext(groupId, userid);
       const baseUserMsg = isMergedGroup ? msg : latestMsg;
       const userQuestionXml = buildSentraUserQuestionBlock(baseUserMsg);
@@ -557,7 +571,8 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
     // - 若在 SWALLOW_ON_SUPPLEMENT_MAX_WAIT_MS 时间内检测到新消息，则标记 hasSupplementDuringTask=true，触发单次吞吐逻辑；
     // - 若未检测到新消息，则直接发送当前结果，避免无限等待。
     const maybeWaitForSupplementBeforeSend = async () => {
-      if (!SWALLOW_ON_SUPPLEMENT_ENABLED || SWALLOW_ON_SUPPLEMENT_MAX_WAIT_MS <= 0) {
+      const cfg = getSwallowOnSupplementRuntimeConfig();
+      if (!cfg.enabled || cfg.maxWaitMs <= 0) {
         return;
       }
 
@@ -573,7 +588,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
         return;
       }
 
-      const maxWait = SWALLOW_ON_SUPPLEMENT_MAX_WAIT_MS;
+      const maxWait = cfg.maxWaitMs;
       const pollInterval = Math.min(500, Math.max(100, Math.floor(maxWait / 5)));
       const startWaitAt = Date.now();
       ctx.logger.debug(
@@ -667,7 +682,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
             judgeBaseContent = '';
             currentUserContent = proactiveRootXml || '';
           } else {
-            // 获取历史上下文（仅供参考，只包含该 sender 的历史消息）
+            // 获取历史上下文（仅供参考：群聊包含“其他成员(上)+该用户累计(下)”，私聊仅该用户历史）
             const contextXml = historyManager.getPendingMessagesContext(groupId, userid);
             // 构建当前需要回复的消息（主要内容）- 使用最新的消息
             const userQuestion = buildSentraUserQuestionBlock(latestMsgJudge);
@@ -685,6 +700,8 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
           }
 
           // Judge 判定无需工具：为当前对话显式注入占位工具与结果，便于后续模型判断
+          let placeholderToolsXml = '';
+          let placeholderResultXml = '';
           try {
             const rawReason =
               (typeof latestMsgJudge?.objective === 'string' &&
@@ -717,11 +734,29 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
               }
             };
             const resultXML = buildSentraResultBlock(evNoTool);
-            // 将占位工具+结果置于最前，保持与工具路径一致的上下文结构
-            currentUserContent = toolsXML + '\n\n' + resultXML + '\n\n' + currentUserContent;
+            placeholderToolsXml = toolsXML;
+            placeholderResultXml = resultXML;
           } catch {}
 
-          conversations.push({ role: 'user', content: currentUserContent });
+          try {
+            if (pairId) {
+              await historyManager.appendToConversationPairMessages(groupId, pairId, 'user', currentUserContent);
+              if (placeholderToolsXml) {
+                await historyManager.appendToConversationPairMessages(groupId, pairId, 'assistant', placeholderToolsXml);
+              }
+              if (placeholderResultXml) {
+                await historyManager.appendToConversationPairMessages(groupId, pairId, 'user', placeholderResultXml);
+              }
+            }
+          } catch {}
+
+          if (placeholderToolsXml) {
+            conversations.push({ role: 'assistant', content: placeholderToolsXml });
+          }
+          const judgeUserForModel = placeholderResultXml
+            ? (placeholderResultXml + '\n\n' + currentUserContent)
+            : currentUserContent;
+          conversations.push({ role: 'user', content: judgeUserForModel });
           // logger.debug('Conversations', conversations);
           //console.log(JSON.stringify(conversations, null, 2))
           const result = await chatWithRetry(conversations, MAIN_AI_MODEL, groupId);
@@ -744,6 +779,8 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
           const noReply = !!result.noReply;
           logger.success(`AI响应成功Judge: ${groupId} 重试${result.retries}次`);
 
+          const rawResponseForPromise = result.rawResponse || response;
+
           const rewrittenJudge = await maybeRewriteSentraResponse(response);
           if (rewrittenJudge && typeof rewrittenJudge === 'string') {
             response = rewrittenJudge;
@@ -751,11 +788,35 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
 
           let parsedJudgeForPromise = null;
           try {
-            parsedJudgeForPromise = parseSentraResponse(response);
+            parsedJudgeForPromise = parseSentraResponse(rawResponseForPromise);
           } catch (e) {
             logger.debug('PromiseMeta: parseSentraResponse 失败，跳过承诺检测', {
               err: String(e)
             });
+          }
+
+          // 若本轮为“无需工具”但模型产生了承诺（后续要补单执行），则将承诺以 sentra-tools 的形式落盘
+          // 这是一条“内部工具标记”，不会进入 MCP 上下文（convertHistoryToMCPFormat 会跳过），但会用于延迟任务入队。
+          if (
+            parsedJudgeForPromise &&
+            parsedJudgeForPromise.promise &&
+            parsedJudgeForPromise.promise.hasPromise === true &&
+            parsedJudgeForPromise.promise.objective
+          ) {
+            try {
+              const promiseObjectiveText = String(parsedJudgeForPromise.promise.objective || '').trim();
+              if (promiseObjectiveText) {
+                const promiseToolsXml = buildSentraToolsBlockFromArgsObject('promise', {
+                  reason: promiseObjectiveText
+                });
+                await historyManager.appendToConversationPairMessages(
+                  groupId,
+                  pairId,
+                  'assistant',
+                  promiseToolsXml
+                );
+              }
+            } catch {}
           }
 
           await historyManager.appendToAssistantMessage(groupId, response, pairId);
@@ -843,7 +904,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
           const saved = await historyManager.finishConversationPair(
             groupId,
             pairId,
-            currentUserContent
+            null
           );
 
           if (saved) {
@@ -874,8 +935,32 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
         logger.info('执行计划', ev.plan.steps);
       }
 
-      // 忽略 args/args_group 事件（只对 tool_result/_group + 进度/日程确认 做回复）
-      if (ev.type === 'args' || ev.type === 'args_group') {
+      if (ev.type === 'args') {
+        try {
+          const idx = typeof ev.plannedStepIndex === 'number' ? ev.plannedStepIndex : ev.stepIndex;
+          if (typeof idx === 'number') {
+            pendingToolArgsByStepIndex.set(idx, {
+              aiName: ev.aiName,
+              args: ev.args && typeof ev.args === 'object' ? ev.args : {}
+            });
+          }
+        } catch {}
+        continue;
+      }
+
+      if (ev.type === 'args_group') {
+        try {
+          const items = Array.isArray(ev.items) ? ev.items : [];
+          for (const item of items) {
+            if (!item || typeof item !== 'object') continue;
+            const idx = typeof item.plannedStepIndex === 'number' ? item.plannedStepIndex : item.stepIndex;
+            if (typeof idx !== 'number') continue;
+            pendingToolArgsByStepIndex.set(idx, {
+              aiName: item.aiName,
+              args: item.args && typeof item.args === 'object' ? item.args : {}
+            });
+          }
+        } catch {}
         continue;
       }
 
@@ -1030,6 +1115,11 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
             progressContent = JSON.stringify(progressEv);
           }
 
+          let progressToolsXml = '';
+          try {
+            progressToolsXml = buildSentraToolsBlockFromArgsObject('schedule_progress', progressEv.args || {});
+          } catch {}
+
           const fullUserContent = progressBaseContent
             ? progressContent + '\n\n' + progressBaseContent
             : progressContent;
@@ -1039,8 +1129,17 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
           // 使用与普通 tool_result 相同的主逻辑：
           // 将 schedule_progress 结果 + 用户上下文 作为一条新的 user 消息送入 MAIN_AI_MODEL，
           // 由模型生成最终要发送给用户的自然语言回复。
+          try {
+            await historyManager.appendToConversationPairMessages(groupId, progressPairId, 'user', progressBaseContent || '');
+            if (progressToolsXml) {
+              await historyManager.appendToConversationPairMessages(groupId, progressPairId, 'assistant', progressToolsXml);
+            }
+            await historyManager.appendToConversationPairMessages(groupId, progressPairId, 'user', progressContent || '');
+          } catch {}
+
           const convForSchedule = [
             ...conversations,
+            ...(progressToolsXml ? [{ role: 'assistant', content: progressToolsXml }] : []),
             { role: 'user', content: fullUserContent }
           ];
 
@@ -1077,7 +1176,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
           const savedProgress = await historyManager.finishConversationPair(
             groupId,
             progressPairId,
-            fullUserContent
+            null
           );
           if (!savedProgress) {
             logger.warn(
@@ -1149,7 +1248,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
             // 后续主动回合：仅基于 root 指令和工具结果做总结，不重新注入用户问题
             currentUserContent = proactiveRootXml || '';
           } else {
-            // 获取该 sender 的历史上下文
+            // 获取历史上下文（仅供参考：群聊包含“其他成员(上)+该用户累计(下)”，私聊仅该用户历史）
             const contextXml = historyManager.getPendingMessagesContext(groupId, userid);
             const userQuestion = buildSentraUserQuestionBlock(latestMsgTool);
 
@@ -1166,117 +1265,67 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
           }
         }
 
-        // 构建结果观测块
-        let content = '';
+        // 新策略：工具结果阶段只做收集，不立即触发主模型回复；
+        // 在 completed 阶段统一生成一次最终回复，保证“工具轮=4条消息”。
         try {
-          content = buildSentraResultBlock(ev);
-        } catch (e) {
-          logger.warn('构建 <sentra-result> 失败，回退 JSON 注入');
-          content = JSON.stringify(ev);
-        }
+          if (ev.type === 'tool_result') {
+            const idx = typeof ev.plannedStepIndex === 'number'
+              ? ev.plannedStepIndex
+              : (typeof ev.stepIndex === 'number' ? ev.stepIndex : null);
+            const cached = idx != null ? pendingToolArgsByStepIndex.get(idx) : null;
+            const toolName = cached?.aiName || ev.aiName;
+            const toolArgs = cached?.args || (ev.args && typeof ev.args === 'object' ? ev.args : {});
 
-        const fullContext = content + '\n\n' + currentUserContent;
-
-        // 更新 currentUserContent 为包含工具结果的完整上下文，确保保存到历史记录时不丢失工具结果
-        currentUserContent = fullContext;
-
-        conversations.push({ role: 'user', content: fullContext });
-        //console.log(JSON.stringify(conversations, null, 2))
-        const result = await chatWithRetry(conversations, MAIN_AI_MODEL, groupId);
-
-        if (!result.success) {
-          logger.error(
-            `AI响应失败ToolResult: ${groupId} 原因 ${result.reason}, 重试${result.retries}次`
-          );
-          if (pairId) {
-            logger.debug(
-              `取消pairId-ToolResult失败: ${groupId} pairId ${pairId.substring(0, 8)}`
-            );
-            await historyManager.cancelConversationPairById(groupId, pairId);
-            pairId = null;
-          }
-          return;
-        }
-
-        let response = result.response;
-        const noReply = !!result.noReply;
-        logger.success(`AI响应成功ToolResult: ${groupId} 重试${result.retries}次`);
-
-        const rewrittenTool = await maybeRewriteSentraResponse(response);
-        if (rewrittenTool && typeof rewrittenTool === 'string') {
-          response = rewrittenTool;
-        }
-
-        await historyManager.appendToAssistantMessage(groupId, response, pairId);
-
-        const latestSenderMessages = getAllSenderMessages();
-        if (latestSenderMessages.length > initialMessageCount) {
-          hasSupplementDuringTask = true;
-          logger.info(
-            `动态感知ToolResult: ${groupId} 检测到补充消息 ${initialMessageCount} -> ${latestSenderMessages.length}，整合到上下文`
-          );
-        }
-
-        if (isCancelled) {
-          logger.info(`任务已取消: ${groupId} 跳过发送ToolResult阶段`);
-          return;
-        }
-
-        if (!noReply) {
-          await maybeWaitForSupplementBeforeSend();
-
-          const latestSenderMessagesForSend = getAllSenderMessages();
-          const finalMsgTool =
-            latestSenderMessagesForSend[latestSenderMessagesForSend.length - 1] || msg;
-          const allowReplyTool = true;
-
-          const swallow = shouldSwallowReplyForConversation(
-            conversationId,
-            hasSupplementDuringTask
-          );
-          if (swallow) {
-            logger.info(
-              `补充消息吞吐策略: ${groupId} 本轮ToolResult阶段检测到补充消息，跳过外发，仅保留内部对话记录 (conversation=${conversationId})`
-            );
-          } else {
-            logger.debug(
-              `引用消息ToolResult: ${groupId} 消息${finalMsgTool.message_id}, sender ${finalMsgTool.sender_id}, 队列${latestSenderMessagesForSend.length}条, 允许引用 ${allowReplyTool}`
-            );
-            await smartSend(
-              finalMsgTool,
-              response,
-              sendAndWaitWithConv,
-              allowReplyTool,
-              { hasTool: true }
-            );
-            hasReplied = true;
-            if (ctx.desireManager) {
-              try {
-                await ctx.desireManager.onBotMessage(finalMsgTool, {
-                  proactive: !!msg?._proactive
-                });
-              } catch (e) {
-                logger.debug('DesireManager onBotMessage(ToolResult) failed', {
-                  err: String(e)
-                });
+            if (toolName) {
+              const key = `${toolName}|${JSON.stringify(toolArgs)}`;
+              if (!toolTurnInvocationSet.has(key)) {
+                toolTurnInvocationSet.add(key);
+                toolTurnInvocations.push({ aiName: toolName, args: toolArgs });
               }
             }
-            markReplySentForConversation(conversationId);
+            if (idx != null) {
+              pendingToolArgsByStepIndex.delete(idx);
+            }
+            toolTurnResultEvents.push(ev);
+          } else {
+            const events = Array.isArray(ev.events) ? ev.events : [];
+            for (const item of events) {
+              if (!item || typeof item !== 'object') continue;
+              const idx = typeof item.plannedStepIndex === 'number'
+                ? item.plannedStepIndex
+                : (typeof item.stepIndex === 'number' ? item.stepIndex : null);
+              const cached = idx != null ? pendingToolArgsByStepIndex.get(idx) : null;
+              const toolName = cached?.aiName || item.aiName;
+              const toolArgs = cached?.args || (item.args && typeof item.args === 'object' ? item.args : {});
+              if (toolName) {
+                const key = `${toolName}|${JSON.stringify(toolArgs)}`;
+                if (!toolTurnInvocationSet.has(key)) {
+                  toolTurnInvocationSet.add(key);
+                  toolTurnInvocations.push({ aiName: toolName, args: toolArgs });
+                }
+              }
+              if (idx != null) {
+                pendingToolArgsByStepIndex.delete(idx);
+              }
+              toolTurnResultEvents.push(item);
+            }
           }
-        } else {
-          logger.info(`ToolResult 阶段: 模型选择保持沉默 (noReply=true)，跳过发送`);
-        }
+        } catch {}
       }
 
-      if (ev.type === 'summary') {
-        logger.info('对话总结', ev.summary);
+      if (ev.type === 'completed') {
+        logger.info('任务完成(completed)', {
+          runId: ev.runId || null,
+          attempted: ev?.exec?.attempted,
+          succeeded: ev?.exec?.succeeded
+        });
 
         if (ev.runId) {
           untrackRunForSender(userid, groupId, ev.runId);
         }
 
         if (isCancelled) {
-          logger.info(`任务已取消: ${groupId} 跳过保存对话对Summary阶段`);
+          logger.info(`任务已取消: ${groupId} 跳过保存对话对(completed阶段)`);
           if (pairId) {
             logger.debug(`清理pairId: ${groupId} pairId ${pairId?.substring(0, 8)}`);
             await historyManager.cancelConversationPairById(groupId, pairId);
@@ -1286,12 +1335,96 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
         }
 
         if (pairId) {
+          let toolResponse = null;
+          let toolNoReply = false;
+          try {
+            if (toolTurnResultEvents.length > 0) {
+              const toolsXml = toolTurnInvocations.length > 0
+                ? buildSentraToolsBlockFromInvocations(toolTurnInvocations)
+                : '';
+              const resultGroupEv = {
+                type: 'tool_result_group',
+                groupId: 'tool_turn',
+                groupSize: toolTurnResultEvents.length,
+                orderIndices: toolTurnResultEvents.map((x, i) => (typeof x?.plannedStepIndex === 'number' ? x.plannedStepIndex : i)),
+                events: toolTurnResultEvents
+              };
+              const resultXml = buildSentraResultBlock(resultGroupEv);
+
+              try {
+                await historyManager.appendToConversationPairMessages(groupId, pairId, 'user', currentUserContent);
+                if (toolsXml) {
+                  await historyManager.appendToConversationPairMessages(groupId, pairId, 'assistant', toolsXml);
+                }
+                await historyManager.appendToConversationPairMessages(groupId, pairId, 'user', resultXml);
+              } catch {}
+
+              const fullUserContent = resultXml + '\n\n' + currentUserContent;
+              const convForFinal = [
+                ...conversations,
+                ...(toolsXml ? [{ role: 'assistant', content: toolsXml }] : []),
+                { role: 'user', content: fullUserContent }
+              ];
+
+              const result = await chatWithRetry(convForFinal, MAIN_AI_MODEL, groupId);
+              if (result && result.success) {
+                toolResponse = result.response;
+                toolNoReply = !!result.noReply;
+              } else {
+                logger.error(
+                  `AI响应失败ToolFinal: ${groupId} 原因 ${result?.reason || 'unknown'}, 重试${result?.retries || 0}次`
+                );
+              }
+            }
+          } catch (e) {
+            logger.warn('ToolFinal: 生成最终回复异常', { err: String(e) });
+          }
+
+          if (toolResponse) {
+            const rewritten = await maybeRewriteSentraResponse(toolResponse);
+            if (rewritten && typeof rewritten === 'string') {
+              toolResponse = rewritten;
+            }
+
+            await historyManager.appendToAssistantMessage(groupId, toolResponse, pairId);
+
+            if (!toolNoReply) {
+              await maybeWaitForSupplementBeforeSend();
+
+              const latestSenderMessagesForSend = getAllSenderMessages();
+              const finalMsgTool =
+                latestSenderMessagesForSend[latestSenderMessagesForSend.length - 1] || msg;
+              const swallow = shouldSwallowReplyForConversation(
+                conversationId,
+                hasSupplementDuringTask
+              );
+              if (!swallow) {
+                await smartSend(
+                  finalMsgTool,
+                  toolResponse,
+                  sendAndWaitWithConv,
+                  true,
+                  { hasTool: true }
+                );
+                hasReplied = true;
+                if (ctx.desireManager) {
+                  try {
+                    await ctx.desireManager.onBotMessage(finalMsgTool, {
+                      proactive: !!msg?._proactive
+                    });
+                  } catch (e) {
+                    logger.debug('DesireManager onBotMessage(ToolFinal) failed', {
+                      err: String(e)
+                    });
+                  }
+                }
+                markReplySentForConversation(conversationId);
+              }
+            }
+          }
+
           logger.debug(`保存对话对: ${groupId} pairId ${pairId.substring(0, 8)}`);
-          const saved = await historyManager.finishConversationPair(
-            groupId,
-            pairId,
-            currentUserContent
-          );
+          const saved = await historyManager.finishConversationPair(groupId, pairId, null);
           if (!saved) {
             logger.warn(`保存失败: ${groupId} pairId ${pairId.substring(0, 8)} 状态不一致`);
           }
@@ -1312,6 +1445,10 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
         }
         break;
       }
+
+      if (ev.type === 'summary') {
+        logger.info('对话总结(summary，非结束信号)', ev.summary);
+      }
     }
   } catch (error) {
     logger.error('处理消息异常: ', error);
@@ -1327,28 +1464,28 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
     // 任务完成，释放并发槽位并尝试拉起队列中的下一条
     // completeTask 会自动调用 replyPolicy.js 中的 removeActiveTask
     if (taskId && userid) {
-      const next = await completeTask(userid, taskId);
+      const next = await completeTask(conversationId, taskId);
       if (next && next.msg) {
-        const nextUserId = String(next.msg?.sender_id ?? '');
+        const nextConversationId = String(next.conversationId ?? '');
         // 队列中的任务作为新的聚合会话起点
-        startBundleForQueuedMessage(nextUserId, next.msg);
-        const bundledNext = await collectBundleForSender(nextUserId);
+        startBundleForQueuedMessage(nextConversationId, next.msg);
+        const bundledNext = await collectBundleForSender(nextConversationId);
         if (bundledNext) {
           await handleOneMessageCore(ctx, bundledNext, next.id);
         }
       }
 
       // 检查是否有待处理的消息（延迟聚合）
-      const mergedMsg = drainPendingMessagesForSender(userid);
+      const mergedMsg = drainPendingMessagesForSender(conversationId);
       if (mergedMsg) {
         const replyDecision = await shouldReply(mergedMsg, { source: 'pending_merged' });
         if (replyDecision.needReply) {
-          logger.info(
-            `延迟聚合回复决策: ${replyDecision.reason} (taskId=${replyDecision.taskId})`
-          );
+          logger.debug(`延迟聚合进入回复流程: taskId=${replyDecision.taskId || 'null'}`);
           await handleOneMessageCore(ctx, mergedMsg, replyDecision.taskId);
         } else {
-          logger.debug(`延迟聚合跳过: ${replyDecision.reason}`);
+          logger.debug(
+            '延迟聚合跳过: 根据智能策略，本次不回复（已完成延迟聚合）'
+          );
         }
       }
     }

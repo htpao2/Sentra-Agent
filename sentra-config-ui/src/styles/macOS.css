@@ -21,6 +21,26 @@
     --mac-app-border: rgba(0, 0, 0, 0.06);
     --mac-app-radius: 18px;
     --mac-divider-color: rgba(60, 60, 67, 0.18);
+
+    --scrollbar-thumb: rgba(15, 23, 42, 0.18);
+    --scrollbar-thumb-hover: rgba(15, 23, 42, 0.28);
+    --scrollbar-thumb-active: rgba(15, 23, 42, 0.36);
+
+    --side-handle-bg: rgba(255, 255, 255, 0.78);
+    --side-handle-border: rgba(0, 0, 0, 0.10);
+    --side-handle-fg: rgba(15, 23, 42, 0.85);
+    --side-handle-accent: rgba(15, 23, 42, 0.18);
+}
+
+:root[data-theme='dark'] {
+    --scrollbar-thumb: rgba(148, 163, 184, 0.30);
+    --scrollbar-thumb-hover: rgba(148, 163, 184, 0.46);
+    --scrollbar-thumb-active: rgba(148, 163, 184, 0.60);
+
+    --side-handle-bg: rgba(2, 6, 23, 0.62);
+    --side-handle-border: rgba(148, 163, 184, 0.18);
+    --side-handle-fg: rgba(226, 232, 240, 0.88);
+    --side-handle-accent: rgba(148, 163, 184, 0.30);
 }
 
 body {
@@ -28,11 +48,17 @@ body {
     padding: 0;
     font-family: var(--system-font);
     overflow: hidden;
+
     /* 桌面模式下使用柔和渐变背景，更接近原生 macOS 桌面 */
     background: var(--mac-app-bg);
     color: #111827;
     user-select: none;
     -webkit-user-select: none;
+}
+
+body, body * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 /* Scrollbar styling */
@@ -46,12 +72,31 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 4px;
+    background: var(--scrollbar-thumb);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-thumb:active {
+    background: var(--scrollbar-thumb-active);
+}
+
+.monaco-editor .scrollbar .slider {
+    background: var(--scrollbar-thumb) !important;
+    border-radius: 8px !important;
+}
+
+.monaco-editor .scrollbar .slider:hover {
+    background: var(--scrollbar-thumb-hover) !important;
+}
+
+.monaco-editor .scrollbar .slider:active {
+    background: var(--scrollbar-thumb-active) !important;
 }
 
 /* Animations */

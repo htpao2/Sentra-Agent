@@ -2,8 +2,29 @@ import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 
 export function createWebSocketClient(url, options = {}) {
-  const reconnectIntervalMs = parseInt(options.reconnectIntervalMs ?? 10000);
-  const maxReconnectAttempts = parseInt(options.maxReconnectAttempts ?? 60);
+  function getReconnectIntervalMs() {
+    try {
+      const raw = typeof options.getReconnectIntervalMs === 'function'
+        ? options.getReconnectIntervalMs()
+        : options.reconnectIntervalMs;
+      const v = parseInt(raw ?? 10000);
+      return Number.isFinite(v) && v > 0 ? v : 10000;
+    } catch {
+      return 10000;
+    }
+  }
+
+  function getMaxReconnectAttempts() {
+    try {
+      const raw = typeof options.getMaxReconnectAttempts === 'function'
+        ? options.getMaxReconnectAttempts()
+        : options.maxReconnectAttempts;
+      const v = parseInt(raw ?? 60);
+      return Number.isFinite(v) && v >= 0 ? v : 60;
+    } catch {
+      return 60;
+    }
+  }
 
   const emitter = new EventEmitter();
   let ws = null;
@@ -31,18 +52,22 @@ export function createWebSocketClient(url, options = {}) {
       ws.on('close', () => {
         emitter.emit('close');
         if (closedManually) return;
+        const maxReconnectAttempts = getMaxReconnectAttempts();
         if (attempts >= maxReconnectAttempts) {
           emitter.emit('reconnect_exhausted');
           return;
         }
         attempts += 1;
+        const reconnectIntervalMs = getReconnectIntervalMs();
         setTimeout(connect, reconnectIntervalMs);
       });
     } catch (e) {
       emitter.emit('error', e);
       if (!closedManually) {
+        const maxReconnectAttempts = getMaxReconnectAttempts();
         if (attempts < maxReconnectAttempts) {
           attempts += 1;
+          const reconnectIntervalMs = getReconnectIntervalMs();
           setTimeout(connect, reconnectIntervalMs);
         } else {
           emitter.emit('reconnect_exhausted');

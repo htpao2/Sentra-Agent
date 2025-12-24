@@ -10,6 +10,7 @@ import { parseTextSegments, buildSegmentMessage } from './messageUtils.js';
 import { getReplyableMessageId, updateConversationHistory } from './conversationUtils.js';
 import { createLogger } from './logger.js';
 import { replySendQueue } from './replySendQueue.js';
+import { randomUUID } from 'crypto';
 
 const logger = createLogger('SendUtils');
 
@@ -361,27 +362,12 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
  */
 export async function smartSend(msg, response, sendAndWaitResult, allowReply = true, options = {}) {
   const groupId = msg?.group_id ? `G:${msg.group_id}` : `U:${msg.sender_id}`;
-  const taskId = `${groupId}-${Date.now()}`;
+  const taskId = `${groupId}-${Date.now()}-${randomUUID().slice(0, 8)}`;
   
   // 预解析一次用于去重的文本和资源信息
   let textForDedup = '';
   let resourceKeys = [];
   let emojiKey = '';
-  // 记录本轮用户问题文本，用于 question-aware 最近发送去重
-  let questionForDedup = '';
-  try {
-    const baseText =
-      (msg && typeof msg.text === 'string' && msg.text.trim()) ||
-      (msg && typeof msg.summary === 'string' && msg.summary.trim()) ||
-      (msg &&
-        msg.raw &&
-        ((typeof msg.raw.text === 'string' && msg.raw.text.trim()) ||
-          (typeof msg.raw.summary === 'string' && msg.raw.summary.trim()))) ||
-      '';
-    if (baseText) {
-      questionForDedup = baseText;
-    }
-  } catch {}
   try {
     if (typeof response === 'string') {
       const parsed = parseSentraResponse(response);
@@ -427,7 +413,8 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
     response: typeof response === 'string' ? response : String(response ?? ''),
     textForDedup,
     resourceKeys: emojiKey ? [...resourceKeys, emojiKey] : resourceKeys,
-    questionForDedup
+    sourceMessageId: msg?.message_id != null ? String(msg.message_id) : null,
+    allowReply: !!allowReply
   };
 
   if (typeof options.hasTool === 'boolean') {
@@ -435,6 +422,6 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
   }
 
   return replySendQueue.enqueue(async () => {
-    return await _smartSendInternal(msg, response, sendAndWaitResult, allowReply);
+    return await _smartSendInternal(msg, meta.response, sendAndWaitResult, !!meta.allowReply);
   }, taskId, meta);
 }

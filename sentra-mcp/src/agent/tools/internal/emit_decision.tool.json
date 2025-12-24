@@ -2,7 +2,7 @@
   "type": "function",
   "function": {
     "name": "emit_decision",
-    "description": "判断是否需要调用外部工具来完成目标。返回结构化的判断结果：need_tools（布尔值）、summary（需求总结）、operations（操作列表数组）。",
+    "description": "Judge 阶段：判断是否需要调用外部工具来完成目标，并选择需要调用的工具名称列表（tool_names）。注意：Judge 只做工具选择，不要生成任何工具参数。",
     "parameters": {
       "$ref": "./emit_decision.schema.json"
     }

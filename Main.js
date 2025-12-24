@@ -1,4 +1,4 @@
-import { loadEnv, initEnvWatcher, getEnv, getEnvInt, getEnvBool } from './utils/envHotReloader.js';
+import { loadEnv, initEnvWatcher, getEnv, getEnvInt, getEnvBool, onEnvReload } from './utils/envHotReloader.js';
 import SentraMcpSDK from 'sentra-mcp';
 import SentraPromptsSDK from 'sentra-prompts';
 import { Agent } from "./agent.js";
@@ -54,13 +54,13 @@ await sdk.init();
 await cleanupExpiredCache();
 const WS_HOST = getEnv('WS_HOST', 'localhost');
 const WS_PORT = getEnv('WS_PORT', '6702');
-const WS_RECONNECT_INTERVAL_MS = getEnvInt('WS_RECONNECT_INTERVAL_MS', 10000);
-const WS_MAX_RECONNECT_ATTEMPTS = getEnvInt('WS_MAX_RECONNECT_ATTEMPTS', 60);
 const WS_URL = `ws://${WS_HOST}:${WS_PORT}`;
 
 const socket = createWebSocketClient(WS_URL, {
-  reconnectIntervalMs: WS_RECONNECT_INTERVAL_MS,
-  maxReconnectAttempts: WS_MAX_RECONNECT_ATTEMPTS
+  reconnectIntervalMs: getEnvInt('WS_RECONNECT_INTERVAL_MS', 10000),
+  maxReconnectAttempts: getEnvInt('WS_MAX_RECONNECT_ATTEMPTS', 60),
+  getReconnectIntervalMs: () => getEnvInt('WS_RECONNECT_INTERVAL_MS', 10000),
+  getMaxReconnectAttempts: () => getEnvInt('WS_MAX_RECONNECT_ATTEMPTS', 60)
 });
 const send = (obj) => socket.send(obj);
 
@@ -259,10 +259,45 @@ function initAgentPresetWatcher() {
 
 initAgentPresetWatcher();
 
-const SENTRA_EMO_TIMEOUT = getEnvInt('SENTRA_EMO_TIMEOUT', 60000);
-const emo = new SentraEmo({ 
-  baseURL: getEnv('SENTRA_EMO_URL', undefined) || undefined, 
-  timeout: SENTRA_EMO_TIMEOUT 
+function getEmoRuntimeConfig() {
+  const timeoutRaw = getEnvInt('SENTRA_EMO_TIMEOUT', 60000);
+  const timeout = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 60000;
+  const baseRaw = getEnv('SENTRA_EMO_URL', '') || '';
+  const baseURL = typeof baseRaw === 'string' && baseRaw.trim() ? baseRaw.trim() : null;
+  return { timeout, baseURL };
+}
+
+function getDefaultEmoBaseURL() {
+  try {
+    const tmp = new SentraEmo();
+    return typeof tmp.baseURL === 'string' && tmp.baseURL.trim() ? tmp.baseURL.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+const emoCfg = getEmoRuntimeConfig();
+const emo = new SentraEmo({
+  baseURL: emoCfg.baseURL || undefined,
+  timeout: emoCfg.timeout
+});
+
+onEnvReload(() => {
+  try {
+    const next = getEmoRuntimeConfig();
+    if (next.timeout && next.timeout !== emo.timeout) {
+      emo.timeout = next.timeout;
+      logger.info(`SentraEmo 配置热更新: timeout=${emo.timeout}ms`);
+    }
+
+    const nextBase = next.baseURL || getDefaultEmoBaseURL();
+    if (nextBase && nextBase !== emo.baseURL) {
+      emo.baseURL = nextBase;
+      logger.info('SentraEmo 配置热更新: baseURL 已更新', { baseURL: emo.baseURL });
+    }
+  } catch (e) {
+    logger.warn('SentraEmo 配置热更新失败（已忽略）', { err: String(e) });
+  }
 });
 
 // 群聊历史记录管理器
@@ -271,8 +306,7 @@ const historyManager = new GroupHistoryManager({
 });
 
 // 用户画像管理器
-const ENABLE_USER_PERSONA = getEnvBool('ENABLE_USER_PERSONA', true);
-const personaManager = ENABLE_USER_PERSONA ? new UserPersonaManager({
+const personaManager = new UserPersonaManager({
   agent: agent,
   dataDir: getEnv('PERSONA_DATA_DIR', './userData'),
   updateIntervalMs: getEnvInt('PERSONA_UPDATE_INTERVAL_MS', 600000),
@@ -285,36 +319,29 @@ const personaManager = ENABLE_USER_PERSONA ? new UserPersonaManager({
   maxInterests: getEnvInt('PERSONA_MAX_INTERESTS', 8),
   maxPatterns: getEnvInt('PERSONA_MAX_PATTERNS', 6),
   maxInsights: getEnvInt('PERSONA_MAX_INSIGHTS', 6)
-}) : null;
+});
 
-if (!ENABLE_USER_PERSONA) {
+if (!personaManager.enabled) {
   logger.info('用户画像功能已禁用（ENABLE_USER_PERSONA=false）');
 }
 
 // 主动回复调度器（基于时间衰减概率 + 每小时上限）
-const DESIRE_ENABLED = getEnvBool('DESIRE_ENABLED', true);
-const DESIRE_GROUP_TOPIC_STALE_SEC = getEnvInt('DESIRE_GROUP_TOPIC_STALE_SEC', 180);
-const desireManager = DESIRE_ENABLED
-  ? new DesireManager({
-      prefix: getEnv('REDIS_DESIRE_PREFIX', 'sentra:desire:'),
-      groupSilentSec: getEnvInt('DESIRE_GROUP_SILENT_SEC', 180),
-      privateSilentSec: getEnvInt('DESIRE_PRIVATE_SILENT_SEC', 120),
-      maxProactivePerHour: getEnvInt('DESIRE_MAX_PROACTIVE_PER_HOUR', 2),
-      msgWindowSec: getEnvInt('DESIRE_MSG_WINDOW_SEC', 180),
-      groupMaxMsgPerWindow: getEnvInt('DESIRE_GROUP_MAX_MSG_PER_WINDOW', 12),
-      privateMaxMsgPerWindow: getEnvInt('DESIRE_PRIVATE_MAX_MSG_PER_WINDOW', 12)
-    })
-  : null;
+const desireManager = new DesireManager();
 
-if (!DESIRE_ENABLED || !desireManager) {
+if (!desireManager.enabled) {
   logger.info('主动欲望/主动回复功能已禁用（DESIRE_ENABLED=false）');
 }
 
-const MAIN_AI_MODEL = getEnv('MAIN_AI_MODEL', 'gpt-3.5-turbo');
-const MCP_MAX_CONTEXT_PAIRS = getEnvInt('MCP_MAX_CONTEXT_PAIRS', getEnvInt('MAX_CONVERSATION_PAIRS', 20));
-const CONTEXT_MEMORY_ENABLED = getEnvBool('CONTEXT_MEMORY_ENABLED', true);
-const CONTEXT_MEMORY_MODEL = getEnv('CONTEXT_MEMORY_MODEL', MAIN_AI_MODEL);
-const CONTEXT_MEMORY_TRIGGER_DISCARDED_PAIRS = getEnvInt('CONTEXT_MEMORY_TRIGGER_DISCARDED_PAIRS', 0);
+function getMainRuntimeConfig() {
+  const mainAiModel = getEnv('MAIN_AI_MODEL', 'gpt-3.5-turbo');
+  return {
+    mainAiModel,
+    mcpMaxContextPairs: getEnvInt('MCP_MAX_CONTEXT_PAIRS', getEnvInt('MAX_CONVERSATION_PAIRS', 20)),
+    contextMemoryEnabled: getEnvBool('CONTEXT_MEMORY_ENABLED', true),
+    contextMemoryModel: getEnv('CONTEXT_MEMORY_MODEL', mainAiModel),
+    contextMemoryTriggerDiscardedPairs: getEnvInt('CONTEXT_MEMORY_TRIGGER_DISCARDED_PAIRS', 0)
+  };
+}
 
 // 带重试的 AI 响应函数委托到 components/ChatWithRetry.js，避免 Main.js 过大
 async function chatWithRetry(conversations, modelOrOptions, groupId) {
@@ -356,17 +383,18 @@ async function triggerPresetTeachingIfNeeded({ groupId, chatType, userId, userCo
 }
 
 async function triggerContextSummarizationIfNeeded({ groupId, chatType, userId }) {
+  const runtimeCfg = getMainRuntimeConfig();
   return triggerContextSummarizationIfNeededCore({
     agent,
     historyManager,
     groupId,
     chatType,
     userId,
-    MCP_MAX_CONTEXT_PAIRS,
-    CONTEXT_MEMORY_ENABLED,
-    CONTEXT_MEMORY_MODEL,
-    CONTEXT_MEMORY_TRIGGER_DISCARDED_PAIRS,
-    MAIN_AI_MODEL,
+    MCP_MAX_CONTEXT_PAIRS: runtimeCfg.mcpMaxContextPairs,
+    CONTEXT_MEMORY_ENABLED: runtimeCfg.contextMemoryEnabled,
+    CONTEXT_MEMORY_MODEL: runtimeCfg.contextMemoryModel,
+    CONTEXT_MEMORY_TRIGGER_DISCARDED_PAIRS: runtimeCfg.contextMemoryTriggerDiscardedPairs,
+    MAIN_AI_MODEL: runtimeCfg.mainAiModel,
     presetPlainText: AGENT_PRESET_PLAIN_TEXT,
     presetRawText: AGENT_PRESET_RAW_TEXT
   });
@@ -400,18 +428,21 @@ async function runProactiveReply(candidate) {
   }
 
   try {
-	resetReplyGateForSender(userid);
-	const activeCountAtRun = getActiveTaskCount(userid);
-	if (activeCountAtRun > 0) {
-		logger.info(
-		  `主动回复跳过: sender=${userid} 出队时检测到有被动任务在处理，放弃本轮主动`,
-		  {
-			conversationKey: candidate?.conversationKey || null,
-			chatType: candidate?.chatType || null
-		  }
-		);
-		return;
-	}
+    const proactiveConversationId = lastMsg?.group_id
+      ? `group_${lastMsg.group_id}_sender_${userid}`
+      : `private_${userid}`;
+    resetReplyGateForSender(proactiveConversationId);
+    const activeCountAtRun = getActiveTaskCount(proactiveConversationId);
+    if (activeCountAtRun > 0) {
+      logger.info(
+        `主动回复跳过: sender=${userid} 出队时检测到有被动任务在处理，放弃本轮主动`,
+        {
+          conversationKey: candidate?.conversationKey || null,
+          chatType: candidate?.chatType || null
+        }
+      );
+      return;
+    }
 
 	let conversationContext = null;
 	let topicHint = '';
@@ -516,7 +547,7 @@ async function runProactiveReply(candidate) {
 	const isGroupChat = lastMsg.type === 'private' ? false : true;
 	if (isGroupChat && !plannerTopicFromMemory && plannerTopicHint) {
 	  try {
-	    const staleThresholdSec = DESIRE_GROUP_TOPIC_STALE_SEC;
+	    const staleThresholdSec = getEnvInt('DESIRE_GROUP_TOPIC_STALE_SEC', 180);
 	    const timeSinceLastUserSec =
 	      userEngagement && typeof userEngagement.timeSinceLastUserSec === 'number'
 	        ? userEngagement.timeSinceLastUserSec
@@ -574,13 +605,14 @@ async function runProactiveReply(candidate) {
 
 // 处理一条（可能已聚合的）消息，并在完成后尝试拉起队列中的下一条
 async function handleOneMessage(msg, taskId) {
+  const runtimeCfg = getMainRuntimeConfig();
   return handleOneMessageCore(
     {
       logger,
       historyManager,
       timeParser,
-      MCP_MAX_CONTEXT_PAIRS,
-      CONTEXT_MEMORY_ENABLED,
+      MCP_MAX_CONTEXT_PAIRS: runtimeCfg.mcpMaxContextPairs,
+      CONTEXT_MEMORY_ENABLED: runtimeCfg.contextMemoryEnabled,
       getDailyContextMemoryXml,
       personaManager,
       emo,
@@ -598,7 +630,7 @@ async function handleOneMessage(msg, taskId) {
       trackRunForSender,
       untrackRunForSender,
       chatWithRetry,
-      MAIN_AI_MODEL,
+      MAIN_AI_MODEL: runtimeCfg.mainAiModel,
       triggerContextSummarizationIfNeeded,
       triggerPresetTeachingIfNeeded,
       clearCancelledTask,
@@ -702,8 +734,8 @@ const delayJobRunJob = createDelayJobRunJob({
   buildSentraEmoSection,
   AGENT_PRESET_XML,
   baseSystem,
-  CONTEXT_MEMORY_ENABLED,
-  MAIN_AI_MODEL,
+  CONTEXT_MEMORY_ENABLED: () => getMainRuntimeConfig().contextMemoryEnabled,
+  MAIN_AI_MODEL: () => getMainRuntimeConfig().mainAiModel,
   triggerContextSummarizationIfNeeded,
   triggerPresetTeachingIfNeeded,
   chatWithRetry,
@@ -740,64 +772,80 @@ setupSocketHandlers({
   completeTask
 });
 
-const DESIRE_TICK_INTERVAL_MS = getEnvInt('DESIRE_TICK_INTERVAL_MS', 60000);
+async function runDesireTick() {
+  const intervalMsRaw = getEnvInt('DESIRE_TICK_INTERVAL_MS', 60000);
+  const intervalMs = intervalMsRaw > 0 ? intervalMsRaw : 60000;
 
-if (DESIRE_ENABLED && desireManager) {
-  setInterval(async () => {
-    try {
-      const now = Date.now();
-      const candidates = await desireManager.collectProactiveCandidates(now);
-      if (!Array.isArray(candidates) || candidates.length === 0) {
-        return;
+  setTimeout(() => {
+    runDesireTick().catch((e) => {
+      logger.warn('DesireManager proactive scheduler tick failed', { err: String(e) });
+    });
+  }, intervalMs);
+
+  if (!desireManager || !desireManager.enabled) {
+    return;
+  }
+
+  try {
+    const now = Date.now();
+    const candidates = await desireManager.collectProactiveCandidates(now);
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return;
+    }
+    for (const c of candidates) {
+      const lastMsg = c?.lastMsg;
+      const senderId =
+        lastMsg && lastMsg.sender_id != null
+          ? String(lastMsg.sender_id)
+          : (c?.userId ? String(c.userId) : '');
+
+      if (!senderId) {
+        logger.debug('主动回复候选跳过: 缺少 senderId', {
+          conversationKey: c?.conversationKey || null
+        });
+        continue;
       }
-      for (const c of candidates) {
-        const lastMsg = c?.lastMsg;
-        const senderId =
-          lastMsg && lastMsg.sender_id != null
-            ? String(lastMsg.sender_id)
-            : (c?.userId ? String(c.userId) : '');
 
-        if (!senderId) {
-          logger.debug('主动回复候选跳过: 缺少 senderId', {
+      const convKey = lastMsg && lastMsg.group_id
+        ? `group_${lastMsg.group_id}_sender_${senderId}`
+        : `private_${senderId}`;
+      const activeCount = getActiveTaskCount(convKey);
+      if (activeCount > 0) {
+        logger.info(
+          `主动回复跳过: sender=${senderId} 当前有 ${activeCount} 个被动任务在处理，暂不触发主动回复`,
+          {
+            conversationKey: c?.conversationKey || null,
+            chatType: c?.chatType || null
+          }
+        );
+        continue;
+      }
+
+      const proactiveWhitelist = checkProactiveWhitelistTarget({
+        chatType: lastMsg && lastMsg.type === 'private' ? 'private' : 'group',
+        groupId: lastMsg && lastMsg.group_id ? `G:${lastMsg.group_id}` : null,
+        userId: senderId || null
+      });
+      if (!proactiveWhitelist.allowed) {
+        if (proactiveWhitelist.logFiltered) {
+          logger.info('主动回复白名单拦截: 候选入队前过滤', {
+            reason: proactiveWhitelist.reason,
+            chatType: proactiveWhitelist.chatType,
+            groupId: proactiveWhitelist.groupId ?? null,
+            userId: proactiveWhitelist.userId ?? null,
             conversationKey: c?.conversationKey || null
           });
-          continue;
         }
-
-        const activeCount = getActiveTaskCount(senderId);
-        if (activeCount > 0) {
-          logger.info(
-            `主动回复跳过: sender=${senderId} 当前有 ${activeCount} 个被动任务在处理，暂不触发主动回复`,
-            {
-              conversationKey: c?.conversationKey || null,
-              chatType: c?.chatType || null
-            }
-          );
-          continue;
-        }
-
-        const proactiveWhitelist = checkProactiveWhitelistTarget({
-          chatType: lastMsg && lastMsg.type === 'private' ? 'private' : 'group',
-          groupId: lastMsg && lastMsg.group_id ? `G:${lastMsg.group_id}` : null,
-          userId: senderId || null
-        });
-        if (!proactiveWhitelist.allowed) {
-          if (proactiveWhitelist.logFiltered) {
-            logger.info('主动回复白名单拦截: 候选入队前过滤', {
-              reason: proactiveWhitelist.reason,
-              chatType: proactiveWhitelist.chatType,
-              groupId: proactiveWhitelist.groupId ?? null,
-              userId: proactiveWhitelist.userId ?? null,
-              conversationKey: c?.conversationKey || null
-            });
-          }
-          continue;
-        }
-
-        enqueueProactiveCandidate(c);
+        continue;
       }
-    } catch (e) {
-      logger.warn('DesireManager proactive scheduler failed', { err: String(e) });
+
+      enqueueProactiveCandidate(c);
     }
-  }, DESIRE_TICK_INTERVAL_MS);
+  } catch (e) {
+    logger.warn('DesireManager proactive scheduler failed', { err: String(e) });
+  }
 }
+
+runDesireTick().catch((e) => {
+  logger.warn('DesireManager proactive scheduler bootstrap failed', { err: String(e) });
+});

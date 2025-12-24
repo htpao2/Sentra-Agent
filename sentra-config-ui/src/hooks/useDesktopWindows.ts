@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { saveModuleConfig, savePluginConfig, restoreModuleConfig, restorePluginConfig } from '../services/api';
 import { getDisplayName } from '../utils/icons';
 import type { DeskWindow, FileItem } from '../types/ui';
@@ -44,12 +44,14 @@ export function useDesktopWindows({ setSaving, addToast, loadConfigs, onLogout }
 
   const [activeWinId, setActiveWinId] = useState<string | null>(null);
 
-  const [zNext, setZNext] = useState(() => {
+  // Use a ref (not state) for z allocation to avoid stale-closure/duplicate-z issues under rapid clicks.
+  // openWindows updates already trigger re-render, so we don't need zNext as state.
+  const zNextRef = useRef<number>((() => {
     if (openWindows.length > 0) {
       return Math.max(...openWindows.map(w => w.z || 1000), 1000) + 1;
     }
     return 1000;
-  });
+  })());
 
   // Debounced persistence
   useEffect(() => {
@@ -64,11 +66,11 @@ export function useDesktopWindows({ setSaving, addToast, loadConfigs, onLogout }
   }, [openWindows]);
 
   const bringToFront = (id: string) => {
+    const nextZ = zNextRef.current + 1;
+    zNextRef.current = nextZ;
     setOpenWindows(ws => {
-      const nextZ = zNext + 1;
       return ws.map(w => (w.id === id ? { ...w, z: nextZ, minimized: false } : w));
     });
-    setZNext(z => z + 1);
     setActiveWinId(id);
   };
 
@@ -77,8 +79,8 @@ export function useDesktopWindows({ setSaving, addToast, loadConfigs, onLogout }
    * so they share the same stacking context as desktop windows.
    */
   const allocateZ = () => {
-    const next = zNext + 1;
-    setZNext(next);
+    const next = zNextRef.current + 1;
+    zNextRef.current = next;
     return next;
   };
 
@@ -105,13 +107,12 @@ export function useDesktopWindows({ setSaving, addToast, loadConfigs, onLogout }
     const win: DeskWindow = {
       id,
       file,
-      z: zNext + 1,
+      z: (zNextRef.current = zNextRef.current + 1),
       minimized: false,
       editedVars: file.variables ? [...file.variables] : [],
       pos: { x, y }
     };
     setOpenWindows(ws => [...ws, win]);
-    setZNext(z => z + 1);
     setActiveWinId(id);
   };
 
