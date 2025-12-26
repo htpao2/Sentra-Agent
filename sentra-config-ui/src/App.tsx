@@ -22,7 +22,6 @@ import { useDockFavorites } from './hooks/useDockFavorites';
 import { useDesktopWindows } from './hooks/useDesktopWindows';
 import { loader } from '@monaco-editor/react';
 import { usePresetsEditor } from './hooks/usePresetsEditor';
-import { useRedisEditor } from './hooks/useRedisEditor';
 import * as monaco from 'monaco-editor';
 
 // Configure Monaco to use local instance (bundled) instead of CDN
@@ -225,9 +224,6 @@ function App() {
     fileManagerMinimized,
   ]);
 
-  // Redis Editor State via hook
-  const redisState = useRedisEditor(addToast);
-
   const handleOpenPresets = () => {
     if (isMobile || isTablet) {
       setIosPresetsEditorOpen(true);
@@ -244,11 +240,6 @@ function App() {
       setFileManagerOpen(true);
       setFileManagerMinimized(false);
     }
-  };
-
-  const handleOpenRedis = () => {
-    redisState.setRedisEditorOpen(true);
-    redisState.setMinimized(false);
   };
 
   const handleOpenPresetImporter = () => {
@@ -280,7 +271,6 @@ function App() {
     handleRunSentiment,
     handleOpenPresets,
     handleOpenFileManager,
-    handleOpenRedis,
     () => {
       setDevCenterOpen(true);
       setDevCenterMinimized(false);
@@ -470,17 +460,6 @@ function App() {
       }
     },
     {
-      id: 'redis-app',
-      name: 'Redis编辑器',
-      icon: getIconForType('redis-editor', 'module'),
-      isOpen: redisState.redisEditorOpen,
-      onClick: handleOpenRedis,
-      onClose: () => {
-        redisState.setRedisEditorOpen(false);
-        redisState.setMinimized(false);
-      }
-    },
-    {
       id: 'dev-center-app',
       name: '开发中心',
       icon: getIconForType('dev-center', 'module'),
@@ -581,7 +560,7 @@ function App() {
   // iOS / Mobile / Tablet View
   if (isMobile || isTablet) {
     return (
-      <Suspense fallback={<div className="loading-screen">加载中...</div>}>
+      <Suspense fallback={<div className="loading-screen">Loading...</div>}>
         <MobileView
           allItems={allItems}
           usageCounts={usageCounts}
@@ -614,7 +593,6 @@ function App() {
           setIosFileManagerOpen={setIosFileManagerOpen}
           addToast={addToast}
           presetsState={presetsState}
-          redisState={redisState}
         />
       </Suspense>
     );
@@ -622,7 +600,7 @@ function App() {
 
   // Desktop View
   return (
-    <Suspense fallback={<div className="loading-screen">加载中...</div>}>
+    <Suspense fallback={<div className="loading-screen">Loading...</div>}>
       <DesktopView
         isSolidColor={isSolidColor}
         currentWallpaper={currentWallpaper}
@@ -633,7 +611,6 @@ function App() {
         toggleTheme={toggleTheme}
         showDock={showDock}
         toggleDock={toggleDock}
-
         openWindows={openWindows}
         setOpenWindows={setOpenWindows}
         activeWinId={activeWinId}
@@ -647,17 +624,14 @@ function App() {
         handleDeleteVar={handleDeleteVar}
         handleRestore={handleRestore}
         saving={saving}
-
         desktopIcons={desktopIcons}
         desktopFolders={desktopFolders}
-
         terminalWindows={terminalWindows}
         setTerminalWindows={setTerminalWindows}
         activeTerminalId={activeTerminalId}
         bringTerminalToFront={bringTerminalToFront}
         handleCloseTerminal={handleCloseTerminal}
         handleMinimizeTerminal={handleMinimizeTerminal}
-
         launchpadOpen={launchpadOpen}
         setLaunchpadOpen={setLaunchpadOpen}
         allItems={allItems}
@@ -666,14 +640,11 @@ function App() {
         dockFavorites={dockFavorites}
         setDockFavorites={setDockFavorites}
         uniqueDockItems={uniqueDockItems}
-
         toasts={toasts}
         removeToast={removeToast}
-
         dialogOpen={dialogOpen}
         dialogConfig={dialogConfig}
         setDialogOpen={setDialogOpen}
-
         wallpapers={wallpapers}
         defaultWallpapers={DEFAULT_WALLPAPERS}
         BING_WALLPAPER={BING_WALLPAPER}
@@ -685,31 +656,24 @@ function App() {
         wallpaperInterval={wallpaperInterval}
         setWallpaperInterval={setWallpaperInterval}
         loadConfigs={loadConfigs}
-
         presetsEditorOpen={presetsEditorOpen}
         setPresetsEditorOpen={setPresetsEditorOpen}
         presetsEditorMinimized={presetsEditorMinimized}
         setPresetsEditorMinimized={setPresetsEditorMinimized}
-
         presetImporterOpen={presetImporterOpen}
         setPresetImporterOpen={setPresetImporterOpen}
         presetImporterMinimized={presetImporterMinimized}
         setPresetImporterMinimized={setPresetImporterMinimized}
-
         fileManagerOpen={fileManagerOpen}
         setFileManagerOpen={setFileManagerOpen}
         fileManagerMinimized={fileManagerMinimized}
         setFileManagerMinimized={setFileManagerMinimized}
-
         addToast={addToast}
         presetsState={presetsState}
-        redisState={redisState}
-
         devCenterOpen={devCenterOpen}
         setDevCenterOpen={setDevCenterOpen}
         devCenterMinimized={devCenterMinimized}
         setDevCenterMinimized={setDevCenterMinimized}
-
         deepWikiOpen={deepWikiOpen}
         setDeepWikiOpen={setDeepWikiOpen}
         deepWikiMinimized={deepWikiMinimized}
@@ -717,7 +681,6 @@ function App() {
       />
     </Suspense>
   );
-
 }
 
 export default App;

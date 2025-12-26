@@ -5,7 +5,6 @@ import { EnvEditor } from '../components/EnvEditor';
 // Lazy load heavy components
 const PresetsEditor = lazy(() => import('../components/PresetsEditor').then(module => ({ default: module.PresetsEditor })));
 const FileManager = lazy(() => import('../components/FileManager').then(module => ({ default: module.FileManager })));
-const RedisEditor = lazy(() => import('../components/RedisEditor/RedisEditor').then(module => ({ default: module.RedisEditor })));
 const DeepWikiChat = lazy(() => import('../components/DeepWikiChat').then(module => ({ default: module.DeepWikiChat })));
 const PresetImporter = lazy(() => import('../components/PresetImporter').then(module => ({ default: module.PresetImporter })));
 
@@ -111,7 +110,6 @@ export type DesktopViewProps = {
   setFileManagerMinimized: (min: boolean) => void;
   addToast: (type: 'success' | 'error' | 'info', title: string, message?: string) => void;
   presetsState: any; // Type will be refined in component
-  redisState: any;
   devCenterOpen: boolean;
   setDevCenterOpen: (open: boolean) => void;
   devCenterMinimized: boolean;
@@ -240,7 +238,7 @@ const EnvWindowItem = memo(({
   );
 });
 
-export const DesktopView: React.FC<DesktopViewProps> = (props) => {
+export function DesktopView(props: DesktopViewProps) {
   const {
     isSolidColor,
     currentWallpaper,
@@ -310,7 +308,6 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
     setFileManagerMinimized,
     presetsState,
     addToast,
-    redisState,
     devCenterOpen,
     setDevCenterOpen,
     devCenterMinimized,
@@ -375,8 +372,7 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
     (deepWikiOpen ? 1 : 0) +
     (presetsEditorOpen ? 1 : 0) +
     (presetImporterOpen ? 1 : 0) +
-    (fileManagerOpen ? 1 : 0) +
-    (redisState.redisEditorOpen ? 1 : 0);
+    (fileManagerOpen ? 1 : 0);
 
   const dockPerformanceMode = (openWindows.length + terminalWindows.length + openUtilityCount) > 3;
 
@@ -447,12 +443,6 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
       bringUtilityToFront('file-manager');
     }
   }, [fileManagerOpen, utilityZMap, bringUtilityToFront]);
-
-  useEffect(() => {
-    if (redisState.redisEditorOpen && utilityZMap['redis-editor'] == null) {
-      bringUtilityToFront('redis-editor');
-    }
-  }, [redisState.redisEditorOpen, utilityZMap, bringUtilityToFront]);
 
   const renderTopTile = useCallback((key: string, label: string, icon: ReactNode, onClick: (e: React.MouseEvent) => void) => {
     return (
@@ -588,27 +578,6 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
     });
   }
 
-  if (redisState.redisEditorOpen) {
-    extraTabs.push({
-      id: 'redis-editor',
-      title: 'Redis 编辑器',
-      icon: getIconForType('redis-editor', 'module'),
-      isActive: activeUtilityId === 'redis-editor',
-      onActivate: () => {
-        redisState.setRedisEditorOpen(true);
-        redisState.setMinimized(false);
-        bringUtilityToFront('redis-editor');
-      },
-      onClose: () => {
-        redisState.setRedisEditorOpen(false);
-        redisState.setMinimized(false);
-        if (activeUtilityId === 'redis-editor') {
-          setActiveUtilityId(null);
-        }
-      },
-    });
-  }
-
   if (presetImporterOpen) {
     extraTabs.push({
       id: 'preset-importer',
@@ -676,16 +645,6 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
         setFileManagerOpen(true);
         setFileManagerMinimized(false);
         bringUtilityToFront('file-manager');
-      }
-    },
-    {
-      name: 'redis-editor',
-      type: 'module' as const,
-      onClick: () => {
-        recordUsage('app:redis');
-        redisState.setRedisEditorOpen(true);
-        redisState.setMinimized(false);
-        bringUtilityToFront('redis-editor');
       }
     },
     ...allItems.map(item => ({
@@ -1000,37 +959,6 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
           </MacWindow>
         )}
 
-        {redisState.redisEditorOpen && (
-          <MacWindow
-            id="redis-editor"
-            title="Redis 连接编辑器"
-            icon={getIconForType('redis-editor', 'module')}
-            safeArea={desktopSafeArea}
-            zIndex={utilityZMap['redis-editor'] ?? 2005}
-            isActive={activeUtilityId === 'redis-editor'}
-            isMinimized={!!redisState.minimized}
-            performanceMode={performanceMode}
-            initialSize={{ width: 1000, height: 650 }}
-            onClose={() => {
-              handleWindowMaximize('redis-editor', false);
-              redisState.setRedisEditorOpen(false);
-              redisState.setMinimized(false);
-            }}
-            onMinimize={() => {
-              handleWindowMaximize('redis-editor', false);
-              redisState.setMinimized(true);
-              setActiveUtilityId(null);
-            }}
-            onMaximize={(isMax) => handleWindowMaximize('redis-editor', isMax)}
-            onFocus={() => { bringUtilityToFront('redis-editor'); }}
-            onMove={() => { }}
-          >
-            <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888' }}>加载中...</div>}>
-              <RedisEditor theme={theme} state={redisState} />
-            </Suspense>
-          </MacWindow>
-        )}
-
         {/* 桌面图标 / 文件夹 */}
         {desktopFolders ? (
           <>
@@ -1064,14 +992,6 @@ export const DesktopView: React.FC<DesktopViewProps> = (props) => {
 
               {desktopIcons?.find(i => i.id === 'desktop-preset-importer') && (() => {
                 const icon = desktopIcons.find(i => i.id === 'desktop-preset-importer')!;
-                return renderTopTile(icon.id, icon.name, icon.icon, (e) => {
-                  e.stopPropagation();
-                  icon.onClick();
-                });
-              })()}
-
-              {desktopIcons?.find(i => i.id === 'desktop-redis') && (() => {
-                const icon = desktopIcons.find(i => i.id === 'desktop-redis')!;
                 return renderTopTile(icon.id, icon.name, icon.icon, (e) => {
                   e.stopPropagation();
                   icon.onClick();

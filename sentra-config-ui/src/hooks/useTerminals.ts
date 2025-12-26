@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { getAuthHeaders } from '../services/api';
 import type { TerminalWin } from '../types/ui';
 import type { ToastMessage } from '../components/Toast';
@@ -9,8 +9,76 @@ export type UseTerminalsParams = {
 };
 
 export function useTerminals({ addToast, allocateZ }: UseTerminalsParams) {
-  const [terminalWindows, setTerminalWindows] = useState<TerminalWin[]>([]);
-  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
+  const [terminalWindows, setTerminalWindows] = useState<TerminalWin[]>(() => {
+    try {
+      const saved = localStorage.getItem('sentra_terminal_windows');
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter(Boolean)
+        .map((t: any) => {
+          const p = t?.pos || { x: 0, y: 0 };
+          const invalid =
+            p.x == null || p.y == null ||
+            p.x < 0 || p.y < 0 ||
+            p.x > window.innerWidth - 120 || p.y > window.innerHeight - 120;
+
+          const safePos = invalid
+            ? { x: Math.max(0, window.innerWidth / 2 - 350), y: Math.max(40, window.innerHeight / 2 - 250) }
+            : p;
+
+          return {
+            ...t,
+            pos: safePos,
+          } as TerminalWin;
+        });
+    } catch {
+      return [];
+    }
+  });
+
+  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(() => {
+    try {
+      const v = localStorage.getItem('sentra_active_terminal_id');
+      return v ? String(v) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem('sentra_terminal_windows', JSON.stringify(terminalWindows));
+      } catch { }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [terminalWindows]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('sentra_active_terminal_id', activeTerminalId ? String(activeTerminalId) : '');
+    } catch { }
+  }, [activeTerminalId]);
+
+  useEffect(() => {
+    const flush = () => {
+      try {
+        localStorage.setItem('sentra_terminal_windows', JSON.stringify(terminalWindows));
+        localStorage.setItem('sentra_active_terminal_id', activeTerminalId ? String(activeTerminalId) : '');
+      } catch { }
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [activeTerminalId, terminalWindows]);
 
   const bringTerminalToFront = (id: string) => {
     const z = allocateZ ? allocateZ() : undefined;

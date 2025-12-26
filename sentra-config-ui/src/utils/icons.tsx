@@ -26,7 +26,6 @@ import {
   IoPeople,
   IoPerson,
   IoApps,
-  IoServer,
   IoDocumentText,
   IoCloudDownload,
   IoFolderOpen
@@ -72,7 +71,6 @@ export const getDisplayName = (name: string): string => {
     'presets-editor': '预设撰写',
     'preset-importer': '预设导入',
     'file-manager': '文件管理',
-    'redis-editor': 'Redis编辑器',
     'av_transcribe': '音频转录',
     'mindmap_gen': '思维导图',
     'custom_music_card': '自定义音卡',
@@ -154,7 +152,6 @@ export const getIconForType = (name: string, type: 'module' | 'plugin'): React.R
   if (n.includes('sentra-adapter')) return <AppIconWrapper bg="linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)"><FcSettings /></AppIconWrapper>;
   if (n.includes('sentra-rag')) return <AppIconWrapper bg="linear-gradient(135deg, #fa709a 0%, #fee140 100%)"><FcMindMap /></AppIconWrapper>;
   if (n.includes('dev-center')) return <AppIconWrapper bg="linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%)"><IoApps color="white" /></AppIconWrapper>;
-  if (n.includes('redis') || n.includes('agent-redis')) return <AppIconWrapper bg="linear-gradient(135deg, #ff512f 0%, #dd2476 100%)"><IoServer color="white" /></AppIconWrapper>;
 
   // Search & Web - Different shades of blue/green
   if (n.includes('bilibili')) return <AppIconWrapper bg="linear-gradient(135deg, #00c6ff 0%, #0072ff 100%)"><IoLogoYoutube color="white" /></AppIconWrapper>;

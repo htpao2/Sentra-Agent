@@ -79,7 +79,7 @@ export const Launchpad: React.FC<LaunchpadProps> = ({ isOpen, onClose, items }) 
     const toolsApps: typeof items = [];
     const qqApps: typeof items = [];
 
-    const builtinToolOrder = ['file-manager', 'presets-editor', 'preset-importer', 'redis-editor', 'dev-center'];
+    const builtinToolOrder = ['file-manager', 'presets-editor', 'preset-importer', 'dev-center'];
     const builtinToolSet = new Set(builtinToolOrder);
     const builtinTools: typeof items = [];
 

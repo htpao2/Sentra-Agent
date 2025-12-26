@@ -219,7 +219,6 @@ export function buildDesktopIcons(
     handleRunSentiment: () => void,
     handleOpenPresets: () => void,
     handleOpenFileManager: () => void,
-    handleOpenRedis: () => void,
     handleOpenDevCenter: () => void,
     handleOpenPresetImporter: () => void,
 ): DesktopIcon[] {
@@ -250,20 +249,10 @@ export function buildDesktopIcons(
             }
         },
         {
-            id: 'desktop-redis',
-            name: 'Redis编辑器',
-            icon: getIconForType('redis-editor', 'module'),
-            position: { x: startX + gap * 2, y: startY },
-            onClick: () => {
-                recordUsage('app:redis');
-                handleOpenRedis();
-            }
-        },
-        {
             id: 'desktop-dev-center',
             name: '开发中心',
             icon: getIconForType('dev-center', 'module'),
-            position: { x: startX + gap * 4, y: startY },
+            position: { x: startX + gap * 3, y: startY },
             onClick: () => {
                 recordUsage('app:dev-center');
                 handleOpenDevCenter();
@@ -273,7 +262,7 @@ export function buildDesktopIcons(
             id: 'desktop-presets',
             name: '预设撰写',
             icon: getIconForType('presets-editor', 'module'),
-            position: { x: startX + gap * 3, y: startY },
+            position: { x: startX + gap * 2, y: startY },
             onClick: () => {
                 recordUsage('app:presets');
                 handleOpenPresets();

@@ -47,10 +47,19 @@ export function useDesktopWindows({ setSaving, addToast, loadConfigs, onLogout }
   // Use a ref (not state) for z allocation to avoid stale-closure/duplicate-z issues under rapid clicks.
   // openWindows updates already trigger re-render, so we don't need zNext as state.
   const zNextRef = useRef<number>((() => {
-    if (openWindows.length > 0) {
-      return Math.max(...openWindows.map(w => w.z || 1000), 1000) + 1;
+    let savedZ = 0;
+    try {
+      const raw = localStorage.getItem('sentra_z_next');
+      const n = raw ? Number(raw) : 0;
+      savedZ = Number.isFinite(n) ? n : 0;
+    } catch {
+      savedZ = 0;
     }
-    return 1000;
+    if (openWindows.length > 0) {
+      const maxZ = Math.max(...openWindows.map(w => w.z || 1000), 1000) + 1;
+      return Math.max(savedZ, maxZ);
+    }
+    return Math.max(savedZ, 1000);
   })());
 
   // Debounced persistence
@@ -65,9 +74,28 @@ export function useDesktopWindows({ setSaving, addToast, loadConfigs, onLogout }
     return () => clearTimeout(timer);
   }, [openWindows]);
 
+  useEffect(() => {
+    const flush = () => {
+      try {
+        localStorage.setItem('sentra_open_windows', JSON.stringify(openWindows));
+        localStorage.setItem('sentra_z_next', String(zNextRef.current || 0));
+      } catch { }
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [openWindows]);
+
   const bringToFront = (id: string) => {
     const nextZ = zNextRef.current + 1;
     zNextRef.current = nextZ;
+    try { localStorage.setItem('sentra_z_next', String(nextZ)); } catch { }
     setOpenWindows(ws => {
       return ws.map(w => (w.id === id ? { ...w, z: nextZ, minimized: false } : w));
     });
@@ -81,6 +109,7 @@ export function useDesktopWindows({ setSaving, addToast, loadConfigs, onLogout }
   const allocateZ = () => {
     const next = zNextRef.current + 1;
     zNextRef.current = next;
+    try { localStorage.setItem('sentra_z_next', String(next)); } catch { }
     return next;
   };
 

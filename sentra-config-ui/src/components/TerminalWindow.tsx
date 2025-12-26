@@ -18,8 +18,14 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({ processId, theme
     const fitAddonRef = useRef<FitAddon | null>(null);
     const eventSourceRef = useRef<EventSource | null>(null);
     const [autoScroll, setAutoScroll] = useState(true);
+    const autoScrollRef = useRef(true);
     const userScrolledRef = useRef(false);
     const lastScrollPositionRef = useRef(0);
+    const disconnectedRef = useRef(false);
+
+    useEffect(() => {
+        autoScrollRef.current = autoScroll;
+    }, [autoScroll]);
 
     // Initialize terminal
     useEffect(() => {
@@ -107,7 +113,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({ processId, theme
         term.write = (data: string | Uint8Array, callback?: () => void) => {
             originalWrite(data, () => {
                 // Auto-scroll to bottom after write if user hasn't scrolled up
-                if (autoScroll && !userScrolledRef.current) {
+                if (autoScrollRef.current && !userScrolledRef.current) {
                     requestAnimationFrame(() => {
                         scrollToBottom();
                     });
@@ -211,6 +217,13 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({ processId, theme
         const eventSource = new EventSource(`/api/scripts/stream/${processId}?token=${token}`);
         eventSourceRef.current = eventSource;
 
+        eventSource.onopen = () => {
+            if (disconnectedRef.current) {
+                disconnectedRef.current = false;
+                term.write('\r\n\x1b[32m✓ Reconnected.\x1b[0m\r\n');
+            }
+        };
+
         eventSource.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
@@ -226,8 +239,10 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({ processId, theme
         };
 
         eventSource.onerror = () => {
-            term.write('\r\n\x1b[31m✗ Connection lost.\x1b[0m\r\n');
-            eventSource.close();
+            if (!disconnectedRef.current) {
+                disconnectedRef.current = true;
+                term.write('\r\n\x1b[31m✗ Connection lost, retrying...\x1b[0m\r\n');
+            }
         };
 
         // Initial fit
@@ -244,7 +259,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({ processId, theme
             term.dispose();
             eventSource.close();
         };
-    }, [processId, autoScroll, theme]); // Added theme to dependency array to re-init on theme change
+    }, [processId, theme, headerText]);
 
     // Re-fit observer with requestAnimationFrame for smoothness
     useEffect(() => {

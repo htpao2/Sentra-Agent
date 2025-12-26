@@ -2,6 +2,13 @@ import { getAuthHeaders } from './api';
 
 const API_BASE = '/api/files';
 
+type EtagCacheEntry<T> = {
+    etag: string;
+    payload: T;
+};
+
+const etagCache = new Map<string, EtagCacheEntry<any>>();
+
 export interface FileNode {
     name: string;
     path: string;
@@ -30,10 +37,17 @@ export interface SymbolMatch {
 }
 
 export async function fetchFileTree(path: string = ''): Promise<FileNode[]> {
+    const cacheKey = `tree:${path}`;
+    const cached = etagCache.get(cacheKey) as EtagCacheEntry<FileNode[]> | undefined;
     const headers = getAuthHeaders();
+    if (cached?.etag) (headers as any)['If-None-Match'] = cached.etag;
     const res = await fetch(`${API_BASE}/tree?path=${encodeURIComponent(path)}`, { headers });
+    if (res.status === 304 && cached) return cached.payload;
     if (!res.ok) throw new Error('Failed to fetch file tree');
-    return res.json();
+    const payload = await res.json();
+    const etag = res.headers.get('etag');
+    if (etag) etagCache.set(cacheKey, { etag, payload });
+    return payload;
 }
 
 export async function fetchFileContent(path: string): Promise<FileContent> {
@@ -64,27 +78,39 @@ export async function createFile(path: string, type: 'file' | 'directory'): Prom
 }
 
 export async function grepFiles(q: string, opts?: { path?: string; maxResults?: number; caseSensitive?: boolean }): Promise<GrepMatch[]> {
+    const cacheKey = `grep:${opts?.path || ''}|${opts?.caseSensitive ? '1' : '0'}|${opts?.maxResults ?? ''}|${q}`;
+    const cached = etagCache.get(cacheKey) as EtagCacheEntry<{ results: GrepMatch[] }> | undefined;
     const headers = getAuthHeaders();
+    if (cached?.etag) (headers as any)['If-None-Match'] = cached.etag;
     const params = new URLSearchParams();
     params.set('q', q);
     if (opts?.path) params.set('path', opts.path);
     if (opts?.maxResults != null) params.set('maxResults', String(opts.maxResults));
     if (opts?.caseSensitive) params.set('caseSensitive', 'true');
     const res = await fetch(`${API_BASE}/grep?${params.toString()}`, { headers });
+    if (res.status === 304 && cached) return (cached.payload?.results || []) as GrepMatch[];
     if (!res.ok) throw new Error('Failed to grep files');
     const data = await res.json();
+    const etag = res.headers.get('etag');
+    if (etag) etagCache.set(cacheKey, { etag, payload: data });
     return (data?.results || []) as GrepMatch[];
 }
 
 export async function searchSymbols(q?: string, opts?: { path?: string; maxResults?: number }): Promise<SymbolMatch[]> {
+    const cacheKey = `symbols:${opts?.path || ''}|${opts?.maxResults ?? ''}|${q || ''}`;
+    const cached = etagCache.get(cacheKey) as EtagCacheEntry<{ results: SymbolMatch[] }> | undefined;
     const headers = getAuthHeaders();
+    if (cached?.etag) (headers as any)['If-None-Match'] = cached.etag;
     const params = new URLSearchParams();
     if (q) params.set('q', q);
     if (opts?.path) params.set('path', opts.path);
     if (opts?.maxResults != null) params.set('maxResults', String(opts.maxResults));
     const res = await fetch(`${API_BASE}/symbols?${params.toString()}`, { headers });
+    if (res.status === 304 && cached) return (cached.payload?.results || []) as SymbolMatch[];
     if (!res.ok) throw new Error('Failed to search symbols');
     const data = await res.json();
+    const etag = res.headers.get('etag');
+    if (etag) etagCache.set(cacheKey, { etag, payload: data });
     return (data?.results || []) as SymbolMatch[];
 }
 

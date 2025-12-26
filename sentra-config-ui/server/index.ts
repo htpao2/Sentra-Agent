@@ -7,7 +7,6 @@ import { presetRoutes } from './routes/presets';
 import { fileRoutes } from './routes/files';
 import { deepWikiRoutes } from './routes/deepwiki';
 import { systemRoutes } from './routes/system.ts';
-import { redisRoutes } from './routes/redis';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import dotenv from 'dotenv';
@@ -419,7 +418,6 @@ async function start() {
   await fastify.register(presetRoutes);
   await fastify.register(fileRoutes);
   await fastify.register(deepWikiRoutes);
-  await fastify.register(redisRoutes);
   await fastify.register(systemRoutes);
 
   // 生产环境提供静态文件

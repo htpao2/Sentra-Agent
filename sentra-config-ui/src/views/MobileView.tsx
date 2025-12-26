@@ -11,7 +11,6 @@ import { getDisplayName, getIconForType } from '../utils/icons';
 import { FileItem, IOSEditorWin, DesktopIcon, TerminalWin, AppFolder } from '../types/ui';
 import { PresetsEditorState } from '../hooks/usePresetsEditor';
 import { IOSFileManager } from '../components/IOSFileManager';
-import { IOSRedisEditor } from '../components/RedisEditor/IOSRedisEditor';
 
 export type MobileViewProps = {
   allItems: FileItem[];
@@ -45,7 +44,6 @@ export type MobileViewProps = {
   setIosFileManagerOpen: (open: boolean) => void;
   addToast: (type: ToastType, title: string, message?: string) => void;
   presetsState: PresetsEditorState;
-  redisState: any;
 };
 
 export function MobileView(props: MobileViewProps) {
@@ -82,7 +80,6 @@ export function MobileView(props: MobileViewProps) {
     setIosFileManagerOpen,
     addToast,
     presetsState,
-    redisState,
   } = props;
 
   const topByUsage = [...allItems]
@@ -199,17 +196,6 @@ export function MobileView(props: MobileViewProps) {
               setLaunchpadOpen(false);
             }
           },
-          {
-            name: 'redis-editor',
-            type: 'module' as const,
-            onClick: () => {
-              recordUsage('app:redis');
-              setReturnToLaunchpad(true);
-              redisState.setRedisEditorOpen(true);
-              redisState.setMinimized(false);
-              setLaunchpadOpen(false);
-            }
-          },
           ...allItems.map(item => ({
             name: item.name,
             type: item.type,
@@ -287,25 +273,6 @@ export function MobileView(props: MobileViewProps) {
                 addToast={addToast}
                 theme={theme}
               />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {redisState.redisEditorOpen && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', zIndex: 2000 }}>
-          <div className="ios-app-window" style={{ display: 'flex' }}>
-            <div className="ios-app-header">
-              <div className="ios-back-btn" onClick={() => redisState.setRedisEditorOpen(false)}>
-                <IoChevronBack /> 主页
-              </div>
-              <div>Redis 编辑器</div>
-              <div style={{ color: '#ff3b30', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => redisState.setRedisEditorOpen(false)}>
-                关闭
-              </div>
-            </div>
-            <div style={{ flex: 1, overflow: 'hidden' }}>
-              <IOSRedisEditor state={redisState} />
             </div>
           </div>
         </div>

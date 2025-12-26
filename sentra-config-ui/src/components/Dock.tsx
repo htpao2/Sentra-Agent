@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useRef } from 'react';
+import React, { memo, useCallback, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, useMotionValue, useSpring, useTransform, MotionValue } from 'framer-motion';
 import { Menu, Item, useContextMenu } from 'react-contexify';
@@ -64,7 +64,7 @@ export const Dock: React.FC<DockProps> = ({ items, performanceMode = false }) =>
       ) : (
         <motion.div
           className={styles.dock}
-          onMouseMove={(e) => mouseX.set(e.pageX)}
+          onMouseMove={(e) => mouseX.set(e.clientX)}
           onMouseLeave={() => mouseX.set(Infinity)}
         >
           {items.map((item) => (
@@ -105,9 +105,29 @@ const DockIcon = memo(function DockIcon({
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
-  const distance = useTransform(mouseX, (val) => {
-    const bounds = ref.current?.getBoundingClientRect() ?? { x: 0, width: 0 };
-    return val - bounds.x - bounds.width / 2;
+  const centerX = useMotionValue<number>(0);
+
+  useEffect(() => {
+    const updateCenter = () => {
+      const bounds = ref.current?.getBoundingClientRect();
+      if (!bounds) return;
+      centerX.set(bounds.left + bounds.width / 2);
+    };
+
+    updateCenter();
+
+    const ro = new ResizeObserver(() => updateCenter());
+    if (ref.current) ro.observe(ref.current);
+    window.addEventListener('resize', updateCenter);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', updateCenter);
+    };
+  }, [centerX]);
+
+  const distance = useTransform([mouseX, centerX], (latest) => {
+    const [mx, cx] = latest as [number, number];
+    return mx - cx;
   });
 
   const widthSync = useTransform(distance, [-150, 0, 150], [50, 100, 50]);
