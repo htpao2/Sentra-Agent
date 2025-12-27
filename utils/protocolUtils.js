@@ -215,6 +215,8 @@ const ResourceSchema = z.object({
 const SentraResponseSchema = z.object({
   textSegments: z.array(z.string()),
   resources: z.array(ResourceSchema).optional().default([]),
+  group_id: z.string().optional(),
+  user_id: z.string().optional(),
   replyMode: z.enum(['none', 'first', 'always']).optional().default('none'),
   mentions: z.array(z.union([z.string(), z.number()])).optional().default([])
 });
@@ -439,6 +441,24 @@ export function parseSentraResponse(response) {
     return { textSegments: [response], resources: [] };
   }
   
+  let targetGroupId = null;
+  let targetUserId = null;
+  try {
+    const gid = unescapeXml((extractXMLTag(responseContent, 'group_id') || '').trim());
+    const uid = unescapeXml((extractXMLTag(responseContent, 'user_id') || '').trim());
+
+    const gidOk = gid && /^\d+$/.test(gid);
+    const uidOk = uid && /^\d+$/.test(uid);
+
+    if (gidOk && uidOk) {
+      logger.warn('检测到同时存在 <group_id> 和 <user_id>，将忽略目标并按当前会话发送');
+    } else if (gidOk) {
+      targetGroupId = gid;
+    } else if (uidOk) {
+      targetUserId = uid;
+    }
+  } catch {}
+
   // 提取所有 <text1>, <text2>, <text3> ... 标签
   const textSegments = [];
   let index = 1;
@@ -547,7 +567,14 @@ export function parseSentraResponse(response) {
   
   // 最终验证整体结构
   try {
-    const validated = SentraResponseSchema.parse({ textSegments, resources, replyMode, mentions });
+    const validated = SentraResponseSchema.parse({
+      textSegments,
+      resources,
+      group_id: targetGroupId || undefined,
+      user_id: targetUserId || undefined,
+      replyMode,
+      mentions
+    });
     //logger.success('协议验证通过');
     //logger.debug(`textSegments: ${validated.textSegments.length} 段`);
     //logger.debug(`resources: ${validated.resources.length} 个`);

@@ -7,6 +7,7 @@ import { createWebSocketClient } from './components/WebSocketClient.js';
 import { buildSentraResultBlock, buildSentraUserQuestionBlock, convertHistoryToMCPFormat } from './utils/protocolUtils.js';
 import { smartSend } from './utils/sendUtils.js';
 import { cleanupExpiredCache, saveMessageCache, loadMessageCache } from './utils/messageCache.js';
+import { SocialContextManager } from './utils/socialContextManager.js';
 import SentraEmo from './sentra-emo/sdk/index.js';
 import { timeParser } from './src/time-parser.js';
 import { HistoryStore } from './sentra-mcp/src/history/store.js';
@@ -63,6 +64,18 @@ const socket = createWebSocketClient(WS_URL, {
   getMaxReconnectAttempts: () => getEnvInt('WS_MAX_RECONNECT_ATTEMPTS', 60)
 });
 const send = (obj) => socket.send(obj);
+
+let socialContextManager = null;
+
+try {
+  socket.on('open', () => {
+    try {
+      if (socialContextManager && typeof socialContextManager.refresh === 'function') {
+        socialContextManager.refresh(false).catch(() => {});
+      }
+    } catch {}
+  });
+} catch {}
 
 const logger = createLogger('Main');
 logger.info(`连接到 WebSocket 服务: ${WS_URL}`);
@@ -408,6 +421,8 @@ async function runProactiveReply(candidate) {
   const groupIdKey = lastMsg?.group_id ? `G:${lastMsg.group_id}` : `U:${userid}`;
   const isFirstAfterUser = !!candidate.isFirstAfterUser;
 
+  const runtimeCfg = getMainRuntimeConfig();
+
   const proactiveWhitelist = checkProactiveWhitelistTarget({
     chatType: lastMsg.type === 'private' ? 'private' : 'group',
     groupId: lastMsg?.group_id ? `G:${lastMsg.group_id}` : null,
@@ -510,7 +525,7 @@ async function runProactiveReply(candidate) {
 	}
 
 	let memoryXml = '';
-	if (CONTEXT_MEMORY_ENABLED) {
+	if (runtimeCfg?.contextMemoryEnabled) {
 	  try {
 	    memoryXml = await getDailyContextMemoryXml(groupIdKey);
 	  } catch (e) {
@@ -599,7 +614,19 @@ async function runProactiveReply(candidate) {
 
     await handleOneMessage(proactiveMsg, null);
   } catch (e) {
-    logger.warn('主动回复流程异常', { err: String(e) });
+    const now = Date.now();
+    const errText = String(e);
+    if (
+      runProactiveReply._lastWarnErr === errText &&
+      typeof runProactiveReply._lastWarnAt === 'number' &&
+      now - runProactiveReply._lastWarnAt < 60000
+    ) {
+      logger.debug('主动回复流程异常(已节流)', { err: errText });
+      return;
+    }
+    runProactiveReply._lastWarnErr = errText;
+    runProactiveReply._lastWarnAt = now;
+    logger.warn('主动回复流程异常', { err: errText });
   }
 }
 
@@ -643,7 +670,8 @@ async function handleOneMessage(msg, taskId) {
       randomUUID,
       saveMessageCache,
       enqueueDelayedJob,
-      desireManager
+      desireManager,
+      socialContextManager
     },
     msg,
     taskId
@@ -720,6 +748,11 @@ async function sendAndWaitResult(message) {
   return null;
 }
 
+try {
+  socialContextManager = new SocialContextManager({ sendAndWaitResult });
+  socialContextManager.refresh(false).catch(() => {});
+} catch {}
+
 const delayJobRunJob = createDelayJobRunJob({
   HistoryStore,
   loadMessageCache,
@@ -744,7 +777,8 @@ const delayJobRunJob = createDelayJobRunJob({
   randomUUID,
   desireManager,
   getActiveTaskCount,
-  enqueueProactiveCandidate
+  enqueueProactiveCandidate,
+  socialContextManager
 });
 
 startDelayJobWorker({

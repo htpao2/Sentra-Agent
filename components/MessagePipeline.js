@@ -396,6 +396,13 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
 
     const agentPresetXml = AGENT_PRESET_XML || '';
 
+    let socialXml = '';
+    try {
+      if (ctx && ctx.socialContextManager && typeof ctx.socialContextManager.getXml === 'function') {
+        socialXml = await ctx.socialContextManager.getXml();
+      }
+    } catch {}
+
     // 组合系统提示词：baseSystem + persona + emo + memory + agent-preset(最后)
     let memoryXml = '';
     if (CONTEXT_MEMORY_ENABLED) {
@@ -409,7 +416,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
       }
     }
 
-    const systemParts = [baseSystem, personaContext, emoXml, memoryXml, agentPresetXml].filter(Boolean);
+    const systemParts = [baseSystem, personaContext, emoXml, memoryXml, socialXml, agentPresetXml].filter(Boolean);
     const systemContent = systemParts.join('\n\n');
 
     const maybeRewriteSentraResponse = async (rawResponse) => {

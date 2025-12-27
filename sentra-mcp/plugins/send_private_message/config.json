@@ -1,0 +1,44 @@
+{
+  "name": "send_private_message",
+  "description": "Specify a target QQ user and the intended message goal. This tool helps you decide routing.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "user_id": {
+        "type": "string",
+        "pattern": "^\\d+$",
+        "description": "Target QQ user_id (digits only)."
+      },
+      "content": {
+        "type": "string",
+        "description": "Message intent/summary. Write what you want to convey, not a literal template to be copied verbatim."
+      },
+      "media_hints": {
+        "type": "array",
+        "description": "Optional hints if the message should include media. Final sending still uses <resources> with routing prefixes.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["image", "video", "record", "file"],
+              "description": "Media type."
+            },
+            "source_hint": {
+              "type": "string",
+              "description": "A hint of the file/url to use (may be omitted if unknown)."
+            },
+            "caption_hint": {
+              "type": "string",
+              "description": "Optional caption hint."
+            }
+          },
+          "required": ["type"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["user_id", "content"],
+    "additionalProperties": false
+  }
+}

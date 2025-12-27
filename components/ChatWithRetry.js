@@ -3,7 +3,7 @@ import { tokenCounter } from '../src/token-counter.js';
 import { repairSentraResponse } from '../utils/formatRepair.js';
 import { getEnv, getEnvInt, getEnvBool } from '../utils/envHotReloader.js';
 import { extractAllFullXMLTags } from '../utils/xmlUtils.js';
-import { parseReplyGateDecisionFromSentraTools, parseSendFusionFromSentraTools } from '../utils/protocolUtils.js';
+import { parseReplyGateDecisionFromSentraTools, parseSendFusionFromSentraTools, parseSentraResponse } from '../utils/protocolUtils.js';
 
 const logger = createLogger('ChatWithRetry');
 
@@ -182,6 +182,17 @@ function extractAndCountTokens(response) {
   return { text: combinedText, tokens };
 }
 
+function hasNonTextPayload(response) {
+  try {
+    const parsed = parseSentraResponse(response);
+    const hasResources = parsed && Array.isArray(parsed.resources) && parsed.resources.length > 0;
+    const hasEmoji = parsed && parsed.emoji && parsed.emoji.source;
+    return !!(hasResources || hasEmoji);
+  } catch {
+    return false;
+  }
+}
+
 function buildProtocolReminder() {
   return [
     'CRITICAL OUTPUT RULES:',
@@ -356,7 +367,7 @@ export async function chatWithRetry(agent, conversations, modelOrOptions, groupI
 
       const noReply = (expectedOutput === 'reply_gate_decision_tools' || expectedOutput === 'send_fusion_tools')
         ? false
-        : tokens === 0;
+        : (tokens === 0 && !hasNonTextPayload(response));
       if (noReply) {
         logger.warn(
           `[${groupId}] Token统计为 0，本轮按“保持沉默/不回复”处理（不应向用户发送任何内容）`

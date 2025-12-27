@@ -220,7 +220,15 @@ export function createDelayJobRunJob(ctx) {
       } catch {}
     }
     const agentPresetXml = AGENT_PRESET_XML || '';
-    const parts = [baseSystem, personaXml, emoXml, memoryXml, agentPresetXml].filter(Boolean);
+
+    let socialXml = '';
+    try {
+      if (ctx && ctx.socialContextManager && typeof ctx.socialContextManager.getXml === 'function') {
+        socialXml = await ctx.socialContextManager.getXml();
+      }
+    } catch {}
+
+    const parts = [baseSystem, personaXml, emoXml, memoryXml, socialXml, agentPresetXml].filter(Boolean);
     return parts.join('\n\n');
   }
 

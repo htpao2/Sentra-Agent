@@ -112,6 +112,7 @@ class ReplySendQueue {
           const resources = [];
           let emoji = null;
           let hasTool = false;
+          let hasTargetRouting = false;
 
           for (let i = 0; i < batch.length; i++) {
             const item = batch[i];
@@ -138,6 +139,10 @@ class ReplySendQueue {
               resources.push(r);
             }
 
+            if (parsed && (parsed.group_id || parsed.user_id)) {
+              hasTargetRouting = true;
+            }
+
             if (parsed && parsed.emoji && parsed.emoji.source) {
               emoji = parsed.emoji;
             }
@@ -145,6 +150,10 @@ class ReplySendQueue {
             if (meta && meta.hasTool === true) {
               hasTool = true;
             }
+          }
+
+          if (hasTargetRouting) {
+            throw new Error('skip_send_fusion_due_to_target_routing');
           }
 
           const fusion = await decideSendFusionBatch({ groupId, userQuestion: '', candidates });
@@ -628,6 +637,20 @@ class ReplySendQueue {
     let resources = parsed && Array.isArray(parsed.resources) ? parsed.resources : [];
     let emoji = parsed && parsed.emoji && parsed.emoji.source ? parsed.emoji : null;
 
+    let targetGroupId = null;
+    let targetUserId = null;
+    for (const k of allowed) {
+      const key = String(k || '').trim();
+      if (!key) continue;
+      if (key.startsWith('target|group:')) {
+        const v = key.slice('target|group:'.length).trim();
+        if (v && /^\d+$/.test(v)) targetGroupId = v;
+      } else if (key.startsWith('target|private:')) {
+        const v = key.slice('target|private:'.length).trim();
+        if (v && /^\d+$/.test(v)) targetUserId = v;
+      }
+    }
+
     // 容错：如果原始 response 无法解析，则仅根据 resourceKeys 反构建 resources/emoji
     if ((!parsed || (!Array.isArray(parsed.resources) && !(parsed && parsed.emoji))) && allowed.size > 0) {
       resources = [];
@@ -635,6 +658,9 @@ class ReplySendQueue {
       for (const k of allowed) {
         const key = String(k || '');
         if (!key) continue;
+        if (key.startsWith('target|')) {
+          continue;
+        }
         if (key.startsWith('emoji|')) {
           const src = key.slice('emoji|'.length);
           if (src) {
@@ -665,6 +691,12 @@ class ReplySendQueue {
 
     const lines = [];
     lines.push('<sentra-response>');
+
+    if (targetGroupId && !targetUserId) {
+      lines.push(`  <group_id>${targetGroupId}</group_id>`);
+    } else if (targetUserId && !targetGroupId) {
+      lines.push(`  <user_id>${targetUserId}</user_id>`);
+    }
 
     if (filtered.length > 0) {
       lines.push('  <resources>');

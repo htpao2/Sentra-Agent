@@ -783,6 +783,45 @@ export function DesktopView(props: DesktopViewProps) {
           >
             <DevCenterV2
               allItems={allItems}
+              tools={[
+                {
+                  id: 'presets-editor',
+                  name: 'presets-editor',
+                  subtitle: '预设撰写（内置工具）',
+                  onOpen: () => {
+                    setPresetsEditorOpen(true);
+                    setPresetsEditorMinimized(false);
+                    bringUtilityToFront('presets-editor');
+                  },
+                },
+                {
+                  id: 'preset-importer',
+                  name: 'preset-importer',
+                  subtitle: '预设导入（内置工具）',
+                  onOpen: () => {
+                    setPresetImporterOpen(true);
+                    setPresetImporterMinimized(false);
+                    bringUtilityToFront('preset-importer');
+                  },
+                },
+                {
+                  id: 'file-manager',
+                  name: 'file-manager',
+                  subtitle: '文件管理（内置工具）',
+                  onOpen: () => {
+                    setFileManagerOpen(true);
+                    setFileManagerMinimized(false);
+                    bringUtilityToFront('file-manager');
+                  },
+                },
+                {
+                  id: 'deepwiki',
+                  name: 'DeepWiki',
+                  subtitle: '开发文档与指南',
+                  icon: <IoBookOutline style={{ color: '#2563eb' }} />,
+                  onOpen: () => handleOpenDeepWiki(),
+                },
+              ]}
               onOpenItem={(file) => openWindow(file, { maximize: true })}
               onOpenDeepWiki={handleOpenDeepWiki}
             />

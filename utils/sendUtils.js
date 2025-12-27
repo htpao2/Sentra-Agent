@@ -10,9 +10,125 @@ import { parseTextSegments, buildSegmentMessage } from './messageUtils.js';
 import { getReplyableMessageId, updateConversationHistory } from './conversationUtils.js';
 import { createLogger } from './logger.js';
 import { replySendQueue } from './replySendQueue.js';
+import { getEnv, getEnvBool, getEnvInt } from './envHotReloader.js';
 import { randomUUID } from 'crypto';
 
 const logger = createLogger('SendUtils');
+
+function _parseCsvIdSet(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return new Set();
+  return new Set(
+    s
+      .split(',')
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+  );
+}
+
+function _getCrossChatSendConfig() {
+  return {
+    enabled: getEnvBool('CROSS_CHAT_SEND_ENABLED', true),
+    allowedGroupIds: _parseCsvIdSet(getEnv('CROSS_CHAT_SEND_ALLOW_GROUP_IDS', '')),
+    allowedUserIds: _parseCsvIdSet(getEnv('CROSS_CHAT_SEND_ALLOW_USER_IDS', '')),
+    allowedSenderIds: _parseCsvIdSet(getEnv('CROSS_CHAT_SEND_ALLOW_SENDER_IDS', '')),
+    requireTargetIdInUserText: getEnvBool('CROSS_CHAT_SEND_REQUIRE_TARGET_IN_USER_TEXT', false),
+    maxCrossOpsPerResponse: getEnvInt('CROSS_CHAT_SEND_MAX_OPS_PER_RESPONSE', 6)
+  };
+}
+
+function _collectUserProvidedTextForCrossAuth(msg) {
+  const out = [];
+  const push = (v) => {
+    if (typeof v !== 'string') return;
+    const s = v.trim();
+    if (s) out.push(s);
+  };
+
+  push(msg?.text);
+  push(msg?.summary);
+  push(msg?.raw?.text);
+  push(msg?.raw?.summary);
+
+  if (msg?._merged && Array.isArray(msg?._mergedUsers)) {
+    for (const u of msg._mergedUsers) {
+      if (!u) continue;
+      push(u?.text);
+      push(u?.raw?.text);
+      push(u?.raw?.summary);
+    }
+  }
+
+  return out.join('\n\n');
+}
+
+function _isTargetIdExplicitlyMentionedInUserText(msg, id) {
+  const digits = String(id || '').trim();
+  if (!digits) return false;
+  const ctx = _collectUserProvidedTextForCrossAuth(msg);
+  if (!ctx) return false;
+  try {
+    const re = new RegExp(`(^|\\D)${digits}(\\D|$)`);
+    return re.test(ctx);
+  } catch {
+    return ctx.includes(digits);
+  }
+}
+
+function _extractRoutePrefix(text) {
+  const raw = typeof text === 'string' ? text : '';
+  return { kind: 'current', id: '', rest: raw };
+}
+
+function _resolveRouteTarget(msg, route) {
+  const current = {
+    kind: msg?.type === 'private' ? 'private' : 'group',
+    id: msg?.type === 'private' ? String(msg?.sender_id ?? '') : String(msg?.group_id ?? '')
+  };
+
+  const kind = route?.kind || 'current';
+  if (kind === 'current') return { kind: current.kind, id: current.id, isCurrent: true };
+
+  const id = String(route?.id || '').trim();
+  const isCurrent = kind === current.kind && id && id === current.id;
+  return { kind, id, isCurrent };
+}
+
+function _resolveRouteTargetWithDefault(msg, route, defaultRoute) {
+  if (route && route.kind === 'current' && defaultRoute && defaultRoute.kind && defaultRoute.id) {
+    const current = {
+      kind: msg?.type === 'private' ? 'private' : 'group',
+      id: msg?.type === 'private' ? String(msg?.sender_id ?? '') : String(msg?.group_id ?? '')
+    };
+    const kind = String(defaultRoute.kind || '').trim();
+    const id = String(defaultRoute.id || '').trim();
+    const isCurrent = kind === current.kind && id && id === current.id;
+    return { kind, id, isCurrent, explicitByProtocol: true };
+  }
+  return _resolveRouteTarget(msg, route);
+}
+
+function _isCrossRouteAllowed(msg, routeTarget, crossCfg) {
+  if (!routeTarget || routeTarget.isCurrent) return true;
+  if (!crossCfg?.enabled) return false;
+
+  const senderId = String(msg?.sender_id ?? '').trim();
+  if (crossCfg.allowedSenderIds.size > 0) {
+    if (!senderId || !crossCfg.allowedSenderIds.has(senderId)) return false;
+  }
+
+  if (crossCfg.requireTargetIdInUserText && !routeTarget?.explicitByProtocol) {
+    if (!_isTargetIdExplicitlyMentionedInUserText(msg, routeTarget.id)) return false;
+  }
+
+  if (routeTarget.kind === 'group') {
+    return crossCfg.allowedGroupIds.size === 0 || crossCfg.allowedGroupIds.has(String(routeTarget.id));
+  }
+  if (routeTarget.kind === 'private') {
+    return crossCfg.allowedUserIds.size === 0 || crossCfg.allowedUserIds.has(String(routeTarget.id));
+  }
+  return false;
+}
 
 /**
  * 智能发送消息内部实现（完全拟人化，只从AI的resources中提取文件）
@@ -34,6 +150,12 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
   const replyMode = parsed.replyMode || 'none';
   const mentions = Array.isArray(parsed.mentions) ? parsed.mentions : [];
   const hasSendDirective = typeof response === 'string' && response.includes('<send>');
+
+  const defaultRoute = (parsed && parsed.group_id)
+    ? { kind: 'group', id: String(parsed.group_id) }
+    : ((parsed && parsed.user_id) ? { kind: 'private', id: String(parsed.user_id) } : null);
+
+  const crossCfg = _getCrossChatSendConfig();
   
   logger.debug(`文本段落数: ${textSegments.length}`);
   logger.debug(`协议资源数: ${protocolResources.length}`);
@@ -44,13 +166,17 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
   // 只从AI的resources中提取文件（支持本地路径和 HTTP/HTTPS 链接）
   const protocolFiles = [];
   protocolResources.forEach(res => {
-    logger.debug(`处理协议资源: ${res.type} ${res.source}`);
-    if (res.source) {
-      const isHttpUrl = /^https?:\/\//i.test(res.source);
+    const parsedRoute = _extractRoutePrefix(String(res.source || ''));
+    const routeTarget = _resolveRouteTargetWithDefault(msg, parsedRoute, defaultRoute);
+    const source = parsedRoute.rest;
+
+    logger.debug(`处理协议资源: ${res.type} ${source}`);
+    if (source) {
+      const isHttpUrl = /^https?:\/\//i.test(source);
       
       // 本地文件：检查是否存在
-      if (!isHttpUrl && !fs.existsSync(res.source)) {
-        logger.warn(`协议资源文件不存在: ${res.source}`);
+      if (!isHttpUrl && !fs.existsSync(source)) {
+        logger.warn(`协议资源文件不存在: ${source}`);
         return;
       }
       
@@ -58,10 +184,10 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
       let ext = '';
       if (isHttpUrl) {
         // 从 URL 中提取扩展名（去除查询参数）
-        const urlPath = res.source.split('?')[0];
+        const urlPath = source.split('?')[0];
         ext = path.extname(urlPath).toLowerCase();
       } else {
-        ext = path.extname(res.source).toLowerCase();
+        ext = path.extname(source).toLowerCase();
       }
       
       // 根据扩展名判断文件类型
@@ -74,22 +200,23 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
       let fileName = '';
       if (isHttpUrl) {
         // 从 URL 中提取文件名
-        const urlPath = res.source.split('?')[0];
+        const urlPath = source.split('?')[0];
         fileName = path.basename(urlPath) || 'download' + ext;
       } else {
-        fileName = path.basename(res.source);
+        fileName = path.basename(source);
       }
       
       protocolFiles.push({
-        path: res.source,
+        path: source,
         fileName: fileName,
         fileType,
         caption: res.caption,
-        isHttpUrl  // 标记是否为 HTTP 链接
+        isHttpUrl,  // 标记是否为 HTTP 链接
+        routeTarget
       });
       
       if (isHttpUrl) {
-        logger.debug(`添加 HTTP 资源: ${fileType} ${fileName} (${res.source})`);
+        logger.debug(`添加 HTTP 资源: ${fileType} ${fileName} (${source})`);
       } else {
         logger.debug(`添加本地文件: ${fileType} ${fileName}`);
       }
@@ -97,7 +224,16 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
   });
   
   // 解析文本段落
-  const segments = parseTextSegments(textSegments);
+  const segments = parseTextSegments(textSegments)
+    .map((seg) => {
+      const extracted = _extractRoutePrefix(seg?.text || '');
+      const routeTarget = _resolveRouteTargetWithDefault(msg, extracted, defaultRoute);
+      return {
+        text: extracted.rest,
+        routeTarget
+      };
+    })
+    .filter((seg) => seg && typeof seg.text === 'string' && seg.text.trim());
   
   //logger.debug(`文本段落数: ${segments.length}`);
   //logger.debug(`资源文件数: ${protocolFiles.length}`);
@@ -129,19 +265,46 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
   let usedReply = false;
   
   logger.debug(`发送策略: 段落=${segments.length}, replyMode=${finalReplyMode}(${hasSendDirective ? 'by_send' : 'fallback'}), mentions=[${mentionsToUse.join(',')}], allowReply=${allowReply}, replyId=${replyMessageId}`);
+
+  let usedMentions = false;
+  let skippedCrossRouteCount = 0;
+  let crossOps = 0;
   
   // 发送文本段落
   if (segments.length > 0) {
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
+      const routeTarget = segment?.routeTarget || _resolveRouteTarget(msg, { kind: 'current', id: '' });
+
+      if (!routeTarget?.id) {
+        logger.warn('发送目标缺少 id，已跳过该段', { kind: routeTarget?.kind });
+        continue;
+      }
+
+      if (!_isCrossRouteAllowed(msg, routeTarget, crossCfg)) {
+        skippedCrossRouteCount++;
+        continue;
+      }
+
+      if (!routeTarget.isCurrent) {
+        if (crossOps >= crossCfg.maxCrossOpsPerResponse) {
+          skippedCrossRouteCount++;
+          continue;
+        }
+        crossOps++;
+      }
+
       let messageParts = buildSegmentMessage(segment);
       
       if (messageParts.length === 0) continue;
       
       logger.debug(`发送第${i+1}段: ${messageParts.map(p => p.type).join(', ')}`);
       
-      // 第一段根据协议/回退进行 @ 提及（仅群聊）
-      if (i === 0 && isGroupChat && mentionsToUse.length > 0) {
+      const isGroupTarget = routeTarget.kind === 'group';
+      const isPrivateTarget = routeTarget.kind === 'private';
+
+      // 仅在“当前会话”中允许 mentions（避免跨群误 @）
+      if (!usedMentions && routeTarget.isCurrent && isGroupTarget && mentionsToUse.length > 0) {
         const atParts = mentionsToUse.map(mid => {
           const raw = String(mid).trim();
           const qq = (raw.toLowerCase && (raw.toLowerCase() === 'all' || raw.toLowerCase() === '@all')) ? 'all' : raw;
@@ -153,28 +316,29 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
           { type: 'text', data: { text: ' ' } },
           ...messageParts
         ];
+        usedMentions = true;
       }
       
       let sentMessageId = null;
       
       // 根据协议选择是否使用引用回复
-      const wantReply = replyMessageId && allowReply && (
+      const wantReply = routeTarget.isCurrent && replyMessageId && allowReply && (
         (finalReplyMode === 'always') || (finalReplyMode === 'first' && i === 0)
       );
       if (wantReply) {
-        if (isPrivateChat) {
+        if (isPrivateTarget) {
           const result = await sendAndWaitResult({
             type: "sdk",
             path: "send.privateReply",
-            args: [msg.sender_id, replyMessageId, messageParts],
+            args: [Number(routeTarget.id), replyMessageId, messageParts],
             requestId: `private-reply-${Date.now()}-${i}`
           });
           sentMessageId = result?.data?.message_id;
-        } else if (isGroupChat) {
+        } else if (isGroupTarget) {
           const result = await sendAndWaitResult({
             type: "sdk",
             path: "send.groupReply",
-            args: [msg.group_id, replyMessageId, messageParts],
+            args: [Number(routeTarget.id), replyMessageId, messageParts],
             requestId: `group-reply-${Date.now()}-${i}`
           });
           sentMessageId = result?.data?.message_id;
@@ -182,27 +346,27 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
         usedReply = true;
       } else {
         // 普通发送
-        if (isPrivateChat) {
+        if (isPrivateTarget) {
           const result = await sendAndWaitResult({
             type: "sdk",
             path: "send.private",
-            args: [msg.sender_id, messageParts],
+            args: [Number(routeTarget.id), messageParts],
             requestId: `private-${Date.now()}-${i}`
           });
           sentMessageId = result?.data?.message_id;
-        } else if (isGroupChat) {
+        } else if (isGroupTarget) {
           const result = await sendAndWaitResult({
             type: "sdk",
             path: "send.group",
-            args: [msg.group_id, messageParts],
+            args: [Number(routeTarget.id), messageParts],
             requestId: `group-${Date.now()}-${i}`
           });
           sentMessageId = result?.data?.message_id;
         }
       }
       
-      // 更新消息历史
-      if (sentMessageId) {
+      // 更新消息历史（仅对当前会话写入，避免跨群污染）
+      if (routeTarget.isCurrent && sentMessageId) {
         await updateConversationHistory(msg, sentMessageId, true);
         logger.debug(`第${i+1}段发送成功，消息ID: ${sentMessageId}`);
       }
@@ -229,21 +393,46 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
       await new Promise(resolve => setTimeout(resolve, delay));
     }
     
-    const mediaMessageParts = [];
-    mediaFiles.forEach(file => {
-      logger.debug(`添加媒体: ${file.fileType} - ${file.fileName}`);
-      if (file.fileType === 'image') {
-        mediaMessageParts.push({ type: 'image', data: { file: file.path } });
-      } else if (file.fileType === 'video') {
-        mediaMessageParts.push({ type: 'video', data: { file: file.path } });
-      } else if (file.fileType === 'record') {
-        mediaMessageParts.push({ type: 'record', data: { file: file.path } });
+    const grouped = new Map();
+    for (const file of mediaFiles) {
+      const rt = file?.routeTarget || _resolveRouteTarget(msg, { kind: 'current', id: '' });
+      if (!rt?.id) {
+        skippedCrossRouteCount++;
+        continue;
       }
-    });
-    
-    if (mediaMessageParts.length > 0) {
-      // 如果没有文本段且需要 @ 提及，则在媒体前插入 @
-      if (segments.length === 0 && isGroupChat && mentionsToUse.length > 0) {
+      if (!_isCrossRouteAllowed(msg, rt, crossCfg)) {
+        skippedCrossRouteCount++;
+        continue;
+      }
+      if (!rt.isCurrent) {
+        if (crossOps >= crossCfg.maxCrossOpsPerResponse) {
+          skippedCrossRouteCount++;
+          continue;
+        }
+        crossOps++;
+      }
+      const key = `${rt.kind}:${rt.id}`;
+      if (!grouped.has(key)) grouped.set(key, { routeTarget: rt, files: [] });
+      grouped.get(key).files.push(file);
+    }
+
+    for (const group of grouped.values()) {
+      const rt = group.routeTarget;
+      const mediaMessageParts = [];
+      group.files.forEach(file => {
+        logger.debug(`添加媒体: ${file.fileType} - ${file.fileName}`);
+        if (file.fileType === 'image') {
+          mediaMessageParts.push({ type: 'image', data: { file: file.path } });
+        } else if (file.fileType === 'video') {
+          mediaMessageParts.push({ type: 'video', data: { file: file.path } });
+        } else if (file.fileType === 'record') {
+          mediaMessageParts.push({ type: 'record', data: { file: file.path } });
+        }
+      });
+
+      if (mediaMessageParts.length === 0) continue;
+
+      if (segments.length === 0 && rt.isCurrent && rt.kind === 'group' && mentionsToUse.length > 0) {
         const atParts = mentionsToUse.map(mid => {
           const raw = String(mid).trim();
           const qq = (raw.toLowerCase && (raw.toLowerCase() === 'all' || raw.toLowerCase() === '@all')) ? 'all' : raw;
@@ -252,22 +441,23 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
         mediaMessageParts.unshift(...atParts);
       }
 
-      const replyForMedia = replyMessageId && allowReply && (
+      const replyForMedia = rt.isCurrent && replyMessageId && allowReply && (
         finalReplyMode === 'always' || (finalReplyMode === 'first' && !usedReply)
       );
-      if (isPrivateChat) {
+
+      if (rt.kind === 'private') {
         const result = await sendAndWaitResult({
           type: "sdk",
           path: replyForMedia ? "send.privateReply" : "send.private",
-          args: replyForMedia ? [msg.sender_id, replyMessageId, mediaMessageParts] : [msg.sender_id, mediaMessageParts],
+          args: replyForMedia ? [Number(rt.id), replyMessageId, mediaMessageParts] : [Number(rt.id), mediaMessageParts],
           requestId: `private-media-${Date.now()}`
         });
         logger.debug(`媒体发送结果: ${result?.ok ? 'OK' : 'FAIL'}`);
-      } else if (isGroupChat) {
+      } else if (rt.kind === 'group') {
         const result = await sendAndWaitResult({
           type: "sdk",
           path: replyForMedia ? "send.groupReply" : "send.group",
-          args: replyForMedia ? [msg.group_id, replyMessageId, mediaMessageParts] : [msg.group_id, mediaMessageParts],
+          args: replyForMedia ? [Number(rt.id), replyMessageId, mediaMessageParts] : [Number(rt.id), mediaMessageParts],
           requestId: `group-media-${Date.now()}`
         });
         logger.debug(`媒体发送结果: ${result?.ok ? 'OK' : 'FAIL'}`);
@@ -284,19 +474,38 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
     
     for (const file of uploadFiles) {
       logger.debug(`上传文件: ${file.fileName}`);
-      
-      if (isPrivateChat) {
+
+      const rt = file?.routeTarget || _resolveRouteTarget(msg, { kind: 'current', id: '' });
+      if (!rt?.id) {
+        skippedCrossRouteCount++;
+        continue;
+      }
+
+      if (!_isCrossRouteAllowed(msg, rt, crossCfg)) {
+        skippedCrossRouteCount++;
+        continue;
+      }
+
+      if (!rt.isCurrent) {
+        if (crossOps >= crossCfg.maxCrossOpsPerResponse) {
+          skippedCrossRouteCount++;
+          continue;
+        }
+        crossOps++;
+      }
+
+      if (rt.kind === 'private') {
         await sendAndWaitResult({
           type: "sdk",
           path: "file.uploadPrivate",
-          args: [msg.sender_id, file.path, file.fileName],
+          args: [Number(rt.id), file.path, file.fileName],
           requestId: `file-upload-private-${Date.now()}`
         });
-      } else if (isGroupChat) {
+      } else if (rt.kind === 'group') {
         await sendAndWaitResult({
           type: "sdk",
           path: "file.uploadGroup",
-          args: [msg.group_id, file.path, file.fileName, ""],
+          args: [Number(rt.id), file.path, file.fileName, ""],
           requestId: `file-upload-group-${Date.now()}`
         });
       }
@@ -307,11 +516,36 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
   
   // 发送表情包（如果有）
   if (emoji && emoji.source) {
-    logger.debug(`准备发送表情包: ${emoji.source}`);
+    const extracted = _extractRoutePrefix(String(emoji.source || ''));
+    const rt = _resolveRouteTargetWithDefault(msg, extracted, defaultRoute);
+    const emojiPath = extracted.rest;
+
+    if (!rt?.id) {
+      skippedCrossRouteCount++;
+      logger.success('发送完成');
+      return;
+    }
+
+    if (!_isCrossRouteAllowed(msg, rt, crossCfg)) {
+      skippedCrossRouteCount++;
+      logger.success('发送完成');
+      return;
+    }
+
+    if (!rt.isCurrent) {
+      if (crossOps >= crossCfg.maxCrossOpsPerResponse) {
+        skippedCrossRouteCount++;
+        logger.success('发送完成');
+        return;
+      }
+      crossOps++;
+    }
+
+    logger.debug(`准备发送表情包: ${emojiPath}`);
     
     // 验证文件存在性
-    if (!fs.existsSync(emoji.source)) {
-      logger.warn(`表情包文件不存在: ${emoji.source}`);
+    if (!fs.existsSync(emojiPath)) {
+      logger.warn(`表情包文件不存在: ${emojiPath}`);
     } else {
       // 等待一小段时间
       const delay = (textSegments.length > 0 || protocolFiles.length > 0) ? (600 + Math.random() * 800) : 0;
@@ -322,29 +556,33 @@ async function _smartSendInternal(msg, response, sendAndWaitResult, allowReply =
       
       // 构建图片消息
       const emojiMessageParts = [
-        { type: 'image', data: { file: emoji.source } }
+        { type: 'image', data: { file: emojiPath } }
       ];
       
       logger.debug('发送表情包作为图片消息');
       
-      if (isPrivateChat) {
+      if (rt.kind === 'private') {
         const result = await sendAndWaitResult({
           type: "sdk",
           path: "send.private",
-          args: [msg.sender_id, emojiMessageParts],
+          args: [Number(rt.id), emojiMessageParts],
           requestId: `private-emoji-${Date.now()}`
         });
         logger.debug(`表情包发送结果: ${result?.ok ? 'OK' : 'FAIL'}`);
-      } else if (isGroupChat) {
+      } else if (rt.kind === 'group') {
         const result = await sendAndWaitResult({
           type: "sdk",
           path: "send.group",
-          args: [msg.group_id, emojiMessageParts],
+          args: [Number(rt.id), emojiMessageParts],
           requestId: `group-emoji-${Date.now()}`
         });
         logger.debug(`表情包发送结果: ${result?.ok ? 'OK' : 'FAIL'}`);
       }
     }
+  }
+
+  if (skippedCrossRouteCount > 0) {
+    logger.warn('部分跨会话路由目标未获授权或未启用，已跳过发送', { skipped: skippedCrossRouteCount });
   }
   
   logger.success('发送完成');
@@ -392,6 +630,13 @@ export async function smartSend(msg, response, sendAndWaitResult, allowReply = t
           return t && src ? `${t}|${src}` : '';
         })
         .filter(Boolean);
+
+      const targetKey = parsed?.group_id
+        ? `target|group:${String(parsed.group_id)}`
+        : (parsed?.user_id ? `target|private:${String(parsed.user_id)}` : '');
+      if (targetKey) {
+        resourceKeys.push(targetKey);
+      }
 
       if (parsed?.emoji?.source) {
         emojiKey = `emoji|${parsed.emoji.source}`;
