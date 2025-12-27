@@ -366,16 +366,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
     logger.debug(
       `MCP上下文: ${groupId} 使用历史${effectiveHistoryConversations.length}条 (limit=${contextPairsLimit}) → 转换后${mcpHistory.length}条 + 当前1条 = 总计${conversation.length}条`
     );
-    try {
-      const totalConv = conversation.length;
-      const previewLimit = 500000;
-      const convPreview = totalConv > previewLimit ? conversation.slice(0, previewLimit) : conversation;
-      logger.debug(
-        `MCP上下文messages预览(${convPreview.length}/${totalConv}条): ${JSON.stringify(convPreview)}`
-      );
-    } catch (e) {
-      logger.debug(`MCP上下文messages预览序列化失败: ${String(e)}`);
-    }
+    
     // 获取用户画像（如果启用）
     let personaContext = '';
     if (personaManager && userid) {
