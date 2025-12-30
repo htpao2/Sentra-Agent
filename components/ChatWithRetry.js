@@ -132,6 +132,14 @@ function validateResponseFormat(response, expectedOutput = 'sentra_response') {
     return { valid: false, reason: '响应为空或非字符串' };
   }
 
+  // Special-case: When we EXPECT <sentra-response> but the model outputs ONLY <sentra-tools>,
+  // treat it as a valid "toolsOnly" result and let the upper layer decide how to handle it.
+  // This prevents infinite retry loops caused by strict format checks.
+  const toolsOnlyXml = extractOnlySentraToolsBlock(response);
+  if (toolsOnlyXml) {
+    return { valid: true, toolsOnly: true, rawToolsXml: toolsOnlyXml };
+  }
+
   const normalized = extractFirstSentraResponseBlock(response);
   if (!normalized) {
     return { valid: false, reason: '缺少 <sentra-response> 标签' };
@@ -324,6 +332,20 @@ export async function chatWithRetry(agent, conversations, modelOrOptions, groupI
           logger.error(`[${groupId}] 格式验证失败-最终: 已达最大重试次数`);
           logger.error(`[${groupId}] 最后原始响应片段: ${getResponsePreview(lastResponse)}`);
           return { response: null, retries, success: false, reason: formatCheck.reason };
+        }
+
+        if (formatCheck.toolsOnly) {
+          logger.warn(
+            `[${groupId}] 期望 <sentra-response> 但收到纯 <sentra-tools>，将上抛 toolsOnly 交由上层回退处理`
+          );
+          return {
+            response: null,
+            rawResponse,
+            retries,
+            success: true,
+            toolsOnly: true,
+            rawToolsXml: formatCheck.rawToolsXml || rawResponse
+          };
         }
 
         if (formatCheck.normalized && formatCheck.normalized !== response) {

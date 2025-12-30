@@ -1,4 +1,5 @@
 import { createLogger } from './logger.js';
+import { escapeXml } from './xmlUtils.js';
 import { Agent } from '../agent.js';
 import { getEnv, getEnvInt } from './envHotReloader.js';
 import { loadPrompt } from '../prompts/loader.js';
@@ -181,7 +182,7 @@ export async function repairSentraResponse(rawText, opts = {}) {
   for (let i = 0; i < maxTexts; i++) {
     const seg = String(texts[i] ?? '').trim();
     if (!seg) continue;
-    xmlParts.push(`  <text${i + 1}>${seg}</text${i + 1}>`);
+    xmlParts.push(`  <text${i + 1}>${escapeXml(seg)}</text${i + 1}>`);
   }
 
   if (resources.length === 0) {
@@ -193,9 +194,9 @@ export async function repairSentraResponse(rawText, opts = {}) {
       if (!r || !r.type || !r.source) continue;
       const caption = r.caption ? String(r.caption) : '';
       xmlParts.push('    <resource>');
-      xmlParts.push(`      <type>${r.type}</type>`);
-      xmlParts.push(`      <source>${r.source}</source>`);
-      if (caption) xmlParts.push(`      <caption>${caption}</caption>`);
+      xmlParts.push(`      <type>${escapeXml(r.type)}</type>`);
+      xmlParts.push(`      <source>${escapeXml(r.source)}</source>`);
+      if (caption) xmlParts.push(`      <caption>${escapeXml(caption)}</caption>`);
       xmlParts.push('    </resource>');
     }
     xmlParts.push('  </resources>');
@@ -367,7 +368,7 @@ export async function repairSentraPersona(rawText, opts = {}) {
 
   const lines = [];
   lines.push('<sentra-persona>');
-  if (result.summary) lines.push(`  <summary>${String(result.summary).trim()}</summary>`);
+  if (result.summary) lines.push(`  <summary>${escapeXml(String(result.summary).trim())}</summary>`);
 
   const hasTraits =
     (Array.isArray(result.personality) && result.personality.length) ||
@@ -380,27 +381,27 @@ export async function repairSentraPersona(rawText, opts = {}) {
     lines.push('  <traits>');
     if (Array.isArray(result.personality) && result.personality.length) {
       lines.push('    <personality>');
-      for (const t of result.personality) lines.push(`      <trait>${String(t).trim()}</trait>`);
+      for (const t of result.personality) lines.push(`      <trait>${escapeXml(String(t).trim())}</trait>`);
       lines.push('    </personality>');
     }
     if (result.communication_style) {
-      lines.push('    <communication_style>' + String(result.communication_style).trim() + '</communication_style>');
+      lines.push('    <communication_style>' + escapeXml(String(result.communication_style).trim()) + '</communication_style>');
     }
     if (Array.isArray(result.interests) && result.interests.length) {
       lines.push('    <interests>');
-      for (const it of result.interests) lines.push(`      <interest>${String(it).trim()}</interest>`);
+      for (const it of result.interests) lines.push(`      <interest>${escapeXml(String(it).trim())}</interest>`);
       lines.push('    </interests>');
     }
     if (Array.isArray(result.behavioral_patterns) && result.behavioral_patterns.length) {
       lines.push('    <behavioral_patterns>');
-      for (const p of result.behavioral_patterns) lines.push(`      <pattern>${String(p).trim()}</pattern>`);
+      for (const p of result.behavioral_patterns) lines.push(`      <pattern>${escapeXml(String(p).trim())}</pattern>`);
       lines.push('    </behavioral_patterns>');
     }
     if (result.emotional_profile && (result.emotional_profile.dominant_emotions || result.emotional_profile.sensitivity_areas || result.emotional_profile.expression_tendency)) {
       lines.push('    <emotional_profile>');
-      if (result.emotional_profile.dominant_emotions) lines.push('      <dominant_emotions>' + String(result.emotional_profile.dominant_emotions).trim() + '</dominant_emotions>');
-      if (result.emotional_profile.sensitivity_areas) lines.push('      <sensitivity_areas>' + String(result.emotional_profile.sensitivity_areas).trim() + '</sensitivity_areas>');
-      if (result.emotional_profile.expression_tendency) lines.push('      <expression_tendency>' + String(result.emotional_profile.expression_tendency).trim() + '</expression_tendency>');
+      if (result.emotional_profile.dominant_emotions) lines.push('      <dominant_emotions>' + escapeXml(String(result.emotional_profile.dominant_emotions).trim()) + '</dominant_emotions>');
+      if (result.emotional_profile.sensitivity_areas) lines.push('      <sensitivity_areas>' + escapeXml(String(result.emotional_profile.sensitivity_areas).trim()) + '</sensitivity_areas>');
+      if (result.emotional_profile.expression_tendency) lines.push('      <expression_tendency>' + escapeXml(String(result.emotional_profile.expression_tendency).trim()) + '</expression_tendency>');
       lines.push('    </emotional_profile>');
     }
     lines.push('  </traits>');
@@ -410,7 +411,7 @@ export async function repairSentraPersona(rawText, opts = {}) {
     lines.push('  <insights>');
     for (const ins of result.insights) {
       lines.push('    <insight>');
-      lines.push('      ' + String(ins.content || '').trim());
+      lines.push('      ' + escapeXml(String(ins.content || '').trim()));
       lines.push('    </insight>');
     }
     lines.push('  </insights>');
@@ -418,9 +419,9 @@ export async function repairSentraPersona(rawText, opts = {}) {
 
   if (result.metadata && (result.metadata.confidence || result.metadata.data_quality || result.metadata.update_priority)) {
     lines.push('  <metadata>');
-    if (result.metadata.confidence) lines.push('    <confidence>' + String(result.metadata.confidence).trim() + '</confidence>');
-    if (result.metadata.data_quality) lines.push('    <data_quality>' + String(result.metadata.data_quality).trim() + '</data_quality>');
-    if (result.metadata.update_priority) lines.push('    <update_priority>' + String(result.metadata.update_priority).trim() + '</update_priority>');
+    if (result.metadata.confidence) lines.push('    <confidence>' + escapeXml(String(result.metadata.confidence).trim()) + '</confidence>');
+    if (result.metadata.data_quality) lines.push('    <data_quality>' + escapeXml(String(result.metadata.data_quality).trim()) + '</data_quality>');
+    if (result.metadata.update_priority) lines.push('    <update_priority>' + escapeXml(String(result.metadata.update_priority).trim()) + '</update_priority>');
     lines.push('  </metadata>');
   }
 

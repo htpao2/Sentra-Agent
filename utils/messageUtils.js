@@ -3,6 +3,8 @@
  * 包含文本段落解析
  */
 
+import { unescapeXml } from './xmlUtils.js';
+
 //import { createLogger } from './logger.js';
 
 //const logger = createLogger('MessageUtils');
@@ -31,7 +33,7 @@ export function buildSegmentMessage(segment) {
   const messageParts = [];
   
   if (segment.text) {
-    messageParts.push({ type: 'text', data: { text: segment.text } });
+    messageParts.push({ type: 'text', data: { text: unescapeXml(segment.text) } });
   }
   
   return messageParts;

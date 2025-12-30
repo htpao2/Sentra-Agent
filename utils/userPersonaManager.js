@@ -17,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { extractXMLTag, extractAllXMLTags } from './xmlUtils.js';
+import { escapeXml, escapeXmlAttr, unescapeXml } from './xmlUtils.js';
 import { createLogger } from './logger.js';
 import { repairSentraPersona } from './formatRepair.js';
 import { getEnv, getEnvInt, getEnvBool, onEnvReload } from './envHotReloader.js';
@@ -473,10 +474,10 @@ class UserPersonaManager {
       const time = new Date(msg.timestamp).toLocaleString('zh-CN');
       const name = msg.senderName || '用户';
       const text = msg.text || '';
-      prompt += `  <message index="${idx + 1}">\n`;
-      prompt += `    <time>${time}</time>\n`;
-      prompt += `    <sender>${name}</sender>\n`;
-      prompt += `    <content>${text}</content>\n`;
+      prompt += `  <message index="${escapeXmlAttr(String(idx + 1))}">\n`;
+      prompt += `    <time>${escapeXml(time)}</time>\n`;
+      prompt += `    <sender>${escapeXml(name)}</sender>\n`;
+      prompt += `    <content>${escapeXml(text)}</content>\n`;
       prompt += `  </message>\n`;
     });
     prompt += '</conversation_history>\n\n';
@@ -537,7 +538,7 @@ class UserPersonaManager {
       const persona = this._parsePersonaXML(personaXML);
       
       // 保存原始 XML 用于后续优化（包含 sender_id 属性）
-      const senderIdAttr = senderId ? ` sender_id="${senderId}"` : '';
+      const senderIdAttr = senderId ? ` sender_id="${escapeXmlAttr(unescapeXml(String(senderId)))}"` : '';
       persona._raw_xml = `<sentra-persona${senderIdAttr}>\n${personaXML}\n</sentra-persona>`;
       
       return persona;
@@ -680,48 +681,50 @@ class UserPersonaManager {
     
     const lines = [];
     const s = (v) => (v == null ? '' : String(v));
+    const escText = (v) => escapeXml(unescapeXml(s(v)));
+    const escAttr = (v) => escapeXmlAttr(unescapeXml(s(v)));
     const arr = (a) => Array.isArray(a) ? a : (a ? [a] : []);
     const items = (a) => arr(a).map(x => (typeof x === 'object' && x && (x.content || x.attributes)) ? x : { content: s(x), attributes: {} }).filter(i => i.content);
     const attrs = (o, ks) => {
       const ps = [];
-      ks.forEach(k => { if (o && o[k]) ps.push(`${k}="${o[k]}"`); });
+      ks.forEach(k => { if (o && o[k]) ps.push(`${k}="${escAttr(o[k])}"`); });
       return ps.length ? ' ' + ps.join(' ') : '';
     };
     
-    const senderAttr = senderId ? ` sender_id="${s(senderId)}"` : '';
+    const senderAttr = senderId ? ` sender_id="${escAttr(senderId)}"` : '';
     lines.push(`<sentra-persona${senderAttr}>`);
     
-    if (persona.summary) lines.push(`  <summary>${s(persona.summary)}</summary>`);
+    if (persona.summary) lines.push(`  <summary>${escText(persona.summary)}</summary>`);
     
     if (persona.traits) {
       lines.push('  <traits>');
       const pers = items(persona.traits.personality);
       if (pers.length) {
         lines.push('    <personality>');
-        pers.forEach(t => lines.push(`      <trait${attrs(t.attributes, ['status'])}>${s(t.content)}</trait>`));
+        pers.forEach(t => lines.push(`      <trait${attrs(t.attributes, ['status'])}>${escText(t.content)}</trait>`));
         lines.push('    </personality>');
       }
       if (persona.traits.communication_style) {
-        lines.push(`    <communication_style>${s(persona.traits.communication_style)}</communication_style>`);
+        lines.push(`    <communication_style>${escText(persona.traits.communication_style)}</communication_style>`);
       }
       const ints = items(persona.traits.interests);
       if (ints.length) {
         lines.push('    <interests>');
-        ints.forEach(it => lines.push(`      <interest${attrs(it.attributes, ['category', 'status'])}>${s(it.content)}</interest>`));
+        ints.forEach(it => lines.push(`      <interest${attrs(it.attributes, ['category', 'status'])}>${escText(it.content)}</interest>`));
         lines.push('    </interests>');
       }
       const pats = items(persona.traits.behavioral_patterns);
       if (pats.length) {
         lines.push('    <behavioral_patterns>');
-        pats.forEach(p => lines.push(`      <pattern${attrs(p.attributes, ['type', 'trend'])}>${s(p.content)}</pattern>`));
+        pats.forEach(p => lines.push(`      <pattern${attrs(p.attributes, ['type', 'trend'])}>${escText(p.content)}</pattern>`));
         lines.push('    </behavioral_patterns>');
       }
       const ep = persona.traits.emotional_profile || {};
       if (ep.dominant_emotions || ep.sensitivity_areas || ep.expression_tendency) {
         lines.push('    <emotional_profile>');
-        if (ep.dominant_emotions) lines.push(`      <dominant_emotions>${s(ep.dominant_emotions)}</dominant_emotions>`);
-        if (ep.sensitivity_areas) lines.push(`      <sensitivity_areas>${s(ep.sensitivity_areas)}</sensitivity_areas>`);
-        if (ep.expression_tendency) lines.push(`      <expression_tendency>${s(ep.expression_tendency)}</expression_tendency>`);
+        if (ep.dominant_emotions) lines.push(`      <dominant_emotions>${escText(ep.dominant_emotions)}</dominant_emotions>`);
+        if (ep.sensitivity_areas) lines.push(`      <sensitivity_areas>${escText(ep.sensitivity_areas)}</sensitivity_areas>`);
+        if (ep.expression_tendency) lines.push(`      <expression_tendency>${escText(ep.expression_tendency)}</expression_tendency>`);
         lines.push('    </emotional_profile>');
       }
       lines.push('  </traits>');
@@ -730,7 +733,7 @@ class UserPersonaManager {
     const insights = items(persona.insights);
     if (insights.length) {
       lines.push('  <insights>');
-      insights.forEach(ins => lines.push(`    <insight${attrs(ins.attributes, ['evidence', 'novelty'])}>${s(ins.content)}</insight>`));
+      insights.forEach(ins => lines.push(`    <insight${attrs(ins.attributes, ['evidence', 'novelty'])}>${escText(ins.content)}</insight>`));
       lines.push('  </insights>');
     }
     
@@ -739,8 +742,8 @@ class UserPersonaManager {
       const cont = persona.evolution.continuity;
       if (changes.length || cont) {
         lines.push('  <evolution>');
-        changes.forEach(c => lines.push(`    <change${attrs(c.attributes, ['type'])}>${s(c.content)}</change>`));
-        if (cont) lines.push(`    <continuity>${s(cont)}</continuity>`);
+        changes.forEach(c => lines.push(`    <change${attrs(c.attributes, ['type'])}>${escText(c.content)}</change>`));
+        if (cont) lines.push(`    <continuity>${escText(cont)}</continuity>`);
         lines.push('  </evolution>');
       }
     }
@@ -748,9 +751,9 @@ class UserPersonaManager {
     const md = persona.metadata || {};
     if (md.confidence || md.data_quality || md.update_priority) {
       lines.push('  <metadata>');
-      if (md.confidence) lines.push(`    <confidence>${s(md.confidence)}</confidence>`);
-      if (md.data_quality) lines.push(`    <data_quality>${s(md.data_quality)}</data_quality>`);
-      if (md.update_priority) lines.push(`    <update_priority>${s(md.update_priority)}</update_priority>`);
+      if (md.confidence) lines.push(`    <confidence>${escText(md.confidence)}</confidence>`);
+      if (md.data_quality) lines.push(`    <data_quality>${escText(md.data_quality)}</data_quality>`);
+      if (md.update_priority) lines.push(`    <update_priority>${escText(md.update_priority)}</update_priority>`);
       lines.push('  </metadata>');
     }
     

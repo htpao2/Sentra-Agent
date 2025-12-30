@@ -4,6 +4,66 @@ import os from 'node:os';
 import logger from '../../src/logger/index.js';
 import { httpClient } from '../../src/utils/http.js';
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当音视频转写失败时，要说明原因（文件路径/网络/权限/接口/长度），给替代方案（换文件/压缩/截取片段/稍后重试/分段），并引导用户补充必要信息。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我需要你提供要转写的音频/视频文件（file）。当前参数缺失，所以我没法开始转写。你把文件路径或链接发我一下，我就继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 file：本地文件路径或 http(s) URL',
+        '可选提供 language（语言）和 prompt（转写提示/上下文）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'FILE_NOT_FOUND') {
+    return {
+      suggested_reply: '我没有找到你提供的本地文件路径，所以没法开始转写。你确认一下路径是否存在、是否有权限读取，然后再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '确认 file 路径真实存在（建议用绝对路径）',
+        '检查文件权限（是否可读）',
+        '如果是 URL，确认链接可直接访问且稳定',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我在转写音视频时卡住了，像是网络/接口超时了。我可以先给你一个不依赖工具的整理方案，或者我们稍后重试；也可以把文件截短/压缩后再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试',
+        '如果文件较大，建议先截取关键片段或压缩码率',
+        '如果是 URL，建议先下载成本地文件再转写',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试转写音视频，但这次工具执行失败了。我可以先按你的需求给出整理/摘要的结构模板；如果你愿意，我们也可以换更短的片段或分段重试。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '提供更短的片段或拆成多个文件分段转写',
+      '告诉我你更想要“逐字稿”还是“摘要/要点/时间轴”',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 // ---- Chunking helpers ----
 function mb(n) { return Math.max(0, Number(n) || 0) * 1024 * 1024; }
 
@@ -69,9 +129,9 @@ function buildChunks(fileSize, chunkSize, overlapBytes) {
   return chunks;
 }
 
-async function headRemote(url, timeoutMs) {
+async function headRemote(url, timeoutMs, headers) {
   try {
-    const res = await httpClient.head(url, { timeout: Math.min(timeoutMs, 15000) });
+    const res = await httpClient.head(url, { timeout: Math.min(timeoutMs, 15000), headers });
     const len = Number(res.headers['content-length']);
     const acceptRanges = String(res.headers['accept-ranges'] || '').toLowerCase();
     return { size: Number.isFinite(len) ? len : null, acceptRanges };
@@ -249,7 +309,7 @@ async function postWithRetry(url, formData, timeoutMs, retries, retryBaseMs) {
         logger.error?.('av_transcribe:post_failed', { attempt, info });
         throw e;
       }
-      const delay = Math.min(baseDelayMs * Math.pow(2, attempt), 8000) + Math.floor(Math.random() * 250);
+      const delay = Math.min(retryBaseMs * Math.pow(2, attempt), 8000) + Math.floor(Math.random() * 250);
       logger.warn?.('av_transcribe:post_retry', { attempt, waitMs: delay, info });
       await sleep(delay);
       attempt += 1;
@@ -263,7 +323,7 @@ export default async function handler(args = {}, options = {}) {
   const prompt = args.prompt || null;
   
   if (!filePath) {
-    return { success: false, code: 'INVALID', error: 'file is required' };
+    return { success: false, code: 'INVALID', error: 'file is required', advice: buildAdvice('INVALID', { tool: 'av_transcribe' }) };
   }
   
   const penv = options?.pluginEnv || {};
@@ -291,7 +351,7 @@ export default async function handler(args = {}, options = {}) {
     // 支持本地文件与 http/https URL
     const isUrl = filePath.startsWith('http://') || filePath.startsWith('https://');
     if (!isUrl && !fssync.existsSync(filePath)) {
-      return { success: false, code: 'FILE_NOT_FOUND', error: `File not found: ${filePath}` };
+      return { success: false, code: 'FILE_NOT_FOUND', error: `File not found: ${filePath}`, advice: buildAdvice('FILE_NOT_FOUND', { tool: 'av_transcribe', file: filePath }) };
     }
 
     // 获取大小与是否支持 Range（URL 优先 HEAD；不支持则回落为本地临时文件以启用切片）
@@ -323,7 +383,7 @@ export default async function handler(args = {}, options = {}) {
       const FormData = (await import('form-data')).default;
       const formData = new FormData();
       if (isUrl && !usingTemp) {
-        const remote = await axios.get(filePath, { responseType: 'stream', timeout: timeoutMs, maxBodyLength: Infinity, headers: fetchHeaders });
+        const remote = await httpClient.get(filePath, { responseType: 'stream', timeout: timeoutMs, maxBodyLength: Infinity, headers: fetchHeaders });
         const guessedName = (() => { try { return path.basename(new URL(filePath).pathname) || 'audio'; } catch { return 'audio'; }})();
         const contentType = remote.headers?.['content-type'] || 'application/octet-stream';
         formData.append('file', remote.data, { filename: guessedName, contentType });
@@ -362,7 +422,7 @@ export default async function handler(args = {}, options = {}) {
 
       if (isUrl && !usingTemp) {
         const rangeHeader = { Range: `bytes=${c.start}-${c.end - 1}`, ...fetchHeaders };
-        const resp = await axios.get(filePath, { responseType: 'stream', headers: rangeHeader, timeout: timeoutMs, maxBodyLength: Infinity });
+        const resp = await httpClient.get(filePath, { responseType: 'stream', headers: rangeHeader, timeout: timeoutMs, maxBodyLength: Infinity });
         try { filename = path.basename(new URL(filePath).pathname) || filename; } catch {}
         contentType = resp.headers?.['content-type'] || contentType;
         formData.append('file', resp.data, { filename, contentType });
@@ -427,7 +487,11 @@ export default async function handler(args = {}, options = {}) {
       error: String(e?.message || e),
       stack: e?.stack
     });
-    
-    return { success: false, code: 'ERR', error: String(e?.message || e) };
+
+    const isTimeout = isTimeoutError(e);
+    const code = isTimeout ? 'TIMEOUT' : 'ERR';
+    const kind = isTimeout ? 'TIMEOUT' : 'ERR';
+    const isUrl = filePath.startsWith('http://') || filePath.startsWith('https://');
+    return { success: false, code, error: String(e?.message || e), advice: buildAdvice(kind, { tool: 'av_transcribe', file: filePath, source: isUrl ? 'url' : 'file' }) };
   }
 }

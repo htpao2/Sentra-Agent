@@ -1,6 +1,8 @@
-import { DateTime } from 'luxon';
-import { getRedis } from './redisClient.js';
 import { createLogger } from './logger.js';
+import { getRedisSafe } from './redisClient.js';
+import { DateTime } from 'luxon';
+import { formatDateFromMillis } from './timeUtils.js';
+import { escapeXml, escapeXmlAttr } from './xmlUtils.js';
 import { getEnv, getEnvInt } from './envHotReloader.js';
 
 const logger = createLogger('ContextMemory');
@@ -12,23 +14,6 @@ function getContextMemoryRuntimeConfig() {
     ttlSeconds: getEnvInt('REDIS_CONTEXT_MEMORY_TTL_SECONDS', 0) || 0,
     timezone: getEnv('CONTEXT_MEMORY_TIMEZONE', 'Asia/Shanghai')
   };
-}
-
-function getRedisSafe() {
-  const redis = getRedis();
-  if (!redis) {
-    return null;
-  }
-  return redis;
-}
-
-function formatDateFromMillis(ms) {
-  const { timezone } = getContextMemoryRuntimeConfig();
-  try {
-    return DateTime.fromMillis(ms).setZone(timezone).toFormat('yyyy-LL-dd');
-  } catch {
-    return DateTime.fromMillis(ms).toUTC().toFormat('yyyy-LL-dd');
-  }
 }
 
 function buildDailyKey(groupId, dateStr) {
@@ -84,7 +69,8 @@ export async function saveContextMemoryItem(groupId, payload) {
 
   const now = Date.now();
   const baseTs = timeStart && Number.isFinite(timeStart) ? timeStart : now;
-  const dateStr = formatDateFromMillis(baseTs);
+  const { timezone } = getContextMemoryRuntimeConfig();
+  const dateStr = formatDateFromMillis(baseTs, timezone);
   const key = buildDailyKey(groupId, dateStr);
 
   const item = {
@@ -128,10 +114,10 @@ function formatTimeRangeText(timeStart, timeEnd) {
       return `${fmt(timeStart)} ~ ${fmt(timeEnd)}\u3010\u672c\u6b21\u8bb0\u5fc6\u7bc7\u8f7d\u7684\u5bf9\u8bdd\u65f6\u95f4\u8303\u56f4\u3011`;
     }
     if (hasStart) {
-      return `${fmt(timeStart)} ~ \u5f53\u524d/\u672a\u77e5\u7ec8\u70b9\u3010\u6b64\u6b21\u8bb0\u5fc6\u4ee5\u8fd9\u4e2a\u65f6\u95f4\u4e3a\u8d77\u70b9\u3011`;
+      return `${fmt(timeStart)} ~ \u5f53\u524d/\u672a\u77e3\u7ec8\u70b9\u3010\u6b64\u6b21\u8bb0\u5fc6\u4ee5\u8fd9\u4e2a\u65f6\u95f4\u4e3a\u8d77\u70b9\u3011`;
     }
     if (hasEnd) {
-      return `\u672a\u77e5\u8d77\u70b9 ~ ${fmt(timeEnd)}\u3010\u672c\u6b21\u8bb0\u5fc6\u7d2f\u79ef\u5230\u8fd9\u4e2a\u65f6\u523b\u3011`;
+      return `\u672a\u77e3\u8d77\u70b9 ~ ${fmt(timeEnd)}\u3010\u672c\u6b21\u8bb0\u5fc6\u7d2f\u79ef\u5230\u8fd9\u4e2a\u65f6\u523b\u3011`;
     }
     return '';
   } catch {
@@ -144,7 +130,8 @@ export async function getDailyContextMemoryXml(groupId, nowMs = Date.now()) {
     const redis = getRedisSafe();
     if (!redis) return '';
 
-    const dateStr = formatDateFromMillis(nowMs);
+    const { timezone } = getContextMemoryRuntimeConfig();
+    const dateStr = formatDateFromMillis(nowMs, timezone);
     const key = buildDailyKey(groupId, dateStr);
     const list = await redis.lrange(key, 0, -1);
 
@@ -167,17 +154,17 @@ export async function getDailyContextMemoryXml(groupId, nowMs = Date.now()) {
     }
 
     let xml = '<sentra-memory>\n';
-    xml += `  <date>${dateStr}</date>\n`;
+    xml += `  <date>${escapeXml(dateStr)}</date>\n`;
     xml += '  <items>\n';
 
     items.forEach((item, index) => {
       const idx = index + 1;
       const rangeText = formatTimeRangeText(item.timeStart, item.timeEnd);
-      xml += `    <item index="${idx}">\n`;
+      xml += `    <item index="${escapeXmlAttr(String(idx))}">\n`;
       if (rangeText) {
-        xml += `      <time_range>${rangeText}</time_range>\n`;
+        xml += `      <time_range>${escapeXml(rangeText)}</time_range>\n`;
       }
-      xml += `      <summary>${item.summary}</summary>\n`;
+      xml += `      <summary>${escapeXml(item.summary)}</summary>\n`;
       xml += '    </item>\n';
     });
 

@@ -6,6 +6,64 @@ import OpenAI from 'openai';
 import mime from 'mime-types';
 import { httpRequest } from '../../src/utils/http.js';
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当图片理解失败时，要说明原因（路径/网络/格式/接口），给替代方案（换图/换链接/重试/补充问题），并引导用户补充可用输入。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我需要你提供图片列表（images）以及你希望我分析的具体问题（prompt）。当前参数不完整，所以我没法开始分析。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 images：URL 或本地绝对路径数组，例如：["E:/a.png"]',
+        '提供 prompt：你希望我关注什么（内容/文字/OCR/风格/瑕疵/对比等）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'INVALID_PATH') {
+    return {
+      suggested_reply: '我没法读取你提供的本地图片路径：本插件要求本地图片必须是“绝对路径”。你把完整路径发我一下，我就能继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '使用绝对路径，例如：E:/images/demo.png 或 C:/Users/.../a.jpg',
+        '确认文件存在且有读取权限',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我在读取/分析图片时卡住了，像是网络或接口超时了。我可以先给你一个不依赖工具的分析思路，或者我们稍后重试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试，或减少图片数量',
+        '如果是 URL 图片，建议换更稳定的直链或先下载成本地文件再分析',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试分析你提供的图片，但这次工具执行失败了。我可以先根据你的问题给你一套排查/分析思路；如果你愿意，我们也可以换更清晰/更少的图片再试。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '提供更清晰的图片或减少图片数量',
+      '告诉我你最关心的区域/文字位置（如“右上角的文字”）',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 function isHttpUrl(s) {
   try { const u = new URL(String(s)); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; }
 }
@@ -55,8 +113,8 @@ async function readImageAsBase64WithMime(src, convertGif = false) {
 export default async function handler(args = {}, options = {}) {
   const images = Array.isArray(args.images) ? args.images : [];
   const prompt = String(args.prompt || '').trim();
-  if (!images.length) return { success: false, code: 'INVALID', error: 'images is required (array of urls or absolute paths)' };
-  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required' };
+  if (!images.length) return { success: false, code: 'INVALID', error: 'images is required (array of urls or absolute paths)', advice: buildAdvice('INVALID', { tool: 'image_vision_read' }) };
+  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required', advice: buildAdvice('INVALID', { tool: 'image_vision_read', images_count: images.length }) };
 
   // plugin-level env
   const penv = options?.pluginEnv || {};
@@ -78,7 +136,13 @@ export default async function handler(args = {}, options = {}) {
     prepared = await Promise.all(images.map((src) => readImageAsBase64WithMime(src, convertGif)));
   } catch (e) {
     logger.warn?.('image_vision_read:load_image_failed', { label: 'PLUGIN', error: String(e?.message || e) });
-    return { success: false, code: 'IMAGE_READ_ERR', error: String(e?.message || e) };
+    const msg = String(e?.message || e);
+    const lower = msg.toLowerCase();
+    const isTimeout = isTimeoutError(e);
+    const invalidPath = lower.includes('must be absolute');
+    const code = isTimeout ? 'TIMEOUT' : (invalidPath ? 'INVALID_PATH' : 'IMAGE_READ_ERR');
+    const adviceKind = isTimeout ? 'TIMEOUT' : (invalidPath ? 'INVALID_PATH' : 'ERR');
+    return { success: false, code, error: msg, advice: buildAdvice(adviceKind, { tool: 'image_vision_read', images_count: images.length }) };
   }
   for (const it of prepared) items.push({ type: 'image_url', image_url: { url: it.uri } });
 
@@ -96,6 +160,7 @@ export default async function handler(args = {}, options = {}) {
     return { success: true, data: { prompt, description: content, image_count: images.length, formats } };
   } catch (e) {
     logger.warn?.('image_vision_read:request_failed', { label: 'PLUGIN', error: String(e?.message || e), stack: e?.stack });
-    return { success: false, code: 'ERR', error: String(e?.message || e) };
+    const isTimeout = isTimeoutError(e);
+    return { success: false, code: isTimeout ? 'TIMEOUT' : 'ERR', error: String(e?.message || e), advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'image_vision_read', images_count: images.length }) };
   }
 }

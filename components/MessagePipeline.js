@@ -174,6 +174,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
 
   let convId = null;
   let pairId = null;
+  let currentRunId = null;
   let currentUserContent = '';
   let isCancelled = false; // 任务取消标记：检测到新消息时设置为 true
   let hasReplied = false; // 引用控制标记：记录是否已经发送过第一次回复（只有第一次引用消息）
@@ -194,6 +195,45 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
     // 压平多行，避免 objective 过长影响日志可读性
     const flat = inner.replace(/\s+/g, ' ').trim();
     return flat ? flat.slice(0, 400) : null;
+  };
+
+  const convertToolsXmlToObjective = (toolsXml) => {
+    const s = String(toolsXml || '').trim();
+    if (!s) return '';
+    try {
+      const invokes = Array.from(
+        s.matchAll(/<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/gi)
+      );
+      if (!invokes.length) {
+        return `请根据下面的工具请求，按需执行工具并给出最终回复：\n\n${s}`;
+      }
+
+      const lines = ['请根据下面的工具请求，按需执行工具并给出最终回复：'];
+      for (const inv of invokes) {
+        const toolName = String(inv[1] || '').trim();
+        const inner = String(inv[2] || '');
+        const argsObj = {};
+        const params = Array.from(
+          inner.matchAll(/<parameter\s+name="([^"]+)">([\s\S]*?)<\/parameter>/gi)
+        );
+        for (const p of params) {
+          const k = String(p[1] || '').trim();
+          const v = String(p[2] || '').trim();
+          if (k) argsObj[k] = v;
+        }
+        const argsText = (() => {
+          try {
+            return JSON.stringify(argsObj);
+          } catch {
+            return String(argsObj);
+          }
+        })();
+        lines.push(`- tool: ${toolName || '(unknown)'}, args: ${argsText}`);
+      }
+      return lines.join('\n');
+    } catch {
+      return `请根据下面的工具请求，按需执行工具并给出最终回复：\n\n${s}`;
+    }
   };
 
   try {
@@ -617,11 +657,16 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
       );
     };
 
-    for await (const ev of sdk.stream({
-      objective: userObjective,
-      conversation: conversation,
-      overlays
-    })) {
+    let streamAttempt = 0;
+    while (streamAttempt < 2) {
+      let restartMcp = false;
+      let restartObjective = null;
+
+      for await (const ev of sdk.stream({
+        objective: userObjective,
+        conversation: conversation,
+        overlays
+      })) {
       logger.debug('Agent事件', ev);
 
       if (currentTaskId && isTaskCancelled(currentTaskId)) {
@@ -632,6 +677,7 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
 
       // 在 start 事件时缓存消息 - 缓存最后一条待回复消息
       if (ev.type === 'start' && ev.runId) {
+        currentRunId = ev.runId;
         // 记录 runId 和会话，用于后续在“改主意”场景下仅取消本会话下的运行
         trackRunForSender(userid, groupId, ev.runId);
 
@@ -710,14 +756,10 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
                 latestMsgJudge.text.trim()) ||
               'No tool required for this message.';
             const reasonText = rawReason.trim();
-            const toolsXML = [
-              '<sentra-tools>',
-              '  <invoke name="none">',
-              '    <parameter name="no_tool">true</parameter>',
-              `    <parameter name="reason">${reasonText}</parameter>`,
-              '  </invoke>',
-              '</sentra-tools>'
-            ].join('\n');
+            const toolsXML = buildSentraToolsBlockFromArgsObject('none', {
+              no_tool: true,
+              reason: reasonText
+            });
 
             const evNoTool = {
               type: 'tool_result',
@@ -771,6 +813,50 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
               pairId = null;
             }
             return;
+          }
+
+          if (result.toolsOnly && result.rawToolsXml) {
+            if (msg && msg._toolsOnlyFallbackUsed) {
+              logger.warn(
+                `toolsOnly回退已使用过，本轮仍收到纯 <sentra-tools>，将放弃回退: ${groupId}`
+              );
+              if (pairId) {
+                try {
+                  await historyManager.cancelConversationPairById(groupId, pairId);
+                } catch {}
+                pairId = null;
+              }
+              return;
+            }
+
+            if (msg) {
+              msg._toolsOnlyFallbackUsed = true;
+            }
+
+            restartObjective = convertToolsXmlToObjective(result.rawToolsXml);
+            restartMcp = !!restartObjective;
+
+            if (currentRunId && sdk && typeof sdk.cancelRun === 'function') {
+              try {
+                sdk.cancelRun(currentRunId);
+                try {
+                  untrackRunForSender(userid, groupId, currentRunId);
+                } catch {}
+              } catch {}
+            }
+            currentRunId = null;
+
+            if (pairId) {
+              try {
+                await historyManager.cancelConversationPairById(groupId, pairId);
+              } catch {}
+              pairId = null;
+            }
+
+            if (restartMcp) {
+              logger.info(`toolsOnly→objective 回退触发: ${groupId} 将重跑 MCP (attempt=${streamAttempt + 2})`);
+              break;
+            }
           }
 
           let response = result.response;
@@ -1162,6 +1248,36 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
             continue;
           }
 
+          if (scheduleResult.toolsOnly && scheduleResult.rawToolsXml) {
+            if (msg && msg._toolsOnlyFallbackUsed) {
+              logger.warn(
+                `toolsOnly回退已使用过(ScheduleProgress)，本轮仍收到纯 <sentra-tools>，将忽略: ${groupId}`
+              );
+              try {
+                await historyManager.cancelConversationPairById(groupId, progressPairId);
+              } catch {}
+              continue;
+            }
+
+            if (msg) {
+              msg._toolsOnlyFallbackUsed = true;
+            }
+
+            restartObjective = convertToolsXmlToObjective(scheduleResult.rawToolsXml);
+            restartMcp = !!restartObjective;
+
+            try {
+              await historyManager.cancelConversationPairById(groupId, progressPairId);
+            } catch {}
+
+            if (restartMcp) {
+              logger.info(
+                `toolsOnly→objective 回退触发(ScheduleProgress): ${groupId} 将重跑 MCP (attempt=${streamAttempt + 2})`
+              );
+              break;
+            }
+          }
+
           const scheduleResponse = scheduleResult.response;
           const scheduleNoReply = !!scheduleResult.noReply;
 
@@ -1365,6 +1481,31 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
               ];
 
               const result = await chatWithRetry(convForFinal, MAIN_AI_MODEL, groupId);
+              if (result && result.success && result.toolsOnly && result.rawToolsXml) {
+                if (msg && msg._toolsOnlyFallbackUsed) {
+                  logger.warn(
+                    `toolsOnly回退已使用过(ToolFinal)，本轮仍收到纯 <sentra-tools>，将放弃回退: ${groupId}`
+                  );
+                } else {
+                  if (msg) {
+                    msg._toolsOnlyFallbackUsed = true;
+                  }
+
+                  restartObjective = convertToolsXmlToObjective(result.rawToolsXml);
+                  restartMcp = !!restartObjective;
+                  if (restartMcp) {
+                    logger.info(
+                      `toolsOnly→objective 回退触发(ToolFinal): ${groupId} 将重跑 MCP (attempt=${streamAttempt + 2})`
+                    );
+                    try {
+                      await historyManager.cancelConversationPairById(groupId, pairId);
+                    } catch {}
+                    pairId = null;
+                    break;
+                  }
+                }
+              }
+
               if (result && result.success) {
                 toolResponse = result.response;
                 toolNoReply = !!result.noReply;
@@ -1447,6 +1588,17 @@ export async function handleOneMessageCore(ctx, msg, taskId) {
       if (ev.type === 'summary') {
         logger.info('对话总结(summary，非结束信号)', ev.summary);
       }
+      }
+
+      if (restartMcp && restartObjective && streamAttempt === 0) {
+        userObjective = restartObjective;
+        isCancelled = false;
+        endedBySchedule = false;
+        streamAttempt++;
+        continue;
+      }
+
+      break;
     }
   } catch (error) {
     logger.error('处理消息异常: ', error);

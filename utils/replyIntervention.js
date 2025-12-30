@@ -339,15 +339,15 @@ function buildUserPayload(msg, extraSignals = {}, context = null, policyConfig =
 
   const lines = [];
   lines.push('<decision_input>');
-  lines.push(`<scene>${scene}</scene>`);
+  lines.push(`<scene>${escapeXmlText(scene)}</scene>`);
   lines.push('<sender>');
-  lines.push(`<id>${payload.sender_id}</id>`);
-  lines.push(`<name>${payload.sender_name}</name>`);
+  lines.push(`<id>${escapeXmlText(payload.sender_id)}</id>`);
+  lines.push(`<name>${escapeXmlText(payload.sender_name)}</name>`);
   lines.push('</sender>');
-  lines.push(`<group_id>${payload.group_id ?? ''}</group_id>`);
+  lines.push(`<group_id>${escapeXmlText(payload.group_id ?? '')}</group_id>`);
   lines.push('<message>');
-  lines.push(`<text>${text}</text>`);
-  lines.push(`<summary>${summary}</summary>`);
+  lines.push(`<text>${escapeXmlText(text)}</text>`);
+  lines.push(`<summary>${escapeXmlText(summary)}</summary>`);
   lines.push('</message>');
   const boolStr = (v) => (v ? 'true' : 'false');
 
@@ -372,7 +372,7 @@ function buildUserPayload(msg, extraSignals = {}, context = null, policyConfig =
   lines.push(`<mentioned_by_at>${boolStr(!!sig.mentioned_by_at)}</mentioned_by_at>`);
   lines.push(`<mentioned_by_name>${boolStr(!!sig.mentioned_by_name)}</mentioned_by_name>`);
   const names = Array.isArray(sig.mentioned_names) ? sig.mentioned_names.join(',') : '';
-  lines.push(`<mentioned_names>${names}</mentioned_names>`);
+  lines.push(`<mentioned_names>${escapeXmlText(names)}</mentioned_names>`);
   lines.push(`<senderReplyCountWindow>${
     typeof sig.senderReplyCountWindow === 'number' ? String(sig.senderReplyCountWindow) : ''
   }</senderReplyCountWindow>`);
@@ -465,10 +465,10 @@ function buildUserPayload(msg, extraSignals = {}, context = null, policyConfig =
     const mtext = m?.text || '';
     const mtime = m?.time || '';
     lines.push('<message>');
-    lines.push(`<sender_id>${mid}</sender_id>`);
-    lines.push(`<sender_name>${mname}</sender_name>`);
-    lines.push(`<text>${mtext}</text>`);
-    lines.push(`<time>${mtime}</time>`);
+    lines.push(`<sender_id>${escapeXmlText(mid)}</sender_id>`);
+    lines.push(`<sender_name>${escapeXmlText(mname)}</sender_name>`);
+    lines.push(`<text>${escapeXmlText(mtext)}</text>`);
+    lines.push(`<time>${escapeXmlText(mtime)}</time>`);
     lines.push('</message>');
   }
   lines.push('</group_recent_messages>');
@@ -480,10 +480,10 @@ function buildUserPayload(msg, extraSignals = {}, context = null, policyConfig =
     const mtext = m?.text || '';
     const mtime = m?.time || '';
     lines.push('<message>');
-    lines.push(`<sender_id>${mid}</sender_id>`);
-    lines.push(`<sender_name>${mname}</sender_name>`);
-    lines.push(`<text>${mtext}</text>`);
-    lines.push(`<time>${mtime}</time>`);
+    lines.push(`<sender_id>${escapeXmlText(mid)}</sender_id>`);
+    lines.push(`<sender_name>${escapeXmlText(mname)}</sender_name>`);
+    lines.push(`<text>${escapeXmlText(mtext)}</text>`);
+    lines.push(`<time>${escapeXmlText(mtime)}</time>`);
     lines.push('</message>');
   }
   lines.push('</sender_recent_messages>');
@@ -547,12 +547,12 @@ export async function planGroupReplyDecision(msg, options = {}) {
   rdLines.push('  <type>reply_gate</type>');
   rdLines.push('  <scope>conversation</scope>');
   rdLines.push('  <target>');
-  rdLines.push(`    <chat_type>${scene}</chat_type>`);
+  rdLines.push(`    <chat_type>${escapeXmlText(scene)}</chat_type>`);
   if (safeGroupId) {
-    rdLines.push(`    <group_id>${safeGroupId}</group_id>`);
+    rdLines.push(`    <group_id>${escapeXmlText(safeGroupId)}</group_id>`);
   }
   if (safeSenderId) {
-    rdLines.push(`    <user_id>${safeSenderId}</user_id>`);
+    rdLines.push(`    <user_id>${escapeXmlText(safeSenderId)}</user_id>`);
   }
   rdLines.push('  </target>');
 

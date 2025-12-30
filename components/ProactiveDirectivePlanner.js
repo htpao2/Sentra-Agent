@@ -554,7 +554,7 @@ function buildPlannerRootDirectiveXml(options) {
   rdLines.push('  <type>internal_planner</type>');
   rdLines.push('  <scope>conversation</scope>');
   rdLines.push('  <target>');
-  rdLines.push(`    <chat_type>${safeChatType}</chat_type>`);
+  rdLines.push(`    <chat_type>${escapeXml(safeChatType)}</chat_type>`);
   if (safeGroupId) {
     rdLines.push(`    <group_id>${escapeXml(safeGroupId)}</group_id>`);
   }
@@ -892,12 +892,12 @@ export async function buildProactiveRootDirectiveXml(payload = {}) {
   lines.push('  <type>proactive</type>');
   lines.push('  <scope>conversation</scope>');
   lines.push('  <target>');
-  lines.push(`    <chat_type>${chatType}</chat_type>`);
+  lines.push(`    <chat_type>${escapeXml(chatType)}</chat_type>`);
   if (groupId) {
-    lines.push(`    <group_id>${groupId}</group_id>`);
+    lines.push(`    <group_id>${escapeXml(groupId)}</group_id>`);
   }
   if (userId) {
-    lines.push(`    <user_id>${userId}</user_id>`);
+    lines.push(`    <user_id>${escapeXml(userId)}</user_id>`);
   }
   lines.push('  </target>');
 

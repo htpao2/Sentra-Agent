@@ -25,6 +25,61 @@ class EmbeddingService {
     this.isProcessing = false;
   }
 
+  _getCacheConfig() {
+    const ttlMsRaw = Number(process.env.EMBEDDING_CACHE_TTL_MS);
+    const maxKeysRaw = Number(process.env.EMBEDDING_CACHE_MAX_KEYS);
+    const ttlMs = Number.isFinite(ttlMsRaw) && ttlMsRaw > 0 ? ttlMsRaw : 0;
+    const maxKeys = Number.isFinite(maxKeysRaw) && maxKeysRaw > 0 ? maxKeysRaw : 2000;
+    return { ttlMs, maxKeys };
+  }
+
+  _pruneCache(now = Date.now()) {
+    const { ttlMs, maxKeys } = this._getCacheConfig();
+
+    if (ttlMs > 0) {
+      for (const [k, v] of this.embeddingCache.entries()) {
+        const ts = v && typeof v === 'object' ? Number(v.ts) : 0;
+        if (!ts || now - ts > ttlMs) {
+          this.embeddingCache.delete(k);
+        }
+      }
+    }
+
+    if (Number.isFinite(maxKeys) && maxKeys > 0) {
+      while (this.embeddingCache.size > maxKeys) {
+        const firstKey = this.embeddingCache.keys().next().value;
+        if (!firstKey) break;
+        this.embeddingCache.delete(firstKey);
+      }
+    }
+  }
+
+  _getCached(cacheKey, now = Date.now()) {
+    const entry = this.embeddingCache.get(cacheKey);
+    if (!entry) return null;
+
+    if (entry && typeof entry === 'object' && Array.isArray(entry.value)) {
+      const { ttlMs } = this._getCacheConfig();
+      const ts = Number(entry.ts) || 0;
+      if (ttlMs > 0 && ts && now - ts > ttlMs) {
+        this.embeddingCache.delete(cacheKey);
+        return null;
+      }
+      return entry.value;
+    }
+
+    if (Array.isArray(entry)) {
+      return entry;
+    }
+
+    return null;
+  }
+
+  _setCached(cacheKey, embedding, now = Date.now()) {
+    if (!cacheKey || !Array.isArray(embedding)) return;
+    this.embeddingCache.set(cacheKey, { value: embedding, ts: now });
+  }
+
   /**
    * 获取文本嵌入向量
    * @param {string|Array} input - 单个文本或文本数组
@@ -34,6 +89,8 @@ class EmbeddingService {
     try {
       const isArray = Array.isArray(input);
       const texts = isArray ? input : [input];
+      const now = Date.now();
+      this._pruneCache(now);
       
       // 检查缓存
       const uncachedTexts = [];
@@ -41,8 +98,9 @@ class EmbeddingService {
       
       for (const text of texts) {
         const cacheKey = this.getCacheKey(text);
-        if (this.embeddingCache.has(cacheKey)) {
-          cachedResults.set(text, this.embeddingCache.get(cacheKey));
+        const cached = this._getCached(cacheKey, now);
+        if (cached) {
+          cachedResults.set(text, cached);
         } else {
           uncachedTexts.push(text);
         }
@@ -58,9 +116,12 @@ class EmbeddingService {
         // 缓存新结果
         uncachedTexts.forEach((text, index) => {
           const cacheKey = this.getCacheKey(text);
-          this.embeddingCache.set(cacheKey, newEmbeddings[index]);
-          cachedResults.set(text, newEmbeddings[index]);
+          const emb = newEmbeddings[index];
+          this._setCached(cacheKey, emb, now);
+          cachedResults.set(text, emb);
         });
+
+        this._pruneCache(now);
       }
 
       // 按原始顺序返回结果

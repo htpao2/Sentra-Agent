@@ -10,6 +10,54 @@ import { abs as toAbs } from '../../src/utils/path.js';
 
 const md = new MarkdownIt({ html: true, linkify: true, typographer: true });
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当 PPT 生成失败时，要解释原因、给替代方案（补充主题/给大纲/减少页数/改模式），并引导用户补充更清晰的信息。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我现在还缺少生成 PPT 的关键信息（比如 subject/内容），所以没法开始生成。你告诉我主题、受众、页数和你希望包含的要点，我就能继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 subject（主题）',
+        '可选提供 outline（大纲），能显著提升结构稳定性',
+        '确认页数 page_count、主题 theme、以及模式 mode（ai_generate/direct_render）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我在生成 PPT 时卡住了，像是接口/渲染超时了。我可以先给你一份 PPT 大纲（文本版）作为交付，之后再生成文件版。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '先输出大纲/每页要点（文本交付）',
+        '减少 page_count 或简化内容后重试',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试帮你生成 PPT，但这次工具执行失败了。我可以先把结构化大纲和每页要点整理出来，等你确认后再生成 PPT 文件。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '补充：受众、语气（学术/商务/科普）、是否需要图表/案例',
+      '我也可以给你 2-3 套不同结构的 PPT 大纲供选择',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 function ensureTheme(theme) {
   const allowed = new Set(['default', 'dark', 'business', 'simple']);
   return allowed.has(theme) ? theme : 'default';
@@ -1085,17 +1133,18 @@ async function generateSlidesByAI({ subject, outline, pageCount, penv }) {
 }
 
 export default async function handler(args = {}, options = {}) {
-  const penv = options?.pluginEnv || {};
-  const subject = String(args.subject || '').trim();
-  const outline = String(args.outline || '').trim();
-  const mode = String(args.mode || 'ai_generate');
-  const pageCount = Math.max(1, Math.min(50, Number(args.page_count || 10)));
-  const autoSplit = args.auto_split !== false;
-  const theme = ensureTheme(String(args.theme || penv.PPT_GEN_DEFAULT_THEME || 'default'));
-  const filename = ensureFilename(args.filename);
-  const baseDir = 'artifacts';
-  const relPath = path.join(baseDir, filename);
-  const absPath = toAbs(relPath);
+  try {
+    const penv = options?.pluginEnv || {};
+    const subject = String(args.subject || '').trim();
+    const outline = String(args.outline || '').trim();
+    const mode = String(args.mode || 'ai_generate');
+    const pageCount = Math.max(1, Math.min(50, Number(args.page_count || 10)));
+    const autoSplit = args.auto_split !== false;
+    const theme = ensureTheme(String(args.theme || penv.PPT_GEN_DEFAULT_THEME || 'default'));
+    const filename = ensureFilename(args.filename);
+    const baseDir = 'artifacts';
+    const relPath = path.join(baseDir, filename);
+    const absPath = toAbs(relPath);
 
   let slides = [];
   let designInfo = null;
@@ -1104,7 +1153,7 @@ export default async function handler(args = {}, options = {}) {
     slides = slidesFromDirectInput(args.slides, autoSplit, pageCount);
   } else {
     if (!subject) {
-      return { success: false, code: 'INVALID', error: 'ai_generate 模式下 subject 为必填' };
+      return { success: false, code: 'INVALID', error: 'ai_generate 模式下 subject 为必填', advice: buildAdvice('INVALID', { tool: 'ppt_gen', mode }) };
     }
     const gen = await generateSlidesByAI({ subject, outline, pageCount, penv });
     slides = gen?.slides || [];
@@ -1116,7 +1165,7 @@ export default async function handler(args = {}, options = {}) {
   }
 
   if (!slides.length) {
-    return { success: false, code: 'INVALID', error: '没有可用的幻灯片内容' };
+    return { success: false, code: 'INVALID', error: '没有可用的幻灯片内容', advice: buildAdvice('INVALID', { tool: 'ppt_gen', mode, subject: subject || null }) };
   }
 
   const themeProps = buildPptThemeProps(theme);
@@ -1150,4 +1199,9 @@ export default async function handler(args = {}, options = {}) {
       design: designInfo
     }
   };
+  } catch (e) {
+    const rawErr = String(e?.message || e);
+    const isTimeout = isTimeoutError(e);
+    return { success: false, code: isTimeout ? 'TIMEOUT' : 'ERR', error: rawErr, advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'ppt_gen' }) };
+  }
 }

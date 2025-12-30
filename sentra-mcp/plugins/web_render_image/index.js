@@ -5,6 +5,97 @@ import path from 'node:path';
 import logger from '../../src/logger/index.js';
 import { abs as toAbs, toPosix, toFileUrl } from '../../src/utils/path.js';
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当网页渲染截图失败时，要说明原因、给替代方案（换输入/修正路径/简化 HTML/稍后重试），并引导用户补充更可复现的信息。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我需要你提供要渲染的网页内容：要么给 html 字符串，要么给本地 file 路径。当前参数不完整，所以我没法开始截图。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 args.html（HTML 片段或完整页面）或 args.file（本地文件路径）',
+        '如有样式/脚本可提供 css/js 字段（可选）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'UNSUPPORTED') {
+    return {
+      suggested_reply: '这个截图工具目前不支持 url 参数（只支持 html 或本地文件 file）。你把网页内容贴出来，或者把页面保存成 html 文件路径给我，我就能继续渲染截图。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '把网页保存为本地 .html 文件并传 file 路径',
+        '或直接提供 html 字符串（支持片段）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'NO_PUPPETEER') {
+    return {
+      suggested_reply: '我这边无法启动渲染引擎（puppeteer 未安装或加载失败），所以暂时没法截图。我可以先帮你把 HTML/CSS 调整好，等环境就绪后再截图，或者换其他方式导出。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '确认运行环境已安装 puppeteer 依赖',
+        '如果你只需要 HTML，我也可以先输出可直接打开的文件内容',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'FILE_NOT_FOUND') {
+    return {
+      suggested_reply: '我没找到你提供的本地文件路径，所以没法渲染截图。你确认一下路径是否存在、是否有权限访问，然后再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '检查 file 路径是否真实存在（建议用绝对路径）',
+        '确认文件可读权限',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'SELECTOR_NOT_FOUND') {
+    return {
+      suggested_reply: '我已经打开页面了，但你给的 selector 没匹配到任何元素，所以没法按指定区域截图。你可以换一个更准确的选择器，或者让我先整页截图给你确认结构。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '先不传 selector，整页截图确认 DOM 结构',
+        '提供更稳定的选择器（id/class/data-testid）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我在渲染截图时卡住了，像是加载/渲染超时了。我可以先按更保守的等待策略重试，或者你把页面内容简化后再截图。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试或简化 HTML（减少外链资源）',
+        '把 wait_for 改成 load 或减少需要等待的资源',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试渲染网页并截图，但这次执行失败了。我可以帮你定位是哪段资源/脚本导致渲染失败，并给你一个更稳的渲染策略后再试。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '提供更小的可复现 HTML 片段（最小复现）',
+      '如果有外链资源加载失败，可以改成本地或内联',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 // 智能等待策略：根据页面类型自动选择合适的等待条件
 async function smartWait(page, strategy = 'auto') {
   const strat = String(strategy || 'auto').toLowerCase();
@@ -179,12 +270,12 @@ export default async function handler(args = {}, options = {}) {
 
     // url 参数已不再支持
     if (typeof args.url === 'string' && args.url.trim()) {
-      return { success: false, code: 'UNSUPPORTED', error: 'web_render_image 插件仅支持 html 或 file 参数，不再支持 url。' };
+      return { success: false, code: 'UNSUPPORTED', error: 'web_render_image 插件仅支持 html 或 file 参数，不再支持 url。', advice: buildAdvice('UNSUPPORTED', { tool: 'web_render_image' }) };
     }
 
     // 至少提供 html 或 file 之一
     if (!htmlRaw && !file) {
-      return { success: false, code: 'INVALID', error: '必须提供 html 或 file 参数之一' };
+      return { success: false, code: 'INVALID', error: '必须提供 html 或 file 参数之一', advice: buildAdvice('INVALID', { tool: 'web_render_image' }) };
     }
 
     // === 2. 准备输出目录和文件名 ===
@@ -200,7 +291,7 @@ export default async function handler(args = {}, options = {}) {
     try {
       ({ default: puppeteer } = await import('puppeteer'));
     } catch (e) {
-      return { success: false, code: 'NO_PUPPETEER', error: 'puppeteer 未安装或加载失败' };
+      return { success: false, code: 'NO_PUPPETEER', error: 'puppeteer 未安装或加载失败', advice: buildAdvice('NO_PUPPETEER', { tool: 'web_render_image' }) };
     }
 
     const launchArgs = [
@@ -254,7 +345,7 @@ export default async function handler(args = {}, options = {}) {
       const absFile = toAbs(file);
       const exists = await fs.stat(absFile).then(() => true).catch(() => false);
       if (!exists) {
-        return { success: false, code: 'FILE_NOT_FOUND', error: `文件不存在: ${absFile}` };
+        return { success: false, code: 'FILE_NOT_FOUND', error: `文件不存在: ${absFile}`, advice: buildAdvice('FILE_NOT_FOUND', { tool: 'web_render_image', file: absFile }) };
       }
       fileUrl = toFileUrl(absFile);
     }
@@ -298,7 +389,7 @@ export default async function handler(args = {}, options = {}) {
       // 截取指定元素
       const element = await page.$(selector);
       if (!element) {
-        return { success: false, code: 'SELECTOR_NOT_FOUND', error: `选择器未匹配到元素: ${selector}` };
+        return { success: false, code: 'SELECTOR_NOT_FOUND', error: `选择器未匹配到元素: ${selector}`, advice: buildAdvice('SELECTOR_NOT_FOUND', { tool: 'web_render_image', selector }) };
       }
       await element.screenshot({
         path: outPath,
@@ -332,10 +423,12 @@ export default async function handler(args = {}, options = {}) {
     };
   } catch (e) {
     logger.error?.('web_render_image: 渲染失败', { label: 'PLUGIN', error: String(e?.message || e), stack: e?.stack });
+    const isTimeout = isTimeoutError(e);
     return {
       success: false,
-      code: 'RENDER_ERROR',
+      code: isTimeout ? 'TIMEOUT' : 'RENDER_ERROR',
       error: String(e?.message || e),
+      advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'RENDER_ERROR', { tool: 'web_render_image' }),
     };
   } finally {
     // 确保资源清理（最佳实践）

@@ -1,5 +1,14 @@
 import { config } from '../../config/index.js';
 
+function escapeXmlEntities(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 // 中文：仅保留必填字段的 schema 视图，供“规划期清单展示”，避免上下文噪音
 export function requiredOnlySchema(schema = {}) {
   try {
@@ -91,13 +100,13 @@ export function summarizeRequiredFieldsDetailXml(schema = {}) {
       const typeStr = types.length ? types.join('|') : 'any';
       const desc = typeof p.description === 'string' ? p.description : '';
       const enums = Array.isArray(p.enum) ? p.enum : [];
-      lines.push(`  <param name="${k}">`);
-      lines.push(`    <type>${typeStr}</type>`);
+      lines.push(`  <param name="${escapeXmlEntities(k)}">`);
+      lines.push(`    <type>${escapeXmlEntities(typeStr)}</type>`);
       if (enums.length) {
-        lines.push(`    <enum>${enums.join(', ')}</enum>`);
+        lines.push(`    <enum>${escapeXmlEntities(enums.join(', '))}</enum>`);
       }
       if (desc) {
-        lines.push(`    <description>${desc}</description>`);
+        lines.push(`    <description>${escapeXmlEntities(desc)}</description>`);
       }
       lines.push('  </param>');
     }
@@ -113,7 +122,7 @@ export function manifestToXmlToolsCatalog(manifest = []) {
     const lines = [];
     const total = Array.isArray(manifest) ? manifest.length : 0;
     lines.push('<sentra-mcp-tools>');
-    lines.push(`  <summary>共有 ${total} 个 MCP 工具可用于本次任务。以下为工具清单和关键参数概览，仅供你在规划和参数生成时参考。</summary>`);
+    lines.push(`  <summary>${escapeXmlEntities(`共有 ${total} 个 MCP 工具可用于本次任务。以下为工具清单和关键参数概览，仅供你在规划和参数生成时参考。`)}</summary>`);
     (manifest || []).forEach((m, idx) => {
       if (!m) return;
       const aiName = m.aiName || '';
@@ -123,11 +132,11 @@ export function manifestToXmlToolsCatalog(manifest = []) {
       const req = Array.isArray(schema.required) ? schema.required : [];
       const props = schema.properties || {};
       const index = idx + 1;
-      lines.push(`  <tool index="${index}">`);
-      if (aiName) lines.push(`    <ai_name>${aiName}</ai_name>`);
-      if (name) lines.push(`    <name>${name}</name>`);
-      if (desc) lines.push(`    <description>${desc}</description>`);
-      if (req.length) lines.push(`    <required_params>${req.join(', ')}</required_params>`);
+      lines.push(`  <tool index="${escapeXmlEntities(index)}">`);
+      if (aiName) lines.push(`    <ai_name>${escapeXmlEntities(aiName)}</ai_name>`);
+      if (name) lines.push(`    <name>${escapeXmlEntities(name)}</name>`);
+      if (desc) lines.push(`    <description>${escapeXmlEntities(desc)}</description>`);
+      if (req.length) lines.push(`    <required_params>${escapeXmlEntities(req.join(', '))}</required_params>`);
       if (req.length) {
         lines.push('    <params>');
         for (const k of req) {
@@ -137,13 +146,13 @@ export function manifestToXmlToolsCatalog(manifest = []) {
           const typeStr = types.length ? types.join('|') : 'any';
           const desc2 = typeof p.description === 'string' ? p.description : '';
           const enums = Array.isArray(p.enum) ? p.enum : [];
-          lines.push(`      <param name="${k}">`);
-          lines.push(`        <type>${typeStr}</type>`);
+          lines.push(`      <param name="${escapeXmlEntities(k)}">`);
+          lines.push(`        <type>${escapeXmlEntities(typeStr)}</type>`);
           if (enums.length) {
-            lines.push(`        <enum>${enums.join(', ')}</enum>`);
+            lines.push(`        <enum>${escapeXmlEntities(enums.join(', '))}</enum>`);
           }
           if (desc2) {
-            lines.push(`        <description>${desc2}</description>`);
+            lines.push(`        <description>${escapeXmlEntities(desc2)}</description>`);
           }
           lines.push('      </param>');
         }

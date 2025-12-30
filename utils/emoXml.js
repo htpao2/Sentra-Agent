@@ -81,5 +81,5 @@ export function buildSentraEmoSection(ua) {
     }
     return `<compare>${blocks.join('')}</compare>`;
   })();
-  return `<sentra-emo><summary>${summary}</summary><mbti>${mbti}</mbti>${thresholdsXML(th)}${cmp}</sentra-emo>`;
+  return `<sentra-emo>${tag('summary', summary)}<mbti>${mbti}</mbti>${thresholdsXML(th)}${cmp}</sentra-emo>`;
 }

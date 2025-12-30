@@ -10,9 +10,170 @@ import logger from '../../src/logger/index.js';
 import { config } from '../../src/config/index.js';
 import { chatCompletion } from '../../src/openai/client.js';
 import { abs as toAbs, toPosix } from '../../src/utils/path.js';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 // 支持的框架列表
 const FRAMEWORKS = new Set(['electron-vanilla', 'electron-react', 'electron-vue', 'vanilla', 'react', 'vue']);
+
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function normalizeSentraProjectXmlText(raw) {
+  const s0 = String(raw || '').trim();
+  if (!s0) return '';
+  const startRe = /<sentra_project\s*>/i;
+  const endRe = /<\/sentra_project\s*>/ig;
+
+  const startIdx = s0.search(startRe);
+  if (startIdx < 0) return s0;
+  let s = s0.slice(startIdx);
+
+  const ends = [...s.matchAll(endRe)];
+  if (ends.length > 0) {
+    const last = ends[ends.length - 1];
+    const endIdx = last.index + String(last[0]).length;
+    s = s.slice(0, endIdx);
+  }
+
+  // Remove duplicate root start tags (keep the first)
+  const startMatches = [...s.matchAll(startRe)];
+  if (startMatches.length > 1) {
+    const firstStart = startMatches[0].index;
+    let out = s.slice(0, firstStart + String(startMatches[0][0]).length);
+    out += s.slice(firstStart + String(startMatches[0][0]).length).replace(startRe, '');
+    s = out;
+  }
+
+  // Remove duplicate close tags (keep the last)
+  const closeTag = '</sentra_project>';
+  const parts = s.split(closeTag);
+  if (parts.length > 2) {
+    s = parts.slice(0, -1).join('') + closeTag + parts[parts.length - 1];
+  }
+
+  return s.trim();
+}
+
+function checkProjectFiles(files) {
+  if (!files || typeof files !== 'object') return { ok: false, error: '未解析到任何文件内容' };
+
+  const requiredFiles = ['package.json', 'main.js', 'index.html'];
+  const extracted = Object.keys(files);
+  for (const rf of requiredFiles) {
+    if (!files[rf]) {
+      return { ok: false, error: `生成的项目结构不完整。已提取文件：${extracted.join(', ')}。缺少必要文件：${requiredFiles.join(', ')}` };
+    }
+  }
+
+  // Basic path safety: disallow absolute paths and traversal
+  for (const p of extracted) {
+    const k = String(p || '').trim();
+    if (!k) return { ok: false, error: '存在空文件路径' };
+    if (k.includes('\u0000')) return { ok: false, error: `文件路径包含非法字符: ${k}` };
+    if (path.isAbsolute(k) || /^[a-zA-Z]:[\\/]/.test(k)) return { ok: false, error: `禁止输出绝对路径文件: ${k}` };
+    const segs = k.split(/[\\/]+/).filter(Boolean);
+    if (segs.some((s) => s === '..')) return { ok: false, error: `禁止输出包含 .. 的文件路径: ${k}` };
+  }
+
+  let pkg;
+  try {
+    pkg = JSON.parse(String(files['package.json'] || ''));
+  } catch {
+    return { ok: false, error: 'package.json 不是合法 JSON' };
+  }
+
+  const mainOk = String(pkg?.main || '').trim() === 'main.js';
+  if (!mainOk) return { ok: false, error: 'package.json 中 main 必须为 main.js' };
+
+  const startOk = typeof pkg?.scripts?.start === 'string' && pkg.scripts.start.trim().length > 0;
+  if (!startOk) return { ok: false, error: 'package.json 中缺少 scripts.start' };
+
+  const buildOk = typeof pkg?.scripts?.build === 'string' && pkg.scripts.build.trim().length > 0;
+  if (!buildOk) return { ok: false, error: 'package.json 中缺少 scripts.build（electron-builder）' };
+
+  const hasElectron = !!pkg?.devDependencies?.electron;
+  const hasBuilder = !!pkg?.devDependencies?.['electron-builder'];
+  if (!hasElectron || !hasBuilder) return { ok: false, error: 'package.json 中 devDependencies 必须包含 electron 与 electron-builder' };
+
+  return { ok: true };
+}
+
+function isProjectXmlReady(xmlText) {
+  const xml = normalizeSentraProjectXmlText(xmlText);
+  if (!isWellFormedXml(xml)) return false;
+  try {
+    const files = parseXmlProjectFiles(xml);
+    return checkProjectFiles(files).ok === true;
+  } catch {
+    return false;
+  }
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const tool = 'html_to_app';
+  const base = {
+    suggested_reply: '',
+    next_steps: [],
+    persona_hint: '你需要明确告诉用户当前是生成桌面应用项目的工具，优先收集缺失信息并给出可执行的下一步。',
+    context: { tool, ...ctx },
+  };
+
+  if (kind === 'INVALID') {
+    return {
+      ...base,
+      suggested_reply: '你的参数里缺少必要信息（例如 description/app_name/details）。请补充后我再为你生成完整的桌面应用项目。',
+      next_steps: [
+        '补充完整的 description（功能需求）与 details（UI/UX 细节）',
+        '确认 app_name 只包含字母/数字/下划线/连字符',
+      ],
+    };
+  }
+  if (kind === 'PROJECT_EXISTS') {
+    return {
+      ...base,
+      suggested_reply: '目标项目目录已存在。请更换 app_name，或先删除/清空现有目录后再生成。',
+      next_steps: ['更换 app_name', '或删除现有项目目录后重试'],
+    };
+  }
+  if (kind === 'INVALID_XML') {
+    return {
+      ...base,
+      suggested_reply: '模型输出的 XML 不完整或不合法，导致无法解析出项目文件。我可以尝试继续拉取剩余内容，或者你也可以让我重新生成。',
+      next_steps: [
+        '确认模型输出必须只包含一个完整的 XML 根节点（无 Markdown、无解释文字）',
+        '如仍失败，建议减少需求复杂度或拆分需求后重试',
+      ],
+    };
+  }
+  if (kind === 'INVALID_PROJECT') {
+    return {
+      ...base,
+      suggested_reply: '生成的项目文件不完整或关键文件内容无法解析（例如 package.json 不是合法 JSON）。建议我重新生成，并强调必须包含必需文件。',
+      next_steps: ['重新生成并确保包含 package.json / main.js / index.html', '确保 package.json 是合法 JSON 且 main 指向 main.js'],
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      ...base,
+      suggested_reply: '生成或拉取代码超时了。你可以稍后重试，或降低需求复杂度/减少一次输出文件数量。',
+      next_steps: ['稍后重试', '减少需求复杂度或拆分功能后重试'],
+    };
+  }
+  return {
+    ...base,
+    suggested_reply: '生成过程中出现异常。我可以根据报错信息调整提示词或缩小需求范围后重试。',
+    next_steps: ['把报错信息发给我以便定位', '尝试重试或拆分需求'],
+  };
+}
 
 function normalizeFramework(fw) {
   const normalized = String(fw || 'vanilla').toLowerCase();
@@ -20,6 +181,49 @@ function normalizeFramework(fw) {
   if (normalized === 'react') return 'electron-react';
   if (normalized === 'vue') return 'electron-vue';
   return FRAMEWORKS.has(normalized) ? normalized : 'electron-vanilla';
+}
+
+function generateSystemPromptXml(framework) {
+  return `你是一个专业的 Electron 应用开发助手。请根据用户需求生成完整的桌面应用项目代码。
+
+框架类型：${framework}
+
+## 输出格式（必须严格遵守）
+
+你必须只输出一个完整的 XML 文档，且只有一个根节点 "<sentra_project>"，禁止输出 Markdown、代码块、解释文字、前后缀。
+
+强制要求：
+- 输出必须以 "<sentra_project>" 开始，并以 "</sentra_project>" 结束。
+- XML 之外不得有任何字符（包括前置解释、后置说明、代码块标记）。
+
+XML 结构必须为：
+
+<sentra_project>
+  <file path="package.json"><![CDATA[...]]></file>
+  <file path="main.js"><![CDATA[...]]></file>
+  <file path="preload.js"><![CDATA[...]]></file>
+  <file path="index.html"><![CDATA[...]]></file>
+  <file path="renderer.js"><![CDATA[...]]></file>
+  <file path="styles.css"><![CDATA[...]]></file>
+  <file path="README.md"><![CDATA[...]]></file>
+</sentra_project>
+
+要求：
+- 每个文件内容必须放在 CDATA 内，确保不会破坏 XML。
+- 文件内容中如果出现 "]]>"，必须拆分为多个 CDATA 段（禁止直接输出导致 XML 断裂）。
+- 必须生成 package.json、main.js、index.html（缺一不可）。
+- package.json 必须是合法 JSON，且 main 指向 main.js。
+- scripts 至少包含："start": "electron ."，并提供 build（electron-builder）。
+- electron 与 electron-builder 必须在 devDependencies。
+- 不要输出占位符 "..."；内容必须可直接运行。
+
+如果输出较长导致未能一次输出完整 XML，请在后续收到用户消息 "continue" 时：
+- 只从中断处继续输出剩余内容
+- 禁止重复输出 "<sentra_project>" 或 "</sentra_project>"
+- 禁止重头再输出已给出的文件
+- 优先继续补齐未输出完的 "<file ...>" 节点
+
+当你已经输出过 "</sentra_project>" 时，表示已完成：此后不得再输出任何内容。`;
 }
 
 // 生成系统提示词（引导 LLM 使用 Markdown 代码块输出）
@@ -175,16 +379,94 @@ function parseMarkdownFiles(content) {
   return files;
 }
 
+function isWellFormedXml(content) {
+  const s = String(content || '').trim();
+  if (!s) return false;
+  if (!s.startsWith('<')) return false;
+  const res = XMLValidator.validate(s);
+  return res === true;
+}
+
+function mergeTextWithOverlap(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left) return right;
+  if (!right) return left;
+  if (left.includes(right)) return left;
+
+  const maxCheck = Math.min(left.length, right.length, 8192);
+  const leftTail = left.slice(left.length - maxCheck);
+  let best = 0;
+  const maxOverlap = Math.min(leftTail.length, right.length);
+  for (let k = 1; k <= maxOverlap; k += 1) {
+    if (leftTail.slice(leftTail.length - k) === right.slice(0, k)) best = k;
+  }
+  return left + right.slice(best);
+}
+
+function parseXmlProjectFiles(xml) {
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
+    textNodeName: '#text',
+    cdataPropName: '#cdata',
+    preserveOrder: false,
+    parseTagValue: false,
+    trimValues: false,
+  });
+  const obj = parser.parse(String(xml || '').trim());
+  const root = obj?.sentra_project || obj?.sentraProject || obj?.project || obj;
+  let nodes = root?.file || root?.files?.file;
+  if (!nodes) return {};
+  if (!Array.isArray(nodes)) nodes = [nodes];
+
+  const out = {};
+  for (const n of nodes) {
+    const p = String(n?.['@_path'] || n?.path || '').trim();
+    if (!p) continue;
+    const raw = (typeof n === 'string')
+      ? n
+      : (typeof n?.['#cdata'] === 'string' ? n['#cdata'] : (typeof n?.['#text'] === 'string' ? n['#text'] : ''));
+    out[p] = String(raw || '');
+  }
+  return out;
+}
+
+async function collectXmlWithContinue({
+  messages,
+  temperature,
+  apiKey,
+  baseURL,
+  model,
+  omitMaxTokens,
+  maxContinueCalls,
+}) {
+  const convo = Array.isArray(messages) ? [...messages] : [];
+  const first = await chatCompletion({ messages: convo, temperature, apiKey, baseURL, model, omitMaxTokens });
+  const firstText = first?.choices?.[0]?.message?.content || '';
+  convo.push({ role: 'assistant', content: firstText });
+  let acc = String(firstText || '');
+  let candidate = normalizeSentraProjectXmlText(acc);
+
+  let used = 0;
+  const limit = Number.isFinite(maxContinueCalls) ? Math.max(0, maxContinueCalls) : 0;
+  while (!isProjectXmlReady(candidate) && used < limit) {
+    for (let i = 0; i < 2 && used < limit; i += 1) {
+      convo.push({ role: 'user', content: 'continue' });
+      const r = await chatCompletion({ messages: convo, temperature, apiKey, baseURL, model, omitMaxTokens });
+      const part = r?.choices?.[0]?.message?.content || '';
+      convo.push({ role: 'assistant', content: part });
+      acc = mergeTextWithOverlap(acc, String(part || ''));
+      candidate = normalizeSentraProjectXmlText(acc);
+      used += 1;
+    }
+  }
+  return { xml: candidate, continueCalls: used, firstResp: first };
+}
+
 // 验证提取的文件结构
 function validateProjectFiles(files) {
-  if (!files || typeof files !== 'object') return false;
-
-  const requiredFiles = ['package.json', 'main.js', 'index.html'];
-  for (const file of requiredFiles) {
-    if (!files[file]) return false;
-  }
-
-  return true;
+  return checkProjectFiles(files).ok === true;
 }
 
 // 写入项目文件到磁盘
@@ -235,9 +517,11 @@ function execCommand(command, cwd, description, envOverrides = {}) {
 
     return {
       success: false,
+      code: 'CMD_ERROR',
       error: fullError,
       stdout,
-      stderr
+      stderr,
+      advice: buildAdvice('ERR', { stage: 'execCommand', description })
     };
   }
 }
@@ -269,16 +553,16 @@ async function checkBuildScript(projectPath) {
     const pkg = JSON.parse(pkgContent);
 
     if (!pkg.scripts?.build) {
-      return { valid: false, error: 'package.json 中缺少 build script' };
+      return { success: false, code: 'INVALID_PROJECT', error: 'package.json 中缺少 build script', advice: buildAdvice('INVALID_PROJECT', { stage: 'checkBuildScript', field: 'scripts.build' }) };
     }
 
     if (!pkg.devDependencies?.['electron-builder']) {
-      return { valid: false, error: 'package.json 中缺少 electron-builder 依赖' };
+      return { success: false, code: 'INVALID_PROJECT', error: 'package.json 中缺少 electron-builder 依赖', advice: buildAdvice('INVALID_PROJECT', { stage: 'checkBuildScript', field: 'devDependencies.electron-builder' }) };
     }
 
-    return { valid: true, script: pkg.scripts.build };
+    return { success: true, script: pkg.scripts.build };
   } catch (e) {
-    return { valid: false, error: `读取 package.json 失败: ${e.message}` };
+    return { success: false, code: 'INVALID_PROJECT', error: `读取 package.json 失败: ${e.message}`, advice: buildAdvice('INVALID_PROJECT', { stage: 'checkBuildScript' }) };
   }
 }
 
@@ -289,9 +573,12 @@ async function buildApp(projectPath, packageManager = 'npm', penv = {}) {
 
   // 验证 build script
   const checkResult = await checkBuildScript(projectPath);
-  if (!checkResult.valid) {
-    logger.error?.('html_to_app: 构建配置有误', { error: checkResult.error });
-    return { success: false, error: checkResult.error };
+  const checkOk = (checkResult && typeof checkResult === 'object')
+    ? (checkResult.success === true || checkResult.valid === true)
+    : false;
+  if (!checkOk) {
+    logger.error?.('html_to_app: 构建配置有误', { error: checkResult?.error });
+    return { success: false, code: checkResult?.code || 'INVALID_PROJECT', error: checkResult?.error || '构建配置校验失败', advice: checkResult?.advice || buildAdvice('INVALID_PROJECT', { stage: 'buildApp' }) };
   }
 
   let buildCmd;
@@ -411,20 +698,20 @@ export default async function handler(args = {}, options = {}) {
     const details = String(args.details || '').trim();
 
     if (!description) {
-      return { success: false, code: 'INVALID', error: 'description 参数必填' };
+      return { success: false, code: 'INVALID', error: 'description 参数必填', advice: buildAdvice('INVALID', { field: 'description' }) };
     }
 
     if (!appName) {
-      return { success: false, code: 'INVALID', error: 'app_name 参数必填' };
+      return { success: false, code: 'INVALID', error: 'app_name 参数必填', advice: buildAdvice('INVALID', { field: 'app_name' }) };
     }
 
     if (!details) {
-      return { success: false, code: 'INVALID', error: 'details 参数必填，请提供具体的 UI/UX 细节要求' };
+      return { success: false, code: 'INVALID', error: 'details 参数必填，请提供具体的 UI/UX 细节要求', advice: buildAdvice('INVALID', { field: 'details' }) };
     }
 
     // 验证应用名称格式（只允许字母、数字、连字符、下划线）
     if (!/^[a-zA-Z0-9_-]+$/.test(appName)) {
-      return { success: false, code: 'INVALID', error: 'app_name 只能包含字母、数字、连字符和下划线' };
+      return { success: false, code: 'INVALID', error: 'app_name 只能包含字母、数字、连字符和下划线', advice: buildAdvice('INVALID', { field: 'app_name' }) };
     }
 
     const htmlContent = String(args.html_content || '').trim();
@@ -441,7 +728,8 @@ export default async function handler(args = {}, options = {}) {
       return {
         success: false,
         code: 'PROJECT_EXISTS',
-        error: `项目已存在：${projectPath}。请使用不同的 app_name 或删除现有项目。`
+        error: `项目已存在：${projectPath}。请使用不同的 app_name 或删除现有项目。`,
+        advice: buildAdvice('PROJECT_EXISTS', { projectPath })
       };
     } catch {
       // 项目不存在，可以继续
@@ -450,7 +738,10 @@ export default async function handler(args = {}, options = {}) {
     // === 3. 调用 LLM 生成项目代码 ===
     logger.info?.('html_to_app: 开始生成项目代码', { appName, framework, hasDetails: !!details });
 
-    const systemPrompt = generateSystemPrompt(framework);
+    const outputFormat = String(penv.HTML_TO_APP_OUTPUT_FORMAT || process.env.HTML_TO_APP_OUTPUT_FORMAT || 'xml').toLowerCase();
+    const useXml = outputFormat !== 'markdown';
+
+    const systemPrompt = useXml ? generateSystemPromptXml(framework) : generateSystemPrompt(framework);
     const userPrompt = generateUserPrompt(description, details, htmlContent, features);
 
     const messages = [
@@ -458,26 +749,71 @@ export default async function handler(args = {}, options = {}) {
       { role: 'user', content: userPrompt }
     ];
 
-    const resp = await chatCompletion({
-      messages,
-      temperature: 0.3,
-      apiKey: penv.HTML_TO_APP_API_KEY || process.env.HTML_TO_APP_API_KEY || config.llm.apiKey,
-      baseURL: penv.HTML_TO_APP_BASE_URL || process.env.HTML_TO_APP_BASE_URL || config.llm.baseURL,
-      model: penv.HTML_TO_APP_MODEL || process.env.HTML_TO_APP_MODEL || config.llm.model || 'gpt-4o',
-      omitMaxTokens: true
-    });
-    
-    const content = resp.choices?.[0]?.message?.content?.trim() || '';
-    
-    // 从 Markdown 中提取文件
-    const files = parseMarkdownFiles(content);
+    const apiKey = penv.HTML_TO_APP_API_KEY || process.env.HTML_TO_APP_API_KEY || config.llm.apiKey;
+    const baseURL = penv.HTML_TO_APP_BASE_URL || process.env.HTML_TO_APP_BASE_URL || config.llm.baseURL;
+    const model = penv.HTML_TO_APP_MODEL || process.env.HTML_TO_APP_MODEL || config.llm.model || 'gpt-4o';
+    const maxContinueCalls = Number.parseInt(penv.HTML_TO_APP_MAX_CONTINUE_CALLS || process.env.HTML_TO_APP_MAX_CONTINUE_CALLS || '8', 10);
+
+    let resp;
+    let content = '';
+    let files;
+
+    try {
+      if (useXml) {
+        const gathered = await collectXmlWithContinue({
+          messages,
+          temperature: 0.3,
+          apiKey,
+          baseURL,
+          model,
+          omitMaxTokens: true,
+          maxContinueCalls: Number.isFinite(maxContinueCalls) ? Math.max(0, maxContinueCalls) : 8,
+        });
+        content = String(gathered.xml || '').trim();
+        resp = gathered.firstResp;
+
+        if (!isWellFormedXml(content)) {
+          logger.error?.('html_to_app: XML 不完整或不合法', { usedContinueCalls: gathered.continueCalls, preview: content.slice(0, 500) });
+          return {
+            success: false,
+            code: 'INVALID_XML',
+            error: `模型输出的 XML 不完整或不合法（已尝试 continue ${gathered.continueCalls} 次）。`,
+            advice: buildAdvice('INVALID_XML', { usedContinueCalls: gathered.continueCalls })
+          };
+        }
+        files = parseXmlProjectFiles(content);
+      } else {
+        resp = await chatCompletion({
+          messages,
+          temperature: 0.3,
+          apiKey,
+          baseURL,
+          model,
+          omitMaxTokens: true
+        });
+        content = resp.choices?.[0]?.message?.content?.trim() || '';
+        files = parseMarkdownFiles(content);
+      }
+    } catch (e) {
+      const isTimeout = isTimeoutError(e);
+      logger.error?.('html_to_app: LLM 调用失败', { error: String(e?.message || e), code: e?.code, stack: e?.stack });
+      return {
+        success: false,
+        code: isTimeout ? 'TIMEOUT' : 'ERR',
+        error: String(e?.message || e),
+        advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { stage: 'chatCompletion' }),
+      };
+    }
     
     if (!validateProjectFiles(files)) {
-      logger.error?.('html_to_app: 提取的文件不完整', { extractedFiles: Object.keys(files) });
+      const extractedFiles = Object.keys(files || {});
+      const check = checkProjectFiles(files);
+      logger.error?.('html_to_app: 提取的文件不完整', { extractedFiles, reason: check?.error });
       return {
         success: false,
         code: 'INVALID_PROJECT',
-        error: `生成的项目结构不完整。已提取文件：${Object.keys(files).join(', ')}。缺少必要文件：package.json, main.js, index.html`
+        error: String(check?.error || `生成的项目结构不完整。已提取文件：${extractedFiles.join(', ')}`),
+        advice: buildAdvice('INVALID_PROJECT', { extractedFiles, reason: check?.error })
       };
     }
     
@@ -621,10 +957,12 @@ export default async function handler(args = {}, options = {}) {
     return result;
   } catch (e) {
     logger.error?.('html_to_app: 生成失败', { label: 'PLUGIN', error: String(e?.message || e), stack: e?.stack });
+    const isTimeout = isTimeoutError(e);
     return {
       success: false,
-      code: 'GENERATION_ERROR',
+      code: isTimeout ? 'TIMEOUT' : 'GENERATION_ERROR',
       error: String(e?.message || e),
+      advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { stage: 'handler' }),
     };
   }
 }

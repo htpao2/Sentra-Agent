@@ -492,9 +492,9 @@ export function parseSentraResponse(response) {
     resources = resourceTags
       .map((resourceXML, idx) => {
         try {
-          const type = extractXMLTag(resourceXML, 'type');
-          const source = extractXMLTag(resourceXML, 'source');
-          const caption = extractXMLTag(resourceXML, 'caption');
+          const type = unescapeXml((extractXMLTag(resourceXML, 'type') || '').trim());
+          const source = unescapeXml((extractXMLTag(resourceXML, 'source') || '').trim());
+          const caption = unescapeXml((extractXMLTag(resourceXML, 'caption') || '').trim());
           
           if (!type || !source) {
             logger.warn(`resource[${idx}] 缺少必需字段`);
@@ -528,7 +528,7 @@ export function parseSentraResponse(response) {
       const mentionsBlock = extractXMLTag(sendBlock, 'mentions');
       if (mentionsBlock) {
         const ids = extractAllXMLTags(mentionsBlock, 'id') || [];
-        mentions = ids.map(v => (v || '').trim()).filter(Boolean);
+        mentions = ids.map(v => unescapeXml((v || '').trim())).filter(Boolean);
       }
     }
   } catch (e) {
@@ -541,8 +541,8 @@ export function parseSentraResponse(response) {
 
   if (emojiBlock && emojiBlock.trim()) {
     try {
-      const source = extractXMLTag(emojiBlock, 'source');
-      const caption = extractXMLTag(emojiBlock, 'caption');
+      const source = unescapeXml((extractXMLTag(emojiBlock, 'source') || '').trim());
+      const caption = unescapeXml((extractXMLTag(emojiBlock, 'caption') || '').trim());
 
       if (source) {
         emoji = { source };
@@ -989,7 +989,7 @@ export function buildSentraToolsBlockFromInvocations(invocations) {
  */
 function buildSentraToolsFromArgs(aiName, argsContent) {
   const xmlLines = ['<sentra-tools>'];
-  xmlLines.push(`  <invoke name="${aiName}">`);
+  xmlLines.push(`  <invoke name="${escapeXmlAttr(String(aiName || ''))}">`);
 
   // 优先尝试解析为 JSON（来自 <arguments> 或 <args> 中的 JSON）
   let parsed = null;
@@ -1030,7 +1030,7 @@ function buildSentraToolsFromArgs(aiName, argsContent) {
 function buildSentraToolsBatch(items) {
   const xmlLines = ['<sentra-tools>'];
   for (const { aiName, argsContent } of items) {
-    xmlLines.push(`  <invoke name="${aiName}">`);
+    xmlLines.push(`  <invoke name="${escapeXmlAttr(String(aiName || ''))}">`);
     // 与 buildSentraToolsFromArgs 相同的解析逻辑：优先 JSON，回退 XML
     let parsed = null;
     try {

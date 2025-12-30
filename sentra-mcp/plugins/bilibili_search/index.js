@@ -284,11 +284,93 @@ async function sendMusicCardViaWS({ wsUrl, timeoutMs, pathList, argStyle }, targ
   return { ok: false };
 }
 
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当搜索/获取失败时，要解释原因、给替代方案（换关键词/换模式/改参数/稍后重试），并主动引导用户下一步。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我现在还没拿到你要搜的 B 站关键词，所以没法开始检索。你把想搜的标题/角色/UP 主/关键词发我一下，我再继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '补充 keywords（至少一个）或 keyword（单次）',
+        '可以加上更具体的限定词：作品名 + 片段 + “MAD/AMV/剪辑/全集/现场”等',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'NO_RESULT') {
+    return {
+      suggested_reply: '我翻了一圈 B 站，但没搜到符合这个关键词的视频结果。我们可以换个更常见/更具体的关键词，或者我按你给的描述改写几个更好搜的搜索词再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '换关键词：补充作品名/UP 主/关键桥段/发布时间线索',
+        '尝试不同 pick 策略（first/random/fresh 等）',
+        '如果你有视频链接/BV 号，直接给我，我可以走“解析/下载/卡片发送”流程',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我这边尝试拉取 B 站数据时卡住了，像是网络/接口超时。我可以先基于已有知识给你建议，或者我们稍后重试一次（也可以换个关键词/降低请求压力）。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试，或换更短更具体的关键词',
+        '如果你有可用的 Cookie/代理环境，配置后成功率更高',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'PLAYURL_ERR' || kind === 'NO_PLAYURL' || kind === 'NO_CID') {
+    return {
+      suggested_reply: '我找到了视频条目，但在解析播放地址/视频信息时失败了（可能是接口限制、需要登录、或该视频分区/清晰度受限）。我可以换一个结果重试，或者切换为“只返回视频页面链接”的模式。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '换一个搜索结果（换 pick 策略或换关键词）',
+        '切换模式：仅返回视频页面链接（不下载/不解析播放地址）',
+        '如需下载，建议配置 Cookie（部分内容需要登录）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TARGET_REQUIRED') {
+    return {
+      suggested_reply: '我可以帮你把视频做成音乐卡片发送，但你还没告诉我发到哪里（私聊 user_id 或群聊 group_id）。你把目标发我一下，我就继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 user_id（私聊）或 group_id（群聊）',
+        '确认 mode=music_card（或开启相应发送参数）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'SEND_FAILED') {
+    return {
+      suggested_reply: '我找到了视频，但发送音乐卡片时失败了（可能是 WebSocket/适配器状态异常）。我可以把视频链接/信息直接整理给你，或者你确认一下 bot/WS 是否在线后我再重试发送。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '确认 WS/适配器在线、目标会话可达（user_id/group_id）',
+        '改为仅返回视频链接（不发送卡片）',
+        '稍后重试发送',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试帮你在 B 站检索/解析视频，但这次工具执行失败了。我可以先给你更好用的搜索关键词建议，或者换个策略再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '更换关键词或缩小范围后重试',
+      '如果你有 BV 号/链接，直接提供可提高成功率',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 async function singleBilibiliSearchHandler(args = {}, options = {}) {
   const keyword = String(args.keyword || '').trim();
   const pick = (args.pick || 'first');
   
-  if (!keyword) return { success: false, code: 'INVALID', error: 'keyword is required' };
+  if (!keyword) return { success: false, code: 'INVALID', error: 'keyword is required', advice: buildAdvice('INVALID', { tool: 'bilibili_search' }) };
 
   const penv = options?.pluginEnv || {};
   
@@ -324,7 +406,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
 
     // 如果开启音乐卡片发送，必须提供目标
     if (!user_id && !group_id) {
-      return { success: false, code: 'TARGET_REQUIRED', error: '发送音乐卡片时必须提供 user_id（私聊）或 group_id（群聊）' };
+      return { success: false, code: 'TARGET_REQUIRED', error: '发送音乐卡片时必须提供 user_id（私聊）或 group_id（群聊）', advice: buildAdvice('TARGET_REQUIRED', { tool: 'bilibili_search', keyword }) };
     }
 
     // WebSocket 配置（音乐卡片模式）
@@ -373,7 +455,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
     logger.info?.('bilibili_search:step:search', { label: 'PLUGIN', keyword, timeout: fetchTimeoutMs });
     const items = await searchVideos(keyword, headersWithCookie, fetchTimeoutMs);
     logger.info?.('bilibili_search:step:search_done', { label: 'PLUGIN', count: items.length });
-    if (!items.length) return { success: false, code: 'NO_RESULT', error: `未找到与 "${keyword}" 相关的视频` };
+    if (!items.length) return { success: false, code: 'NO_RESULT', error: `未找到与 "${keyword}" 相关的视频`, advice: buildAdvice('NO_RESULT', { tool: 'bilibili_search', keyword }) };
 
     // 基于 BVID 做去重过滤，优先选择近期未使用过的视频
     const freshItems = [];
@@ -407,7 +489,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
     }
 
     const chosen = pool[0];
-    if (!chosen) return { success: false, code: 'NO_RESULT', error: `未找到与 "${keyword}" 相关的视频` };
+    if (!chosen) return { success: false, code: 'NO_RESULT', error: `未找到与 "${keyword}" 相关的视频`, advice: buildAdvice('NO_RESULT', { tool: 'bilibili_search', keyword }) };
 
     const title = String(chosen?.title || '').replace(/<[^>]+>/g, '');
     const rawBvidChosen = chosen?.bvid ?? chosen?.bvid?.trim?.();
@@ -424,7 +506,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
     logger.info?.('bilibili_search:step:get_cid_done', { label: 'PLUGIN', bvid });
     const firstPage = Array.isArray(view?.pages) && view.pages.length > 0 ? view.pages[0] : null;
     const cid = Number(firstPage?.cid || view?.cid || 0);
-    if (!cid) return { success: false, code: 'NO_CID', error: '未能解析视频 CID' };
+    if (!cid) return { success: false, code: 'NO_CID', error: '未能解析视频 CID', advice: buildAdvice('NO_CID', { tool: 'bilibili_search', keyword, bvid }) };
 
     // 播放地址（mp4）
     let playUrls = [];
@@ -437,10 +519,12 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
       logger.info?.('bilibili_search:step:get_playurl_done', { label: 'PLUGIN', bvid, durlSizeMB: (durlSize / 1024 / 1024).toFixed(2), urlCount: playUrls.length });
     } catch (e) {
       logger.error?.('bilibili_search:step:get_playurl_failed', { label: 'PLUGIN', bvid, error: String(e?.message || e) });
-      return { success: false, code: 'PLAYURL_ERR', error: String(e?.message || e) };
+      const rawErr = String(e?.message || e);
+      const isTimeout = rawErr.toLowerCase().includes('timeout') || rawErr.toLowerCase().includes('timed out');
+      return { success: false, code: isTimeout ? 'TIMEOUT' : 'PLAYURL_ERR', error: rawErr, advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'PLAYURL_ERR', { tool: 'bilibili_search', keyword, bvid }) };
     }
     
-    if (!playUrls.length) return { success: false, code: 'NO_PLAYURL', error: '未能获取播放地址' };
+    if (!playUrls.length) return { success: false, code: 'NO_PLAYURL', error: '未能获取播放地址', advice: buildAdvice('NO_PLAYURL', { tool: 'bilibili_search', keyword, bvid }) };
 
     // 获取/预探测视频大小
     let sizeBytes = Number(durlSize || 0);
@@ -516,7 +600,7 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
       }
 
       logger.warn?.('bilibili_search:send_music_card_failed', { label: 'PLUGIN', reason: 'all_ws_paths_failed' });
-      return { success: false, code: 'SEND_FAILED', error: '发送音乐卡片失败（所有WebSocket路径均失败）' };
+      return { success: false, code: 'SEND_FAILED', error: '发送音乐卡片失败（所有WebSocket路径均失败）', advice: buildAdvice('SEND_FAILED', { tool: 'bilibili_search', keyword, bvid }) };
     }
 
     // 10) 下载模式 / 链接模式
@@ -629,7 +713,9 @@ async function singleBilibiliSearchHandler(args = {}, options = {}) {
     return { success: true, data };
   } catch (e) {
     logger.error?.('bilibili_search:error', { label: 'PLUGIN', error: String(e?.message || e), stack: e?.stack });
-    return { success: false, code: 'ERR', error: String(e?.message || e) };
+    const rawErr = String(e?.message || e);
+    const isTimeout = rawErr.toLowerCase().includes('timeout') || rawErr.toLowerCase().includes('timed out');
+    return { success: false, code: isTimeout ? 'TIMEOUT' : 'ERR', error: rawErr, advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'bilibili_search', keyword }) };
   }
 }
 
@@ -640,7 +726,7 @@ export default async function handler(args = {}, options = {}) {
     .filter((k) => !!k);
 
   if (!keywords.length) {
-    return { success: false, code: 'INVALID', error: 'keywords 为必填参数，请提供至少一个搜索关键词数组，如：["鬼灭之刃 MAD", "进击的巨人 AMV"]' };
+    return { success: false, code: 'INVALID', error: 'keywords 为必填参数，请提供至少一个搜索关键词数组，如：["鬼灭之刃 MAD", "进击的巨人 AMV"]', advice: buildAdvice('INVALID', { tool: 'bilibili_search' }) };
   }
 
   const delayMinMs = Number(process.env.BILI_SEARCH_DELAY_MIN_MS || 800);
@@ -680,6 +766,7 @@ export default async function handler(args = {}, options = {}) {
     error: '所有关键词的视频搜索或处理均失败',
     data: {
       results
-    }
+    },
+    advice: buildAdvice('NO_RESULT', { tool: 'bilibili_search', keywords })
   };
 }

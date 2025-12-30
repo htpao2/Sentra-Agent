@@ -74,3 +74,13 @@ export function isRedisReady() {
     return false;
   }
 }
+
+export function getRedisSafe() {
+  try {
+    const r = getRedis();
+    if (!r || !isRedisReady()) return null;
+    return r;
+  } catch {
+    return null;
+  }
+}

@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { createLogger } from './logger.js';
+import { escapeXml, escapeXmlAttr } from './xmlUtils.js';
 import { getRedis } from './redisClient.js';
 import { getEnv, getEnvInt } from './envHotReloader.js';
 
@@ -455,15 +456,15 @@ class GroupHistoryManager {
     
     history.pendingMessages.forEach((pm, index) => {
       const msg = pm.msgObj;
-      xml += `    <message index="${index + 1}">\n`;
-      xml += `      <sender_id>${this._escapeXml(String(msg.sender_id || ''))}</sender_id>\n`;
-      xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
-      xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
-      xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+      xml += `    <message index="${escapeXmlAttr(String(index + 1))}">\n`;
+      xml += `      <sender_id>${escapeXml(String(msg.sender_id || ''))}</sender_id>\n`;
+      xml += `      <sender_name>${escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
+      xml += `      <text>${escapeXml(msg.text || msg.summary || '')}</text>\n`;
+      xml += `      <time>${escapeXml(msg.time_str || '')}</time>\n`;
       
       // 添加消息 ID（用于引用回复）
       if (msg.message_id) {
-        xml += `      <message_id>${this._escapeXml(String(msg.message_id))}</message_id>\n`;
+        xml += `      <message_id>${escapeXml(String(msg.message_id))}</message_id>\n`;
       }
       
       // 添加 at 信息
@@ -483,15 +484,8 @@ class GroupHistoryManager {
     return xml;
   }
 
-  /**
-   * XML 转义（基础转义，Sentra 协议不转义特殊字符）
-   * @param {string} str - 要转义的字符串
-   * @returns {string} 转义后的字符串
-   */
-  _escapeXml(str) {
-    // Sentra XML 协议：不转义特殊字符，保持原样
-    // 参考 Memory[5bc2a202]: Sentra XML 协议不转义 <、>、& 等
-    return String(str || '');
+  _escapeXmlText(str) {
+    return escapeXml(str);
   }
 
   _truncateForDecisionContext(text, maxChars) {
@@ -556,10 +550,10 @@ class GroupHistoryManager {
 
         senderContext.forEach((pm, index) => {
           const msg = pm.msgObj;
-          xml += `    <message index="${index + 1}">\n`;
-          xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
-          xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
-          xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+          xml += `    <message index="${escapeXmlAttr(String(index + 1))}">\n`;
+          xml += `      <sender_name>${this._escapeXmlText(msg.sender_name || 'Unknown')}</sender_name>\n`;
+          xml += `      <text>${this._escapeXmlText(msg.text || msg.summary || '')}</text>\n`;
+          xml += `      <time>${this._escapeXmlText(msg.time_str || '')}</time>\n`;
           xml += `    </message>\n`;
         });
 
@@ -579,11 +573,11 @@ class GroupHistoryManager {
       xml += '  <group_context_messages>\n';
       othersContext.forEach((pm, index) => {
         const msg = pm.msgObj;
-        xml += `    <message index="${index + 1}">\n`;
-        xml += `      <sender_id>${this._escapeXml(String(msg.sender_id || ''))}</sender_id>\n`;
-        xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
-        xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
-        xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+        xml += `    <message index="${escapeXmlAttr(String(index + 1))}">\n`;
+        xml += `      <sender_id>${this._escapeXmlText(String(msg.sender_id || ''))}</sender_id>\n`;
+        xml += `      <sender_name>${this._escapeXmlText(msg.sender_name || 'Unknown')}</sender_name>\n`;
+        xml += `      <text>${this._escapeXmlText(msg.text || msg.summary || '')}</text>\n`;
+        xml += `      <time>${this._escapeXmlText(msg.time_str || '')}</time>\n`;
         xml += '    </message>\n';
       });
       xml += '  </group_context_messages>\n';
@@ -591,10 +585,10 @@ class GroupHistoryManager {
       xml += '  <sender_context_messages>\n';
       senderContext.forEach((pm, index) => {
         const msg = pm.msgObj;
-        xml += `    <message index="${index + 1}">\n`;
-        xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
-        xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
-        xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+        xml += `    <message index="${escapeXmlAttr(String(index + 1))}">\n`;
+        xml += `      <sender_name>${this._escapeXmlText(msg.sender_name || 'Unknown')}</sender_name>\n`;
+        xml += `      <text>${this._escapeXmlText(msg.text || msg.summary || '')}</text>\n`;
+        xml += `      <time>${this._escapeXmlText(msg.time_str || '')}</time>\n`;
         xml += '    </message>\n';
       });
       xml += '  </sender_context_messages>\n';
@@ -620,10 +614,10 @@ class GroupHistoryManager {
 
     contextMessages.forEach((pm, index) => {
       const msg = pm.msgObj;
-      xml += `    <message index="${index + 1}">\n`;
-      xml += `      <sender_name>${this._escapeXml(msg.sender_name || 'Unknown')}</sender_name>\n`;
-      xml += `      <text>${this._escapeXml(msg.text || msg.summary || '')}</text>\n`;
-      xml += `      <time>${this._escapeXml(msg.time_str || '')}</time>\n`;
+      xml += `    <message index="${escapeXmlAttr(String(index + 1))}">\n`;
+      xml += `      <sender_name>${this._escapeXmlText(msg.sender_name || 'Unknown')}</sender_name>\n`;
+      xml += `      <text>${this._escapeXmlText(msg.text || msg.summary || '')}</text>\n`;
+      xml += `      <time>${this._escapeXmlText(msg.time_str || '')}</time>\n`;
       xml += `    </message>\n`;
     });
 

@@ -50,6 +50,33 @@ export class MCPCore {
     this.toolIndex = new Map(); // aiName -> descriptor
   }
 
+  static _looksLikeToolResult(v) {
+    return !!(v && typeof v === 'object' && typeof v.success === 'boolean');
+  }
+
+  static _unwrapNestedToolResult(out) {
+    if (!out || out.success !== true) return out;
+    const d = out.data;
+    if (!d || typeof d !== 'object') return out;
+    if (typeof d.success !== 'boolean') return out;
+    if (d.success === true) return out;
+
+    // Legacy pattern: plugin returned ok({ success:false, ... }) and MCPCore wrapped it as success:true.
+    // Treat it as a real failure at the top-level.
+    const code = d.code || out.code || 'ERR';
+    const provider = out.provider;
+    const data = 'data' in d ? d.data : null;
+    const error = 'error' in d ? d.error : (d.message || d.reason || 'Tool failed');
+
+    const rest = { ...d };
+    delete rest.success;
+    delete rest.code;
+    delete rest.data;
+    delete rest.error;
+
+    return { success: false, code, data, error, provider, ...rest };
+  }
+
   async init() {
     // Load local plugins
     this.localTools = await loadPlugins();
@@ -373,9 +400,17 @@ export class MCPCore {
           const selectedTimeout = Number(t.timeoutMs) > 0 ? Number(t.timeoutMs) : config.planner.toolTimeoutMs;
           const opt = { ...options, pluginEnv: t.pluginEnv || {}, timeoutMs: selectedTimeout };
           const res = await executeToolWithTimeout(() => t.handler(args || {}, opt), selectedTimeout);
-          try { await Metrics.incrSuccess(t.name, 'local'); } catch {}
+          const outRaw = MCPCore._looksLikeToolResult(res)
+            ? { ...res, provider: 'local' }
+            : ok(res?.data ?? res, 'OK', { provider: 'local' });
+          const out = MCPCore._unwrapNestedToolResult(outRaw);
+          const okFlag = out?.success === true;
+          if (okFlag) {
+            try { await Metrics.incrSuccess(t.name, 'local'); } catch {}
+          } else {
+            try { await Metrics.incrFailure(t.name, 'local', out?.code || 'ERR'); } catch {}
+          }
           try { await Metrics.addLatency(t.name, Date.now() - start, 'local'); } catch {}
-          const out = ok(res?.data ?? res, 'OK', { provider: 'local' });
           // Write cache on success（过滤掉 data.success === false 的伪成功）
           if (cacheEnabled && cacheKey && MCPCore._isCacheableResult(out)) {
             try {
@@ -426,10 +461,18 @@ export class MCPCore {
           // 外部工具：移除 schedule 字段（不传递给下游服务器）
           const { schedule, ...forwardArgs } = args || {};
           const res = await executeToolWithTimeout(() => this.externalMgr.callTool(t.serverId, t.name, forwardArgs), config.planner.toolTimeoutMs);
-          try { await Metrics.incrSuccess(t.name, `external:${t.serverId}`); } catch {}
+          const payload = res?.content ?? res?.result ?? res;
+          const outRaw = MCPCore._looksLikeToolResult(payload)
+            ? { ...payload, provider: `external:${t.serverId}` }
+            : ok(payload, 'OK', { provider: `external:${t.serverId}` });
+          const out = MCPCore._unwrapNestedToolResult(outRaw);
+          const okFlag = out?.success === true;
+          if (okFlag) {
+            try { await Metrics.incrSuccess(t.name, `external:${t.serverId}`); } catch {}
+          } else {
+            try { await Metrics.incrFailure(t.name, `external:${t.serverId}`, out?.code || 'ERR'); } catch {}
+          }
           try { await Metrics.addLatency(t.name, Date.now() - start, `external:${t.serverId}`); } catch {}
-          // Wrap external result
-          const out = ok(res?.content ?? res?.result ?? res, 'OK', { provider: `external:${t.serverId}` });
           if (cacheEnabled && cacheKey && MCPCore._isCacheableResult(out)) {
             try {
               const r = getRedis();

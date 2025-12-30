@@ -6,6 +6,32 @@ import { fileURLToPath } from 'node:url';
 import logger from '../../src/logger/index.js';
 import { abs as toAbs, toPosix } from '../../src/utils/path.js';
 
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当写文件失败时，要说明原因（路径/权限/内容格式），给替代方案（换路径/改 overwrite/改 fileType），并引导用户补充必要参数。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我现在还缺少写文件所需的必要参数（例如 path 或 content），所以没法开始写入。你把要保存的路径和内容发我一下，我就继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 path（文件路径，例如 report.md 或 data.json）',
+        '提供 content（要写入的内容）',
+        '如不希望覆盖已有文件，设置 overwrite=false',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试把内容写入文件，但这次写入失败了（可能是路径无效、权限不足、或内容格式不符合指定 fileType）。我可以帮你换一个更稳妥的保存路径，或把内容转换成合适的格式后再写一次。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '检查路径是否允许写入（建议使用 artifacts/ 下的相对路径）',
+      '确认 overwrite 设置是否符合预期',
+      '必要时指定 fileType（text/json/csv/pdf 等）',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 // 获取当前文件所在目录（插件目录）
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -487,11 +513,11 @@ export default async function handler(args = {}, options = {}) {
   const rawPath = args.path;
   
   if (!rawPath || typeof rawPath !== 'string') {
-    return { success: false, code: 'INVALID', error: 'path 是必须的字符串参数' };
+    return { success: false, code: 'INVALID', error: 'path 是必须的字符串参数', advice: buildAdvice('INVALID', { tool: 'write_file' }) };
   }
   
   if (args.content === undefined) {
-    return { success: false, code: 'INVALID', error: 'content 不能为空' };
+    return { success: false, code: 'INVALID', error: 'content 不能为空', advice: buildAdvice('INVALID', { tool: 'write_file', path: rawPath }) };
   }
   
   try {
@@ -529,7 +555,8 @@ export default async function handler(args = {}, options = {}) {
       success: false, 
       code: 'ERR', 
       error: String(e?.message || e),
-      stack: e?.stack 
+      stack: e?.stack,
+      advice: buildAdvice('ERR', { tool: 'write_file', path: rawPath })
     };
   }
 }

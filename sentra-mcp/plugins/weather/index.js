@@ -11,6 +11,87 @@ const WEATHER_DATA_CACHE_PATH = path.join(CACHE_DIR, 'weather_data_cache.json');
 // 默认缓存过期时间（毫秒）
 const DEFAULT_CACHE_EXPIRY_MS = 30 * 60 * 1000; // 30分钟
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当查询天气失败时，要说明可能原因（城市名/配置/网络/接口限制），给替代方案（换写法/稍后重试/改查询类型），并引导用户补充信息。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我现在还没拿到要查询的城市列表或查询类型不正确，所以没法开始查天气。你把城市名发我一下（可以多个），我再继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 cities（城市数组），例如：["北京","上海"]',
+        'queryType 可选：current/forecast/hourly/warning/all',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'NO_API_KEY') {
+    return {
+      suggested_reply: '我这边暂时无法查询天气，因为天气接口的 KEY 还没配置好。你可以先告诉我你想要的城市和时间范围，我先按常识给出建议；同时也建议把 WEATHER_API_KEY 配置好后再查一次更准确的实时数据。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '在 .env 或插件环境中配置 WEATHER_API_KEY（或 WEATHER_KEY）',
+        '配置后重试同样的 cities/queryType',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'CITY_FAILED') {
+    return {
+      suggested_reply: '我尝试查询其中一个城市的天气，但这一城市没有拿到结果（可能是城市名不匹配、网络波动或接口暂时不可用）。我可以换一种写法重试，或者先给你别的城市结果。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '检查城市名是否是常见写法（例如“北京市/北京”）',
+        '稍后重试或改用 queryType=all 获取更完整信息',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我查天气查到一半卡住了，像是网络/接口超时了。我可以先按经验给你一个参考建议，或者我们稍后再重试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试',
+        '减少城市数量，先查一个城市确认通路',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'WEATHER_API_FAILED') {
+    return {
+      suggested_reply: '我尝试查询天气，但这次所有城市都没能拿到有效结果（可能是接口异常、网络问题或配置问题）。我可以先基于常识给你一个参考建议，并在你允许的情况下稍后重试。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '确认 WEATHER_API_KEY 已配置',
+        '核对 cities 城市名写法',
+        '稍后重试或改用更少的城市先验证',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试查询天气，但这次工具执行失败了。我可以先给你一个不依赖实时接口的参考建议，并告诉你如何改参数/稍后重试获取更准确的数据。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '确认城市名、查询类型与配置项',
+      '稍后重试',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 function pluginEnv(options = {}) { 
   return options.pluginEnv || {}; 
 }
@@ -510,7 +591,7 @@ export default async function handler(args = {}, options = {}) {
     : [];
 
   if (!cities.length) {
-    return { success: false, code: 'INVALID', error: 'cities 为必填参数，请提供至少一个城市名称数组，如：["北京", "上海"]' };
+    return { success: false, code: 'INVALID', error: 'cities 为必填参数，请提供至少一个城市名称数组，如：["北京", "上海"]', advice: buildAdvice('INVALID', { tool: 'weather' }) };
   }
 
   const queryType = (args.queryType || 'all').toLowerCase();
@@ -518,13 +599,13 @@ export default async function handler(args = {}, options = {}) {
   const weatherUrl = penv.WEATHER_API_HOST || penv.WEATHER_HOST || process.env.WEATHER_API_HOST || process.env.WEATHER_HOST || 'devapi.qweather.com';
   
   if (!weatherKey) {
-    return { success: false, code: 'NO_API_KEY', error: 'WEATHER_API_KEY 未配置，请在 .env 文件中配置' };
+    return { success: false, code: 'NO_API_KEY', error: 'WEATHER_API_KEY 未配置，请在 .env 文件中配置', advice: buildAdvice('NO_API_KEY', { tool: 'weather' }) };
   }
 
   // 验证查询类型
   const validTypes = ['current', 'forecast', 'hourly', 'warning', 'all'];
   if (!validTypes.includes(queryType)) {
-    return { success: false, code: 'INVALID', error: `无效的查询类型: ${queryType}。支持的类型: ${validTypes.join(', ')}` };
+    return { success: false, code: 'INVALID', error: `无效的查询类型: ${queryType}。支持的类型: ${validTypes.join(', ')}`, advice: buildAdvice('INVALID', { tool: 'weather', queryType }) };
   }
 
   const results = [];
@@ -552,7 +633,8 @@ export default async function handler(args = {}, options = {}) {
         queryType,
         success: false,
         error: errorMessage,
-        code: 'WEATHER_API_FAILED'
+        code: 'WEATHER_API_FAILED',
+        advice: buildAdvice(isTimeoutError(result.error) ? 'TIMEOUT' : 'CITY_FAILED', { tool: 'weather', city, queryType })
       });
     }
   }
@@ -577,6 +659,7 @@ export default async function handler(args = {}, options = {}) {
     data: {
       queryType,
       results
-    }
+    },
+    advice: buildAdvice('WEATHER_API_FAILED', { tool: 'weather', cities, queryType })
   };
 }

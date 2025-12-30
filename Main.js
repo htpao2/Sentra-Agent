@@ -30,7 +30,8 @@ import {
   handleIncomingMessage,
   startBundleForQueuedMessage,
   collectBundleForSender,
-  drainPendingMessagesForSender
+  drainPendingMessagesForSender,
+  getMessageBundlerStats
 } from './utils/messageBundler.js';
 import { decideOverrideIntent } from './utils/replyIntervention.js';
 import { buildAgentPresetXml, formatPresetJsonAsPlainText } from './utils/jsonToSentraXmlConverter.js';
@@ -41,10 +42,12 @@ import { handleOneMessageCore } from './components/MessagePipeline.js';
 import { setupSocketHandlers } from './components/SocketHandlers.js';
 import { initAgentPresetCore } from './components/AgentPresetInitializer.js';
 import DesireManager from './utils/desireManager.js';
+import { startMemoryMonitor } from './utils/memoryMonitor.js';
 import { buildProactiveRootDirectiveXml, checkProactiveWhitelistTarget } from './components/ProactiveDirectivePlanner.js';
 import { handleGroupReplyCandidate } from './utils/groupReplyMerger.js';
 import { startDelayJobWorker, enqueueDelayedJob } from './utils/delayJobQueue.js';
 import { createDelayJobRunJob } from './components/DelayJobWorker.js';
+import { replySendQueue } from './utils/replySendQueue.js';
 
 const ENV_PATH = '.env';
 loadEnv(ENV_PATH);
@@ -317,6 +320,25 @@ onEnvReload(() => {
 const historyManager = new GroupHistoryManager({
   maxConversationPairs: getEnvInt('MAX_CONVERSATION_PAIRS', 20)
 });
+
+startMemoryMonitor([
+  {
+    name: 'GroupHistoryManager',
+    getStats: () => historyManager.getStats()
+  },
+  {
+    name: 'MessageBundler',
+    getStats: () => getMessageBundlerStats()
+  },
+  {
+    name: 'ReplySendQueue',
+    getStats: () => replySendQueue.getStats()
+  },
+  {
+    name: 'SentraMcpHistoryStore',
+    getStats: () => (HistoryStore && typeof HistoryStore.getStats === 'function' ? HistoryStore.getStats() : { ok: false })
+  }
+]);
 
 // 用户画像管理器
 const personaManager = new UserPersonaManager({

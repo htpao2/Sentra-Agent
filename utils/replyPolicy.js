@@ -23,6 +23,69 @@ const groupReplyStats = new Map();  // groupKey -> { timestamps: number[] }
 const cancelledTasks = new Set();   // 记录被标记为取消的任务ID（taskId）
 const gateSessions = new Map();
 
+const senderLastTouchedAt = new Map();
+
+function touchSenderState(senderKey) {
+  const k = normalizeSenderId(senderKey);
+  if (!k) return;
+  senderLastTouchedAt.set(k, Date.now());
+}
+
+function pruneReplyPolicyState() {
+  const ttlMsRaw = getEnvInt('REPLY_POLICY_STATE_TTL_MS', 30 * 60 * 1000);
+  const ttlMs = Number.isFinite(ttlMsRaw) && ttlMsRaw > 0 ? ttlMsRaw : 30 * 60 * 1000;
+  const maxCancelledRaw = getEnvInt('CANCELLED_TASKS_MAX', 5000);
+  const maxCancelled = Number.isFinite(maxCancelledRaw) && maxCancelledRaw > 0 ? maxCancelledRaw : 5000;
+
+  const now = Date.now();
+
+  for (const [senderKey, ts] of senderLastTouchedAt.entries()) {
+    if (!Number.isFinite(ts) || now - ts <= ttlMs) continue;
+
+    const q = senderQueues.get(senderKey);
+    const a = activeTasks.get(senderKey);
+
+    const hasQueue = Array.isArray(q) && q.length > 0;
+    const hasActive = a && a instanceof Set && a.size > 0;
+
+    if (!hasQueue && !hasActive) {
+      senderQueues.delete(senderKey);
+      activeTasks.delete(senderKey);
+      gateSessions.delete(senderKey);
+      senderReplyStats.delete(senderKey);
+      senderLastTouchedAt.delete(senderKey);
+    }
+  }
+
+  for (const [groupKey, map] of groupAttention.entries()) {
+    if (!map || !(map instanceof Map)) {
+      groupAttention.delete(groupKey);
+      continue;
+    }
+    for (const [sid, ts] of map.entries()) {
+      if (!Number.isFinite(ts) || now - ts > 10 * 60 * 1000) {
+        map.delete(sid);
+      }
+    }
+    if (map.size === 0) {
+      groupAttention.delete(groupKey);
+    }
+  }
+
+  if (cancelledTasks.size > maxCancelled) {
+    cancelledTasks.clear();
+  }
+}
+
+try {
+  const intervalMsRaw = getEnvInt('REPLY_POLICY_PRUNE_INTERVAL_MS', 60000);
+  const intervalMs = Number.isFinite(intervalMsRaw) && intervalMsRaw > 0 ? intervalMsRaw : 60000;
+  const timer = setInterval(() => {
+    try { pruneReplyPolicyState(); } catch {}
+  }, intervalMs);
+  timer.unref?.();
+} catch {}
+
 const REPLY_GATE_BASE_ZH = {
   reply_gate_disabled: 'ReplyGate 已关闭：跳过本地预判，交给 LLM 决策',
   non_group_message: '非群聊消息：ReplyGate 不参与（由上层策略处理）',
@@ -430,6 +493,7 @@ function recordReplyForFatigue(msg, senderId, config) {
  */
 function getSenderQueue(senderId) {
   const key = normalizeSenderId(senderId);
+  touchSenderState(key);
   if (!senderQueues.has(key)) {
     senderQueues.set(key, []);
   }
@@ -441,6 +505,7 @@ function getSenderQueue(senderId) {
  */
 export function getActiveTaskCount(senderId) {
   const key = normalizeSenderId(senderId);
+  touchSenderState(key);
   if (!activeTasks.has(key)) {
     activeTasks.set(key, new Set());
   }
@@ -449,6 +514,7 @@ export function getActiveTaskCount(senderId) {
 
 function getActiveTaskSet(senderId) {
   const key = normalizeSenderId(senderId);
+  touchSenderState(key);
   if (!activeTasks.has(key)) {
     activeTasks.set(key, new Set());
   }
@@ -489,6 +555,7 @@ export function resetReplyGateForSender(senderId) {
  */
 function addActiveTask(senderId, taskId) {
   const key = normalizeSenderId(senderId);
+  touchSenderState(key);
   if (!activeTasks.has(key)) {
     activeTasks.set(key, new Set());
   }
@@ -502,6 +569,7 @@ function addActiveTask(senderId, taskId) {
  */
 function removeActiveTask(senderId, taskId) {
   const key = normalizeSenderId(senderId);
+  touchSenderState(key);
   if (activeTasks.has(key)) {
     activeTasks.get(key).delete(taskId);
     logger.debug(`活跃任务-: ${key} 移除任务 ${taskId?.substring(0,8)}, 剩余活跃数: ${activeTasks.get(key).size}`);

@@ -3,6 +3,54 @@ import path from 'node:path';
 import logger from '../../src/logger/index.js';
 import { httpGet } from '../../src/utils/http.js';
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当获取 QQ 头像失败时，要说明原因（参数/网络/接口限制），给替代方案（确认QQ号/稍后重试/换网络），并引导用户补充信息。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我可以帮你获取 QQ 头像，但需要提供 user_id（QQ号）。你把 QQ 号发我一下，我就继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 user_id（QQ号）',
+        '如需强制更新缓存，可设置 useCache=false',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我尝试拉取 QQ 头像，但网络请求超时了。我们可以稍后重试，或者换个网络环境再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试',
+        '如果你在内网/代理环境，确认能访问 q.qlogo.cn',
+        '必要时 useCache=false 强制刷新',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试获取 QQ 头像，但这次失败了。可能是网络波动或对方头像接口暂时不可用。你可以稍后重试，我也可以帮你确认 QQ 号是否正确。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '确认 user_id 是否正确',
+      '稍后重试',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 // In-memory cache: Map<userId, { expireAt:number, data:any }>
 const memCache = new Map();
 const TTL_SEC = 1800; // 30 minutes
@@ -67,7 +115,7 @@ async function downloadToArtifacts(userId) {
 export default async function handler(args = {}, options = {}) {
   const userIdRaw = args.user_id;
   const userId = String(userIdRaw ?? '').trim();
-  if (!userId) return { success: false, code: 'INVALID', error: 'user_id is required' };
+  if (!userId) return { success: false, code: 'INVALID', error: 'user_id is required', advice: buildAdvice('INVALID', { tool: 'qq_avatar_get' }) };
   const useCache = args.useCache !== false; // default true
 
   // Try memory cache
@@ -99,6 +147,7 @@ export default async function handler(args = {}, options = {}) {
     return { success: true, data: { user_id: userId, content: `![avatar](${abs})`, path_markdown: `![avatar](${abs})` } };
   } catch (e) {
     logger.warn?.('qq_avatar_get:download_failed', { label: 'PLUGIN', error: String(e?.message || e) });
-    return { success: false, code: 'ERR', error: String(e?.message || e) };
+    const isTimeout = isTimeoutError(e);
+    return { success: false, code: isTimeout ? 'TIMEOUT' : 'ERR', error: String(e?.message || e), advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'qq_avatar_get', user_id: userId }) };
   }
 }

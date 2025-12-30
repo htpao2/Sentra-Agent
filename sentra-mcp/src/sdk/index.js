@@ -8,6 +8,15 @@ import { startHotReloadWatchers } from '../config/hotReload.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+function escapeXmlEntities(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 function toMarkdownCatalog(items = []) {
   const lines = ['# Sentra MCP 工具清单', '', `**可用工具总数**: ${items.length}`, '---', ''];
   for (const t of items) {
@@ -46,7 +55,7 @@ function toXmlCatalog(items = []) {
   const lines = [];
   lines.push('<sentra-mcp-tools>');
   lines.push(
-    `  <summary>共有 ${items.length} 个 MCP 工具可用。以下清单仅供参考，请严格遵守每个工具描述的能力边界和使用场景。</summary>`
+    `  <summary>${escapeXmlEntities(`共有 ${items.length} 个 MCP 工具可用。以下清单仅供参考，请严格遵守每个工具描述的能力边界和使用场景。`)}</summary>`
   );
 
   items.forEach((t, idx) => {
@@ -67,20 +76,20 @@ function toXmlCatalog(items = []) {
     const responseExample =
       t.meta && t.meta.responseExample != null ? String(t.meta.responseExample) : '';
 
-    lines.push(`  <tool index="${index}">`);
-    if (aiName) lines.push(`    <ai_name>${aiName}</ai_name>`);
-    if (name) lines.push(`    <name>${name}</name>`);
-    if (provider) lines.push(`    <provider>${provider}</provider>`);
-    if (serverId) lines.push(`    <server_id>${serverId}</server_id>`);
-    if (desc) lines.push(`    <description>${desc}</description>`);
-    if (real) lines.push(`    <real_world_action>${real}</real_world_action>`);
-    if (required) lines.push(`    <required_params>${required}</required_params>`);
-    if (cooldown) lines.push(`    <cooldown_ms>${cooldown}</cooldown_ms>`);
-    if (timeout) lines.push(`    <timeout_ms>${timeout}</timeout_ms>`);
+    lines.push(`  <tool index="${escapeXmlEntities(index)}">`);
+    if (aiName) lines.push(`    <ai_name>${escapeXmlEntities(aiName)}</ai_name>`);
+    if (name) lines.push(`    <name>${escapeXmlEntities(name)}</name>`);
+    if (provider) lines.push(`    <provider>${escapeXmlEntities(provider)}</provider>`);
+    if (serverId) lines.push(`    <server_id>${escapeXmlEntities(serverId)}</server_id>`);
+    if (desc) lines.push(`    <description>${escapeXmlEntities(desc)}</description>`);
+    if (real) lines.push(`    <real_world_action>${escapeXmlEntities(real)}</real_world_action>`);
+    if (required) lines.push(`    <required_params>${escapeXmlEntities(required)}</required_params>`);
+    if (cooldown) lines.push(`    <cooldown_ms>${escapeXmlEntities(cooldown)}</cooldown_ms>`);
+    if (timeout) lines.push(`    <timeout_ms>${escapeXmlEntities(timeout)}</timeout_ms>`);
     if (responseStyle || responseExample) {
       lines.push('    <meta>');
-      if (responseStyle) lines.push(`      <response_style>${responseStyle}</response_style>`);
-      if (responseExample) lines.push(`      <response_example>${responseExample}</response_example>`);
+      if (responseStyle) lines.push(`      <response_style>${escapeXmlEntities(responseStyle)}</response_style>`);
+      if (responseExample) lines.push(`      <response_example>${escapeXmlEntities(responseExample)}</response_example>`);
       lines.push('    </meta>');
     }
     lines.push('  </tool>');

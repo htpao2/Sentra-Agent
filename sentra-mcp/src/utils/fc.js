@@ -127,13 +127,15 @@ export async function buildFCPolicy({ locale = 'en' } = {}) {
 function safeParseJson(s) {
   if (typeof s !== 'string') return null;
   try {
-    return JSON.parse(s);
+    // Arguments/data blocks are XML text nodes and may contain escaped entities.
+    return JSON.parse(unescapeXmlEntities(s));
   } catch {
     // naive fallback: try best-effort extract from first { to last }
-    const i = s.indexOf('{');
-    const j = s.lastIndexOf('}');
+    const decoded = unescapeXmlEntities(s);
+    const i = decoded.indexOf('{');
+    const j = decoded.lastIndexOf('}');
     if (i >= 0 && j > i) {
-      const t = s.slice(i, j + 1);
+      const t = decoded.slice(i, j + 1);
       try { return JSON.parse(t); } catch {}
     }
   }
@@ -149,6 +151,15 @@ function unescapeXmlEntities(str) {
     .replace(/&gt;/g, '>')
     .replace(/&lt;/g, '<')
     .replace(/&amp;/g, '&');
+}
+
+function escapeXmlEntities(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 // Dedicated XML parser instance for <sentra-tools> blocks.
@@ -490,6 +501,7 @@ function stripCodeFences(s) {
  * @returns {string} XML formatted tool call
  */
 export function formatSentraToolCall(name, args = {}) {
+  const safeName = escapeXmlEntities(String(name ?? ''));
   const params = Object.entries(args || {}).map(([key, value]) => {
     let content;
     if (typeof value === 'object' && value !== null) {
@@ -499,11 +511,13 @@ export function formatSentraToolCall(name, args = {}) {
     } else {
       content = String(value);
     }
-    return `    <parameter name="${key}">${content}</parameter>`;
+    const safeKey = escapeXmlEntities(String(key ?? ''));
+    const safeContent = escapeXmlEntities(String(content ?? ''));
+    return `    <parameter name="${safeKey}">${safeContent}</parameter>`;
   }).join('\n');
   
   return `<sentra-tools>
-  <invoke name="${name}">
+  <invoke name="${safeName}">
 ${params}
   </invoke>
 </sentra-tools>`;
@@ -525,11 +539,18 @@ export function formatSentraResult({ stepIndex, aiName, reason, args, result }) 
   const resultData = result?.data !== undefined ? result.data : result;
   const resultJson = JSON.stringify(resultData);
   const success = result?.success !== false;
+
+  const safeStep = escapeXmlEntities(String(stepIndex ?? 0));
+  const safeTool = escapeXmlEntities(String(aiName ?? ''));
+  const safeSuccess = escapeXmlEntities(String(success));
+  const safeReason = escapeXmlEntities(reasonText);
+  const safeArgs = escapeXmlEntities(argsJson);
+  const safeData = escapeXmlEntities(resultJson);
   
-  return `<sentra-result step="${stepIndex}" tool="${aiName}" success="${success}">
-  <reason>${reasonText}</reason>
-  <arguments>${argsJson}</arguments>
-  <data>${resultJson}</data>
+  return `<sentra-result step="${safeStep}" tool="${safeTool}" success="${safeSuccess}">
+  <reason>${safeReason}</reason>
+  <arguments>${safeArgs}</arguments>
+  <data>${safeData}</data>
 </sentra-result>`;
 }
 
@@ -539,7 +560,7 @@ export function formatSentraResult({ stepIndex, aiName, reason, args, result }) 
  * @returns {string} XML formatted question
  */
 export function formatSentraUserQuestion(question) {
-  return `<sentra-user-question>${question}</sentra-user-question>`;
+  return `<sentra-user-question>${escapeXmlEntities(String(question ?? ''))}</sentra-user-question>`;
 }
 
 /**
@@ -617,7 +638,7 @@ export function parseSentraUserQuestion(text) {
   const mQuestion = withoutFences.match(reQuestion);
   if (!mQuestion) return null;
   
-  return String(mQuestion[1] || '').trim();
+  return unescapeXmlEntities(String(mQuestion[1] || '').trim());
 }
 
 export default { 

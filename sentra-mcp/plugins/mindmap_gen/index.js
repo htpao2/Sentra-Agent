@@ -172,6 +172,76 @@ function validateMarkdown(md) {
   return true;
 }
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当思维导图生成失败时，要说明失败原因，给替代方案（简化主题/分步骤/重试/调整渲染参数），并引导用户补充更清晰的结构化要点。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我现在还没拿到要生成思维导图的主题/描述（prompt 为空或 filename 不合规），所以没法开始生成。你把主题和文件名发我一下，我就继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '补充 prompt：主题 + 范围 + 受众 + 你希望包含的一级/二级要点',
+        '提供 filename（不含目录），例如：mindmap.png',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'MARKDOWN_INVALID') {
+    return {
+      suggested_reply: '我生成到了思维导图的文本草稿，但它的结构不符合可渲染的格式（比如缺少 # 标题层级或混入了代码块），所以这次没法稳定渲染成图。我可以把内容改成更规范的层级结构后再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '让我用“# / ## / ###”层级重排一版要点',
+        '你也可以提供你想要的一级目录列表，我按它展开',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'RENDER_FAILED') {
+    return {
+      suggested_reply: '我已经生成了思维导图内容，但在渲染成图片时失败了（可能是渲染环境/资源加载问题）。我可以先把 Markdown 导图文本发给你，或者我们调整渲染参数后再重试。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '先输出 markdown_content 让你直接使用/保存',
+        '稍后重试渲染，或调整 width/height/waitTime/style',
+        '如果本机没有 puppeteer，也可以改成只生成文本不渲染（render=false）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我在生成/渲染思维导图时卡住了，像是接口或渲染超时了。我可以先给你导图的 Markdown 文本版本，之后再尝试生成图片版。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '先交付 markdown_content（文本导图）',
+        '稍后重试渲染，或降低内容规模（减少分支层级/节点数）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试帮你生成思维导图，但这次工具执行失败了。我可以先按你的主题给一份结构化大纲（文本版），并建议你如何补充要点后再生成图片版。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '补充：你希望包含的一级模块（3-8 个）',
+      '我也可以先给你 2-3 套不同结构的导图大纲供你选',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 async function ensureDirForFile(filePath) {
   const outAbs = toAbs(filePath);
   const dir = path.dirname(outAbs);
@@ -333,47 +403,68 @@ async function renderImage({ markdown, outputFile, width, height, style, waitTim
 
 export default async function handler(args = {}, options = {}) {
   const prompt = String(args.prompt || '').trim();
-  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required' };
+  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required', advice: buildAdvice('INVALID', { tool: 'mindmap_gen' }) };
 
-  const penv = options?.pluginEnv || {};
-  const width = Math.max(400, Number(args.width ?? penv.MINDMAP_WIDTH ?? 2400));
-  const height = Math.max(300, Number(args.height ?? penv.MINDMAP_HEIGHT ?? 1600));
-  const style = ensureStyle(String((args.style ?? penv.MINDMAP_DEFAULT_STYLE ?? 'default')));
-  const waitTime = Math.max(1000, Number(args.waitTime ?? penv.MINDMAP_WAIT_TIME ?? 8000));
-  const baseDir = 'artifacts';
-  const rawName = String(args.filename || '').trim();
-  if (!rawName) return { success: false, code: 'INVALID', error: 'filename is required (filename only, no directories)' };
-  if (/[\\\/]/.test(rawName)) return { success: false, code: 'INVALID', error: 'filename must not contain path separators' };
-  let outputFile = path.join(baseDir, rawName);
-  if (!outputFile.toLowerCase().endsWith('.png')) outputFile += '.png';
-  const render = args.render !== false;
+  try {
+    const penv = options?.pluginEnv || {};
+    const width = Math.max(400, Number(args.width ?? penv.MINDMAP_WIDTH ?? 2400));
+    const height = Math.max(300, Number(args.height ?? penv.MINDMAP_HEIGHT ?? 1600));
+    const style = ensureStyle(String((args.style ?? penv.MINDMAP_DEFAULT_STYLE ?? 'default')));
+    const waitTime = Math.max(1000, Number(args.waitTime ?? penv.MINDMAP_WAIT_TIME ?? 8000));
+    const baseDir = 'artifacts';
+    const rawName = String(args.filename || '').trim();
+    if (!rawName) return { success: false, code: 'INVALID', error: 'filename is required (filename only, no directories)', advice: buildAdvice('INVALID', { tool: 'mindmap_gen' }) };
+    if (/[\\\/]/.test(rawName)) return { success: false, code: 'INVALID', error: 'filename must not contain path separators', advice: buildAdvice('INVALID', { tool: 'mindmap_gen', filename: rawName }) };
+    let outputFile = path.join(baseDir, rawName);
+    if (!outputFile.toLowerCase().endsWith('.png')) outputFile += '.png';
+    const render = args.render !== false;
 
-  // 1) Ask LLM to produce markdown only
-  const messages = [
-    { role: 'system', content: generateSystemPrompt() },
-    { role: 'user', content: `请根据以下描述生成思维导图：${prompt}` }
-  ];
-  const resp = await chatCompletion({
-    messages,
-    temperature: 0.2,
-    apiKey: penv.MINDMAP_API_KEY || process.env.MINDMAP_API_KEY || config.llm.apiKey,
-    baseURL: penv.MINDMAP_BASE_URL || process.env.MINDMAP_BASE_URL || config.llm.baseURL || 'https://yuanplus.chat/v1',
-    model: penv.MINDMAP_MODEL || process.env.MINDMAP_MODEL || config.llm.model,
-    omitMaxTokens: true
-  });
-  const content = resp.choices?.[0]?.message?.content?.trim() || '';
-  if (!validateMarkdown(content)) throw new Error('生成的Markdown内容无效');
+    // 1) Ask LLM to produce markdown only
+    const messages = [
+      { role: 'system', content: generateSystemPrompt() },
+      { role: 'user', content: `请根据以下描述生成思维导图：${prompt}` }
+    ];
+    const resp = await chatCompletion({
+      messages,
+      temperature: 0.2,
+      apiKey: penv.MINDMAP_API_KEY || process.env.MINDMAP_API_KEY || config.llm.apiKey,
+      baseURL: penv.MINDMAP_BASE_URL || process.env.MINDMAP_BASE_URL || config.llm.baseURL || 'https://yuanplus.chat/v1',
+      model: penv.MINDMAP_MODEL || process.env.MINDMAP_MODEL || config.llm.model,
+      omitMaxTokens: true
+    });
+    const content = resp.choices?.[0]?.message?.content?.trim() || '';
+    if (!validateMarkdown(content)) {
+      return { success: false, code: 'MARKDOWN_INVALID', error: '生成的Markdown内容无效', advice: buildAdvice('MARKDOWN_INVALID', { tool: 'mindmap_gen', prompt }), data: { prompt, markdown_content: content } };
+    }
 
   // 2) Optionally render PNG with Puppeteer
   let image = null;
+  let renderError = null;
   if (render) {
     try {
       logger.info?.('mindmap_gen: starting render', { label: 'PLUGIN', outputFile });
       image = await renderImage({ markdown: content, outputFile, width, height, style, waitTime, penv });
       logger.info?.('mindmap_gen: render returned', { label: 'PLUGIN', imagePath: image?.abs });
     } catch (e) {
-      logger.warn?.('mindmap_gen:render_failed', { label: 'PLUGIN', error: String(e?.message || e) });
+      renderError = String(e?.message || e);
+      logger.warn?.('mindmap_gen:render_failed', { label: 'PLUGIN', error: renderError });
     }
+  }
+
+  if (render && !image?.abs) {
+    return {
+      success: false,
+      code: 'RENDER_FAILED',
+      error: renderError || 'failed to render mindmap image',
+      advice: buildAdvice('RENDER_FAILED', { tool: 'mindmap_gen', prompt }),
+      data: {
+        prompt,
+        markdown_content: content,
+        width,
+        height,
+        style,
+      }
+    };
   }
 
   logger.info?.('mindmap_gen: preparing response', { label: 'PLUGIN' });
@@ -392,4 +483,9 @@ export default async function handler(args = {}, options = {}) {
   };
   logger.info?.('mindmap_gen: handler returning success', { label: 'PLUGIN', hasImage: !!image });
   return { success: true, data };
+  } catch (e) {
+    const rawErr = String(e?.message || e);
+    const isTimeout = isTimeoutError(e);
+    return { success: false, code: isTimeout ? 'TIMEOUT' : 'ERR', error: rawErr, advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'mindmap_gen', prompt }) };
+  }
 }

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from './logger.js';
 import { getEnvBool, getEnvInt } from './envHotReloader.js';
+import { escapeXml } from './xmlUtils.js';
 
 const logger = createLogger('SocialContextManager');
 
@@ -13,14 +14,6 @@ function safeInt(v, fallback) {
 function normalizeIdString(v) {
   const s = String(v ?? '').trim();
   return /^\d+$/.test(s) ? s : '';
-}
-
-function escapeXmlText(v) {
-  const s = String(v ?? '');
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 function buildSocialContextXml(payload) {
@@ -39,7 +32,7 @@ function buildSocialContextXml(payload) {
     const name = String(g?.group_name ?? '').trim();
     lines.push('    <group>');
     lines.push(`      <id>${gid}</id>`);
-    if (name) lines.push(`      <name>${escapeXmlText(name)}</name>`);
+    if (name) lines.push(`      <name>${escapeXml(name)}</name>`);
     lines.push('    </group>');
   }
   lines.push('  </groups>');
@@ -51,7 +44,7 @@ function buildSocialContextXml(payload) {
     const nick = String(f?.nickname ?? '').trim();
     lines.push('    <friend>');
     lines.push(`      <id>${uid}</id>`);
-    if (nick) lines.push(`      <name>${escapeXmlText(nick)}</name>`);
+    if (nick) lines.push(`      <name>${escapeXml(nick)}</name>`);
     lines.push('    </friend>');
   }
   lines.push('  </friends>');

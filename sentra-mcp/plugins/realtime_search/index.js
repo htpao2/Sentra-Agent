@@ -2,6 +2,54 @@ import OpenAI from 'openai';
 import logger from '../../src/logger/index.js';
 import { config } from '../../src/config/index.js';
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：即使工具失败，也要给出可执行的替代方案、解释原因，并引导用户补充信息。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我现在还没拿到要搜索的关键词/问题描述，所以没法开始实时搜索。你把想查的内容发我一下，我再继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '请提供 query（搜索关键词/问题）',
+        '可以给出你期望的时间范围/地区/更具体的限定词',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我搜了半天，还是没能在规定时间内拿到结果（可能是网络/接口超时）。我先基于我已有的知识给你一个可行的思路，如果你愿意我也可以稍后再重试搜索。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '建议稍后重试，或换一个更短/更具体的关键词',
+        '如果你有指定网站/来源，可以告诉我（include_domains）',
+        '如果你需要我直接给结论/步骤，我可以不依赖搜索先回答一个版本',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试进行实时搜索，但这次搜索失败了。我可以先按已有知识给你一个可靠的回答框架，并告诉你哪些点需要进一步核对；如果你同意，我也可以换个关键词再搜一次。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '建议更换关键词或缩小问题范围后重试',
+      '如果你能提供更多上下文（时间、地点、对象），我可以给更准确的回答',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 function arrifyCsv(v) {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
@@ -49,7 +97,12 @@ export default async function handler(args = {}, options = {}) {
   const exclude = arrifyCsv(args.exclude_domains);
 
   if (!raw && !q) {
-    return { success: false, code: 'INVALID', error: 'query is required (or provide rawRequest)' };
+    return {
+      success: false,
+      code: 'INVALID',
+      error: 'query is required (or provide rawRequest)',
+      advice: buildAdvice('INVALID', { tool: 'realtime_search' })
+    };
   }
 
   const client = new OpenAI({ apiKey, baseURL });
@@ -76,7 +129,13 @@ export default async function handler(args = {}, options = {}) {
   } catch (e) {
     const msg = String(e?.message || e);
     logger.error('realtime_search: chat.completions.create failed', { label: 'PLUGIN', error: msg });
-    return { success: false, code: 'ERR', error: msg };
+    const isTimeout = isTimeoutError(e);
+    return {
+      success: false,
+      code: isTimeout ? 'TIMEOUT' : 'ERR',
+      error: msg,
+      advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'realtime_search', query: q || null })
+    };
   }
 
   const text = extractTextFromChatCompletion(res);

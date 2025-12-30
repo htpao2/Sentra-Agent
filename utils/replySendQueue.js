@@ -8,6 +8,7 @@ import { getEnvInt, getEnvBool, onEnvReload } from './envHotReloader.js';
 import { judgeReplySimilarity } from './replySimilarityJudge.js';
 import { decideSendFusionBatch } from './replyIntervention.js';
 import { parseSentraResponse } from './protocolUtils.js';
+import { escapeXml } from './xmlUtils.js';
 
 const logger = createLogger('ReplySendQueue');
 
@@ -73,6 +74,14 @@ class ReplySendQueue {
     }
 
     this.isProcessing = true;
+
+    try {
+      this._prunePureReplyCooldown();
+    } catch {}
+
+    try {
+      this._pruneAllRecentLists();
+    } catch {}
 
     while (this.queue.length > 0) {
       const first = this.queue.shift();
@@ -171,17 +180,17 @@ class ReplySendQueue {
             lines.push('<sentra-response>');
             for (let i = 0; i < fusion.textSegments.length; i++) {
               const idx = i + 1;
-              lines.push(`  <text${idx}>${fusion.textSegments[i]}</text${idx}>`);
+              lines.push(`  <text${idx}>${escapeXml(fusion.textSegments[i])}</text${idx}>`);
             }
 
             if (uniqRes.length > 0) {
               lines.push('  <resources>');
               for (const r of uniqRes) {
                 lines.push('    <resource>');
-                lines.push(`      <type>${r.type}</type>`);
-                lines.push(`      <source>${r.source}</source>`);
+                lines.push(`      <type>${escapeXml(r.type)}</type>`);
+                lines.push(`      <source>${escapeXml(r.source)}</source>`);
                 if (r.caption) {
-                  lines.push(`      <caption>${r.caption}</caption>`);
+                  lines.push(`      <caption>${escapeXml(r.caption)}</caption>`);
                 }
                 lines.push('    </resource>');
               }
@@ -192,9 +201,9 @@ class ReplySendQueue {
 
             if (emoji && emoji.source) {
               lines.push('  <emoji>');
-              lines.push(`    <source>${emoji.source}</source>`);
+              lines.push(`    <source>${escapeXml(emoji.source)}</source>`);
               if (emoji.caption) {
-                lines.push(`    <caption>${emoji.caption}</caption>`);
+                lines.push(`    <caption>${escapeXml(emoji.caption)}</caption>`);
               }
               lines.push('  </emoji>');
             }
@@ -331,7 +340,44 @@ class ReplySendQueue {
     }
 
     this.isProcessing = false;
+    this._prunePureReplyCooldown();
+    try {
+      this._pruneAllRecentLists();
+    } catch {}
     logger.debug('队列处理完毕');
+  }
+
+  _prunePureReplyCooldown(now = Date.now()) {
+    const max = getEnvInt('PURE_REPLY_COOLDOWN_MAX_KEYS', 500);
+    for (const [k, until] of this.pureReplyCooldown.entries()) {
+      const u = Number(until);
+      if (!Number.isFinite(u) || u <= now) {
+        this.pureReplyCooldown.delete(k);
+      }
+    }
+
+    if (Number.isFinite(max) && max > 0) {
+      while (this.pureReplyCooldown.size > max) {
+        const firstKey = this.pureReplyCooldown.keys().next().value;
+        if (!firstKey) break;
+        this.pureReplyCooldown.delete(firstKey);
+      }
+    }
+  }
+
+  getStats() {
+    const recentGroups = this.recentSentByGroup.size;
+    let recentItems = 0;
+    for (const list of this.recentSentByGroup.values()) {
+      if (Array.isArray(list)) recentItems += list.length;
+    }
+    return {
+      queueLength: this.queue.length,
+      isProcessing: this.isProcessing,
+      pureReplyCooldownKeys: this.pureReplyCooldown.size,
+      recentGroups,
+      recentItems,
+    };
   }
 
   /**
@@ -499,6 +545,14 @@ class ReplySendQueue {
       this.recentSentByGroup.set(g, filtered);
     } else {
       this.recentSentByGroup.delete(g);
+    }
+  }
+
+  _pruneAllRecentLists(now = Date.now()) {
+    if (!getEnvBool('SEND_RECENT_FUSION_ENABLED', true)) return;
+    const keys = Array.from(this.recentSentByGroup.keys());
+    for (const k of keys) {
+      this._pruneRecentList(k, now);
     }
   }
 
@@ -693,19 +747,19 @@ class ReplySendQueue {
     lines.push('<sentra-response>');
 
     if (targetGroupId && !targetUserId) {
-      lines.push(`  <group_id>${targetGroupId}</group_id>`);
+      lines.push(`  <group_id>${escapeXml(targetGroupId)}</group_id>`);
     } else if (targetUserId && !targetGroupId) {
-      lines.push(`  <user_id>${targetUserId}</user_id>`);
+      lines.push(`  <user_id>${escapeXml(targetUserId)}</user_id>`);
     }
 
     if (filtered.length > 0) {
       lines.push('  <resources>');
       for (const r of filtered) {
         lines.push('    <resource>');
-        lines.push(`      <type>${r.type}</type>`);
-        lines.push(`      <source>${r.source}</source>`);
+        lines.push(`      <type>${escapeXml(r.type)}</type>`);
+        lines.push(`      <source>${escapeXml(r.source)}</source>`);
         if (r.caption) {
-          lines.push(`      <caption>${r.caption}</caption>`);
+          lines.push(`      <caption>${escapeXml(r.caption)}</caption>`);
         }
         lines.push('    </resource>');
       }
@@ -716,9 +770,9 @@ class ReplySendQueue {
 
     if (keepEmoji) {
       lines.push('  <emoji>');
-      lines.push(`    <source>${emoji.source}</source>`);
+      lines.push(`    <source>${escapeXml(emoji.source)}</source>`);
       if (emoji.caption) {
-        lines.push(`    <caption>${emoji.caption}</caption>`);
+        lines.push(`    <caption>${escapeXml(emoji.caption)}</caption>`);
       }
       lines.push('  </emoji>');
     }

@@ -152,6 +152,15 @@ export class TokenCounter {
 
       // 缓存结果
       this.imageSizeCache.set(imagePath, dimensions);
+      try {
+        const maxKeysRaw = Number(getEnv('TOKEN_IMAGE_SIZE_CACHE_MAX_KEYS', '500'));
+        const maxKeys = Number.isFinite(maxKeysRaw) && maxKeysRaw > 0 ? maxKeysRaw : 500;
+        while (this.imageSizeCache.size > maxKeys) {
+          const firstKey = this.imageSizeCache.keys().next().value;
+          if (!firstKey) break;
+          this.imageSizeCache.delete(firstKey);
+        }
+      } catch {}
       console.log(`✅ 成功获取图片尺寸 ${imagePath}: ${dimensions.width}x${dimensions.height}`);
       return dimensions;
 
@@ -161,6 +170,15 @@ export class TokenCounter {
       // 使用智能默认值
       const fallbackDimensions = this.getSmartDefaultDimensions(imagePath);
       this.imageSizeCache.set(imagePath, fallbackDimensions);
+      try {
+        const maxKeysRaw = Number(getEnv('TOKEN_IMAGE_SIZE_CACHE_MAX_KEYS', '500'));
+        const maxKeys = Number.isFinite(maxKeysRaw) && maxKeysRaw > 0 ? maxKeysRaw : 500;
+        while (this.imageSizeCache.size > maxKeys) {
+          const firstKey = this.imageSizeCache.keys().next().value;
+          if (!firstKey) break;
+          this.imageSizeCache.delete(firstKey);
+        }
+      } catch {}
       console.warn(`使用默认尺寸: ${fallbackDimensions.width}x${fallbackDimensions.height}`);
       return fallbackDimensions;
     }

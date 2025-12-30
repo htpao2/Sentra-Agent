@@ -106,7 +106,7 @@ export function extractAllFullXMLTags(text, tagName) {
  */
 export function tag(name, val) {
   const raw = val == null ? '' : String(val);
-  const v = unescapeXml(raw);
+  const v = escapeXml(unescapeXml(raw));
   return `<${name}>${v}</${name}>`;
 }
 
@@ -146,16 +146,16 @@ export function valueToXMLString(value, depth = 0, maxDepth = 100, seen = new Se
   const type = typeof value;
   
   if (type === 'string') {
-    // 将常见 XML/HTML 实体还原为原始字符，再原样写入
-    return unescapeXml(value);
+    // 先反转义（容错历史数据），再进行 XML 转义，保证最终写入 XML 是合法的
+    return escapeXml(unescapeXml(value));
   }
   
   if (type === 'number' || type === 'boolean') {
-    return String(value);
+    return escapeXml(String(value));
   }
   
   if (type === 'function') {
-    return '[Function]';
+    return escapeXml('[Function]');
   }
   
   // 对于复杂对象，检测循环引用
@@ -171,20 +171,21 @@ export function valueToXMLString(value, depth = 0, maxDepth = 100, seen = new Se
     
     // 返回完整JSON表示，不截断
     try {
-      return JSON.stringify(value, (key, val) => {
+      const json = JSON.stringify(value, (key, val) => {
         if (val && typeof val === 'object') {
           if (newSeen.has(val)) return '[Circular]';
           newSeen.add(val);
         }
         return val;
       });
+      return escapeXml(json);
     } catch (e) {
-      return '[Non-Serializable]';
+      return escapeXml('[Non-Serializable]');
     }
   }
   
   // 其他类型直接转字符串
-  return String(value);
+  return escapeXml(String(value));
 }
 
 /**
@@ -252,6 +253,13 @@ export function jsonToXMLLines(data, indent = 1, depth = 0, maxDepth = 100, filt
     const newSeen = new Set(seen);
     newSeen.add(data);
     
+    const normalizeTagName = (rawKey) => {
+      const k = String(rawKey ?? '');
+      // XML tag name: https://www.w3.org/TR/xml/#NT-Name (simplified for common ASCII cases)
+      if (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(k)) return { tag: k, attrName: null };
+      return { tag: 'field', attrName: k };
+    };
+
     keys.forEach(key => {
       // 过滤指定的键
       if (filterKeys.includes(key)) {
@@ -260,35 +268,48 @@ export function jsonToXMLLines(data, indent = 1, depth = 0, maxDepth = 100, filt
       
       // 过滤敏感字段
       if (isSensitiveKey(key)) {
-        lines.push(`${indentStr}<${key}>[REDACTED]</${key}>`);
+        const norm = normalizeTagName(key);
+        if (norm.attrName) {
+          lines.push(`${indentStr}<${norm.tag} name="${escapeXmlAttr(norm.attrName)}">[REDACTED]</${norm.tag}>`);
+        } else {
+          lines.push(`${indentStr}<${norm.tag}>[REDACTED]</${norm.tag}>`);
+        }
         return;
       }
       
       const value = data[key];
       const type = typeof value;
+
+      const norm = normalizeTagName(key);
+      const openTag = norm.attrName
+        ? `${indentStr}<${norm.tag} name="${escapeXmlAttr(norm.attrName)}">`
+        : `${indentStr}<${norm.tag}>`;
+      const closeTag = norm.attrName
+        ? `${indentStr}</${norm.tag}>`
+        : `${indentStr}</${norm.tag}>`;
       
       if (value === null) {
-        lines.push(`${indentStr}<${key}>null</${key}>`);
+        lines.push(`${openTag}null${closeTag}`);
       } else if (value === undefined) {
         // 跳过undefined字段
         return;
       } else if (type === 'string' || type === 'number' || type === 'boolean') {
         const xmlValue = valueToXMLString(value, depth, maxDepth, newSeen);
-        lines.push(`${indentStr}<${key}>${xmlValue}</${key}>`);
+        lines.push(`${openTag}${xmlValue}${closeTag}`);
       } else if (Array.isArray(value)) {
         if (value.length === 0) {
-          lines.push(`${indentStr}<${key}></${key}>`);
+          lines.push(`${openTag}${closeTag}`);
         } else {
-          lines.push(`${indentStr}<${key}>`);
+          lines.push(openTag);
           lines.push(...jsonToXMLLines(value, indent + 1, depth + 1, maxDepth, filterKeys, newSeen));
-          lines.push(`${indentStr}</${key}>`);
+          lines.push(closeTag);
         }
       } else if (type === 'object') {
-        lines.push(`${indentStr}<${key}>`);
+        lines.push(openTag);
         lines.push(...jsonToXMLLines(value, indent + 1, depth + 1, maxDepth, filterKeys, newSeen));
-        lines.push(`${indentStr}</${key}>`);
+        lines.push(closeTag);
       } else {
-        lines.push(`${indentStr}<${key}>${valueToXMLString(value, depth, maxDepth, newSeen)}</${key}>`);
+        lines.push(`${openTag}${valueToXMLString(value, depth, maxDepth, newSeen)}${closeTag}`);
       }
     });
     
@@ -320,7 +341,7 @@ export function appendXmlBlockLines(lines, tagName, content, options = {}) {
   if (Array.isArray(content)) {
     for (const raw of content) {
       if (raw == null) continue;
-      const value = typeof transformLine === 'function' ? transformLine(raw) : String(raw);
+      const value = typeof transformLine === 'function' ? transformLine(raw) : escapeXml(String(raw));
       if (!value) continue;
       lines.push(`${padInner}${value}`);
     }
@@ -329,7 +350,7 @@ export function appendXmlBlockLines(lines, tagName, content, options = {}) {
     for (const rawLine of text.split('\n')) {
       const t = rawLine.trim();
       if (!t) continue;
-      const value = typeof transformLine === 'function' ? transformLine(t) : t;
+      const value = typeof transformLine === 'function' ? transformLine(t) : escapeXml(t);
       if (!value) continue;
       lines.push(`${padInner}${value}`);
     }
@@ -355,7 +376,7 @@ export function appendConstraintsBlock(lines, items, indent = 0) {
   lines.push(`${pad}<constraints>`);
   for (const raw of items) {
     if (!raw) continue;
-    lines.push(`${padItem}<item>${String(raw)}</item>`);
+    lines.push(`${padItem}<item>${escapeXml(String(raw))}</item>`);
   }
   lines.push(`${pad}</constraints>`);
 }

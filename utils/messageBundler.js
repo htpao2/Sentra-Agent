@@ -10,7 +10,9 @@ function getBundleTimingConfig() {
   const rawSim = parseFloat(getEnv('BUNDLE_MIN_SIMILARITY', '0.6'));
   const minSimilarity = Number.isFinite(rawSim) ? rawSim : 0.6;
   const maxLowSimCount = getEnvInt('BUNDLE_MAX_LOW_SIM_COUNT', 2);
-  return { windowMs, maxMs, minSimilarity, maxLowSimCount };
+  const maxMessagesPerWindow = getEnvInt('BUNDLE_MAX_MESSAGES_PER_WINDOW', 30);
+  const pendingMaxMessages = getEnvInt('BUNDLE_PENDING_MAX_MESSAGES', 20);
+  return { windowMs, maxMs, minSimilarity, maxLowSimCount, maxMessagesPerWindow, pendingMaxMessages };
 }
 
 // 向量相似度计算的保护参数：防止 Embedding 请求过慢拖垮整体消息处理
@@ -170,12 +172,17 @@ export async function handleIncomingMessage(senderId, msg, { activeCount }) {
 
   // 若已有聚合窗口，优先考虑追加（即使当前有活跃任务）
   if (bucket && bucket.collecting) {
-    const { minSimilarity, maxLowSimCount } = getBundleTimingConfig();
+    const { minSimilarity, maxLowSimCount, maxMessagesPerWindow } = getBundleTimingConfig();
     const textNew = extractText(msg);
 
     // 若新消息没有有效文本，直接按时间聚合处理
     if (!textNew) {
       bucket.messages.push(msg);
+      if (Number.isFinite(maxMessagesPerWindow) && maxMessagesPerWindow > 0) {
+        while (bucket.messages.length > maxMessagesPerWindow) {
+          bucket.messages.shift();
+        }
+      }
       bucket.lastUpdate = now;
       bucket.lowSimCount = 0;
       logger.debug(`聚合: 文本为空，直接追加 (sender=${key}, count=${bucket.messages.length})`);
@@ -215,6 +222,11 @@ export async function handleIncomingMessage(senderId, msg, { activeCount }) {
 
         // 尚未达到阈值：仍然允许加入当前窗口
         bucket.messages.push(msg);
+        if (Number.isFinite(maxMessagesPerWindow) && maxMessagesPerWindow > 0) {
+          while (bucket.messages.length > maxMessagesPerWindow) {
+            bucket.messages.shift();
+          }
+        }
         bucket.lastUpdate = now;
         logger.info(
           `聚合: 相似度略低但未达分裂阈值，继续归入当前会话 (sender=${key}, sim=${simPercent}, count=${bucket.messages.length})`
@@ -225,6 +237,11 @@ export async function handleIncomingMessage(senderId, msg, { activeCount }) {
       // 相似度足够高：重置违例计数，继续聚合
       bucket.lowSimCount = 0;
       bucket.messages.push(msg);
+      if (Number.isFinite(maxMessagesPerWindow) && maxMessagesPerWindow > 0) {
+        while (bucket.messages.length > maxMessagesPerWindow) {
+          bucket.messages.shift();
+        }
+      }
       bucket.lastUpdate = now;
       logger.info(
         `聚合: 语义相似度良好，追加到当前窗口 (sender=${key}, sim=${simPercent}, count=${bucket.messages.length})`
@@ -234,6 +251,11 @@ export async function handleIncomingMessage(senderId, msg, { activeCount }) {
 
     // 若相似度无法计算（Embedding 未启用或出错），回退为纯时间聚合
     bucket.messages.push(msg);
+    if (Number.isFinite(maxMessagesPerWindow) && maxMessagesPerWindow > 0) {
+      while (bucket.messages.length > maxMessagesPerWindow) {
+        bucket.messages.shift();
+      }
+    }
     bucket.lastUpdate = now;
     logger.debug(`聚合: 相似度不可用，回退为时间聚合 (sender=${key}, count=${bucket.messages.length})`);
     return { action: 'buffered' };
@@ -241,12 +263,18 @@ export async function handleIncomingMessage(senderId, msg, { activeCount }) {
 
   // 无聚合窗口但存在活跃任务：进入延迟聚合队列
   if (activeCount > 0) {
+    const { pendingMaxMessages } = getBundleTimingConfig();
     let arr = pendingMessagesByUser.get(key);
     if (!arr) {
       arr = [];
       pendingMessagesByUser.set(key, arr);
     }
     arr.push(msg);
+    if (Number.isFinite(pendingMaxMessages) && pendingMaxMessages > 0) {
+      while (arr.length > pendingMaxMessages) {
+        arr.shift();
+      }
+    }
     logger.debug(`延迟聚合: 用户${key} 有 ${activeCount} 个活跃任务，消息已加入待处理队列 (当前 ${arr.length} 条)`);
     return { action: 'pending_queued' };
   }
@@ -272,7 +300,13 @@ export function startBundleForQueuedMessage(senderId, msg) {
   const now = Date.now();
   const existing = senderBundles.get(key);
   if (existing && existing.collecting) {
+    const { maxMessagesPerWindow } = getBundleTimingConfig();
     existing.messages.push(msg);
+    if (Number.isFinite(maxMessagesPerWindow) && maxMessagesPerWindow > 0) {
+      while (existing.messages.length > maxMessagesPerWindow) {
+        existing.messages.shift();
+      }
+    }
     existing.lastUpdate = now;
     existing.lowSimCount = 0;
     logger.debug(`队列聚合: 复用现有窗口 (sender=${key}, count=${existing.messages.length})`);
@@ -281,6 +315,24 @@ export function startBundleForQueuedMessage(senderId, msg) {
     senderBundles.set(key, bucket);
     logger.debug(`队列聚合: 启动新的聚合窗口 (sender=${key})`);
   }
+}
+
+export function getMessageBundlerStats() {
+  const senderCount = senderBundles.size;
+  const pendingUsers = pendingMessagesByUser.size;
+  let pendingMessages = 0;
+  let maxPendingPerUser = 0;
+  for (const arr of pendingMessagesByUser.values()) {
+    const n = Array.isArray(arr) ? arr.length : 0;
+    pendingMessages += n;
+    if (n > maxPendingPerUser) maxPendingPerUser = n;
+  }
+  return {
+    senderBundles: senderCount,
+    pendingUsers,
+    pendingMessages,
+    maxPendingPerUser,
+  };
 }
 
 /**

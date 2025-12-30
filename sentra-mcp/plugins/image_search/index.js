@@ -10,6 +10,54 @@ import logger from '../../src/logger/index.js';
 import { abs as toAbs } from '../../src/utils/path.js';
 import { httpRequest } from '../../src/utils/http.js';
 
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当搜索失败时，要解释原因、给替代方案（换关键词/缩小范围/给示例），并主动给用户下一步选择。';
+  if (kind === 'INVALID_PARAM') {
+    return {
+      suggested_reply: '我现在还没拿到完整的搜图参数（比如关键词或数量），所以没法开始搜索。你把要找的图片关键词/风格偏好发我一下，我再继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '补充 query（必填）：例如“赛博朋克城市夜景 4K”',
+        '可调整 count（数量）/quality（清晰度）/provider（来源）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'NO_RESULT') {
+    return {
+      suggested_reply: '我翻了好一阵子，但还是没找到符合条件的图片结果。我们可以换个更具体/更常见的关键词，或者放宽筛选条件，我再帮你搜一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '换关键词：加上风格/场景/主体（如“插画/摄影/3D/白底/透明背景”）',
+        '减少限制：降低质量要求或增加 count',
+        '如果你有参考图/网站链接，也可以发我，我按它的风格去找',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'DOWNLOAD_FAILED') {
+    return {
+      suggested_reply: '我这次确实搜到了候选图片，但下载到本地时全部失败了（可能是网络、站点限制或链接失效）。我可以给你几种处理方案：要么我换个来源/关键词重搜，要么我把可用的直链信息整理出来供你手动打开。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试或换 provider（不同来源）',
+        '降低并发/减少数量后再试',
+        '如果你允许只返回直链（不落地文件），我也可以走“链接模式”',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试帮你搜图，但这次工具执行失败了。我可以先基于我已有知识给你推荐关键词/风格方向，并建议你怎么改搜索条件；如果你愿意，我也可以立刻换个策略再搜一次。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '更换关键词或缩小范围后重试',
+      '指定来源站点（include_domains）或排除站点（exclude_domains）',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 function toMarkdownPath(abs) {
   const label = path.basename(abs);
   const mdPath = String(abs).replace(/\\/g, '/');
@@ -876,7 +924,8 @@ async function singleImageSearchHandler(args = {}, options = {}) {
     return { 
       success: false, 
       code: 'INVALID_PARAM', 
-      error: 'query参数是必需的' 
+      error: 'query参数是必需的',
+      advice: buildAdvice('INVALID_PARAM', { tool: 'image_search' })
     };
   }
   
@@ -884,7 +933,8 @@ async function singleImageSearchHandler(args = {}, options = {}) {
     return { 
       success: false, 
       code: 'INVALID_PARAM', 
-      error: 'count参数必须是大于0的整数' 
+      error: 'count参数必须是大于0的整数',
+      advice: buildAdvice('INVALID_PARAM', { tool: 'image_search', query })
     };
   }
   
@@ -1056,7 +1106,8 @@ async function singleImageSearchHandler(args = {}, options = {}) {
       return { 
         success: false, 
         code: 'NO_RESULT', 
-        error: `未找到与 "${query}" 相关的图片` 
+        error: `未找到与 "${query}" 相关的图片`,
+        advice: buildAdvice('NO_RESULT', { tool: 'image_search', query })
       };
     }
     
@@ -1241,7 +1292,8 @@ async function singleImageSearchHandler(args = {}, options = {}) {
       return { 
         success: false, 
         code: 'DOWNLOAD_FAILED', 
-        error: '所有图片下载失败，请检查网络连接或稍后重试' 
+        error: '所有图片下载失败，请检查网络连接或稍后重试',
+        advice: buildAdvice('DOWNLOAD_FAILED', { tool: 'image_search', query })
       };
     }
     
@@ -1387,7 +1439,8 @@ async function singleImageSearchHandler(args = {}, options = {}) {
       success: false, 
       code: 'INTERNAL_ERROR', 
       error: String(e?.message || e),
-      details: e?.stack 
+      details: e?.stack,
+      advice: buildAdvice('INTERNAL_ERROR', { tool: 'image_search', query })
     };
   }
 }

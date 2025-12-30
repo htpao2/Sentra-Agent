@@ -6,6 +6,86 @@ import OpenAI from 'openai';
 import mime from 'mime-types';
 import { httpRequest } from '../../src/utils/http.js';
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当图片编辑失败时，要说明原因（提示词语言/图片读取/接口/输出格式），给替代方案（改提示词/换图/重试），并引导用户补充更明确的编辑需求。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我需要你提供待编辑的图片列表（images）和编辑指令（prompt）。当前参数不完整，所以我没法开始编辑。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '提供 images：URL 或本地绝对路径数组',
+        '提供 prompt：清晰描述要改什么（如“remove background / add sunglasses / change to watercolor”）',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'PROMPT_NOT_ENGLISH') {
+    return {
+      suggested_reply: '这个图片编辑工具目前要求 prompt 必须是英文（为了让模型更稳定地执行编辑指令）。你把中文需求发我也行，我可以先帮你翻译成合适的英文指令，然后再继续编辑。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '告诉我你的中文需求，我会转换成更准确的英文 prompt',
+        '尽量用短句 + 动词开头：remove/replace/add/change/enhance',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'INVALID_PATH') {
+    return {
+      suggested_reply: '我没法读取你提供的本地图片路径：本插件要求本地图片必须是“绝对路径”。你把完整路径发我一下，我就能继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '使用绝对路径，例如：E:/images/demo.png',
+        '确认文件存在且有读取权限',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'NO_MD_IMAGE') {
+    return {
+      suggested_reply: '我已经尝试执行图片编辑，但模型没有按要求返回可用的 Markdown 图片结果，所以这次没法交付。我们可以把英文编辑指令写得更明确一点，然后重试。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '把 prompt 写得更具体：目标对象 + 动作 + 风格 + 约束（e.g. "keep background unchanged"）',
+        '必要时分两步编辑：先做主要变更，再做风格化',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我在读取/编辑图片时卡住了，像是网络或接口超时了。我们可以稍后重试，或者先用更少的图片/更短的指令跑一版。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试或减少图片数量',
+        '把 prompt 简化为一句明确的英文指令',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试编辑图片，但这次工具执行失败了。我可以先根据你的描述给你一版更稳的英文编辑指令，并建议你如何拆解成可执行的步骤后再试。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '告诉我你最想改的 1-2 个点（先做最关键的）',
+      '如果你有参考图/目标风格，也可以提供',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 function isHttpUrl(s) {
   try { const u = new URL(String(s)); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; }
 }
@@ -110,9 +190,9 @@ async function downloadImagesAndRewrite(md) {
 export default async function handler(args = {}, options = {}) {
   const images = Array.isArray(args.images) ? args.images : [];
   const prompt = String(args.prompt || '').trim();
-  if (!images.length) return { success: false, code: 'INVALID', error: 'images is required (array of urls or absolute paths)' };
-  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required' };
-  if (!isEnglishPrompt(prompt)) return { success: false, code: 'PROMPT_NOT_ENGLISH', error: 'prompt must be English only' };
+  if (!images.length) return { success: false, code: 'INVALID', error: 'images is required (array of urls or absolute paths)', advice: buildAdvice('INVALID', { tool: 'image_vision_edit' }) };
+  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required', advice: buildAdvice('INVALID', { tool: 'image_vision_edit', images_count: images.length }) };
+  if (!isEnglishPrompt(prompt)) return { success: false, code: 'PROMPT_NOT_ENGLISH', error: 'prompt must be English only', advice: buildAdvice('PROMPT_NOT_ENGLISH', { tool: 'image_vision_edit' }) };
 
   const penv = options?.pluginEnv || {};
   const apiKey = penv.VISION_API_KEY || process.env.VISION_API_KEY || config.llm.apiKey;
@@ -129,7 +209,13 @@ export default async function handler(args = {}, options = {}) {
     prepared = await Promise.all(images.map((src) => readImageAsBase64WithMime(src)));
   } catch (e) {
     logger.warn?.('image_vision_edit:load_image_failed', { label: 'PLUGIN', error: String(e?.message || e) });
-    return { success: false, code: 'IMAGE_READ_ERR', error: String(e?.message || e) };
+    const msg = String(e?.message || e);
+    const lower = msg.toLowerCase();
+    const isTimeout = isTimeoutError(e);
+    const invalidPath = lower.includes('must be absolute');
+    const code = isTimeout ? 'TIMEOUT' : (invalidPath ? 'INVALID_PATH' : 'IMAGE_READ_ERR');
+    const adviceKind = isTimeout ? 'TIMEOUT' : (invalidPath ? 'INVALID_PATH' : 'ERR');
+    return { success: false, code, error: msg, advice: buildAdvice(adviceKind, { tool: 'image_vision_edit', images_count: images.length }) };
   }
   for (const it of prepared) items.push({ type: 'image_url', image_url: { url: it.uri } });
 
@@ -145,9 +231,10 @@ export default async function handler(args = {}, options = {}) {
       const rewritten = await downloadImagesAndRewrite(content);
       return { success: true, data: { prompt, content: rewritten } };
     }
-    return { success: false, code: 'NO_MD_IMAGE', error: 'response has no markdown image', data: { prompt, content } };
+    return { success: false, code: 'NO_MD_IMAGE', error: 'response has no markdown image', data: { prompt, content }, advice: buildAdvice('NO_MD_IMAGE', { tool: 'image_vision_edit', prompt }) };
   } catch (e) {
     logger.warn?.('image_vision_edit:request_failed', { label: 'PLUGIN', error: String(e?.message || e) });
-    return { success: false, code: 'ERR', error: String(e?.message || e) };
+    const isTimeout = isTimeoutError(e);
+    return { success: false, code: isTimeout ? 'TIMEOUT' : 'ERR', error: String(e?.message || e), advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'image_vision_edit', prompt }) };
   }
 }

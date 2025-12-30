@@ -6,6 +6,76 @@ import OpenAI from 'openai';
 import mime from 'mime-types';
 import { httpRequest } from '../../src/utils/http.js';
 
+function isTimeoutError(e) {
+  const msg = String(e?.message || e || '').toLowerCase();
+  const code = String(e?.code || '').toUpperCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    code === 'ECONNABORTED' ||
+    msg.includes('timeout') ||
+    msg.includes('timed out')
+  );
+}
+
+function buildAdvice(kind, ctx = {}) {
+  const personaHint = '请结合你当前的预设/人设继续作答：当视频生成失败时，要解释原因、给替代方案（改提示词/降低复杂度/重试/换思路），并引导用户补充更具体需求。';
+  if (kind === 'INVALID') {
+    return {
+      suggested_reply: '我现在还没拿到你想生成的视频内容描述（prompt 为空），所以没法开始生成。你把主题、风格、时长/镜头感等要求发我一下，我就继续。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '补充 prompt：主体 + 场景 + 风格 + 镜头语言（例如“手持跟拍、电影感、慢动作”）',
+        '如果有时长/比例/分镜偏好也可以说明',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'TIMEOUT') {
+    return {
+      suggested_reply: '我刚才在生成/拉取视频时卡住了，像是接口或网络超时了。我可以先基于你的描述给你一版更容易生成的提示词，或者我们稍后重试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试，或把 prompt 简化成更明确的主体/动作/场景',
+        '减少过长的描述，先生成一个“短、清晰”的版本再迭代',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'NO_MD_VIDEO') {
+    return {
+      suggested_reply: '我已经尝试生成视频并要求输出 Markdown 链接，但模型没有按要求给出可用的视频链接，所以这次生成失败了。我可以把提示词改得更强约束，然后再试一次。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '缩短提示词，明确要求“必须输出至少 1 个可下载视频直链的 Markdown 链接”',
+        '如果你愿意，也可以改成“先给分镜脚本，再生成视频”',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  if (kind === 'NO_LOCAL_VIDEO') {
+    return {
+      suggested_reply: '我拿到了视频链接线索，但在把视频下载保存成可用的本地文件时失败了，所以没法稳定交付结果。我们可以重试下载，或者换一种生成方式。\n\n（请结合你当前的预设/人设继续作答）',
+      next_steps: [
+        '稍后重试（可能是链接失效/站点限制/网络波动）',
+        '换更稳定的链接来源或调整关键词',
+        '如果你允许只返回外链（不落地文件），也可以告诉我',
+      ],
+      persona_hint: personaHint,
+      context: ctx,
+    };
+  }
+  return {
+    suggested_reply: '我尝试帮你生成视频，但这次工具执行失败了。我可以先根据你的需求给你一版更稳的提示词/分镜建议，并提供几种替代方案（重试/换风格/拆解需求）。\n\n（请结合你当前的预设/人设继续作答）',
+    next_steps: [
+      '补充：主体、动作、场景、镜头风格、氛围音乐/节奏感（如需要）',
+      '我也可以先给你 3-5 条不同风格的提示词供选择',
+    ],
+    persona_hint: personaHint,
+    context: ctx,
+  };
+}
+
 function isHttpUrl(s) {
   try { const u = new URL(String(s)); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; }
 }
@@ -24,6 +94,25 @@ function findMarkdownLinks(md) {
 function hasMarkdownVideo(md) {
   const links = findMarkdownLinks(md);
   return links.some((l) => isHttpUrl(l.url));
+}
+
+async function collectVerifiedLocalMarkdownVideos(md) {
+  const links = findMarkdownLinks(md);
+  const locals = [];
+  for (const l of links) {
+    const target = String(l?.url || '').trim();
+    if (!target) continue;
+    if (isHttpUrl(target)) continue;
+    if (!path.isAbsolute(target)) continue;
+    try {
+      await fs.access(target);
+      locals.push({ text: l.text || 'video', path: target });
+    } catch {
+      continue;
+    }
+  }
+  if (!locals.length) return '';
+  return locals.map((v) => `[${v.text}](${String(v.path).replace(/\\/g, '/')})`).join('\n');
 }
 
 async function downloadVideosAndRewrite(md, prefix = 'video') {
@@ -81,7 +170,7 @@ async function downloadVideosAndRewrite(md, prefix = 'video') {
 
 export default async function handler(args = {}, options = {}) {
   const prompt = String(args.prompt || '').trim();
-  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required' };
+  if (!prompt) return { success: false, code: 'INVALID', error: 'prompt is required', advice: buildAdvice('INVALID', { tool: 'video_generate' }) };
 
   const penv = options?.pluginEnv || {};
   const apiKey = penv.VIDEO_API_KEY || process.env.VIDEO_API_KEY || config.llm.apiKey;
@@ -109,12 +198,17 @@ export default async function handler(args = {}, options = {}) {
       }
     }
     if (!hasMarkdownVideo(content)) {
-      return { success: false, code: 'NO_MD_VIDEO', error: 'response has no markdown video link', data: { prompt, content } };
+      return { success: false, code: 'NO_MD_VIDEO', error: 'response has no markdown video link', data: { prompt, content }, advice: buildAdvice('NO_MD_VIDEO', { tool: 'video_generate', prompt }) };
     }
     const rewritten = await downloadVideosAndRewrite(content, 'video');
-    return { success: true, data: { prompt, content: rewritten } };
+    const localMarkdown = await collectVerifiedLocalMarkdownVideos(rewritten);
+    if (!localMarkdown) {
+      return { success: false, code: 'NO_LOCAL_VIDEO', error: 'unable to download video to local markdown', data: { prompt, content: rewritten }, advice: buildAdvice('NO_LOCAL_VIDEO', { tool: 'video_generate', prompt }) };
+    }
+    return { success: true, data: { prompt, content: localMarkdown } };
   } catch (e) {
     logger.warn?.('video_generate:request_failed', { label: 'PLUGIN', error: String(e?.message || e) });
-    return { success: false, code: 'ERR', error: String(e?.message || e) };
+    const isTimeout = isTimeoutError(e);
+    return { success: false, code: isTimeout ? 'TIMEOUT' : 'ERR', error: String(e?.message || e), advice: buildAdvice(isTimeout ? 'TIMEOUT' : 'ERR', { tool: 'video_generate', prompt }) };
   }
 }
